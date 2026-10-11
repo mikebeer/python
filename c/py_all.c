@@ -4813,7 +4813,7 @@ static void set_attr(Value o, Str *nm, Value v)
         return;
     case T_MODULE: {
         Module *md = (Module *)o.u.o;
-        if (md->gp) G[module_slot(md, nm, 1)] = v;
+        if (md->gp) { long gs = module_slot(md, nm, 1); G[gs] = v; }
         else amap_set(&md->ns, nm, v);
         return; }
     default: break;
@@ -15503,7 +15503,8 @@ static Module *module_new_py(Str *name)
 }
 static void mod_gset(Module *m, const char *attr, Value v)
 {
-    G[global_index(prefixed(m->gp, intern_c(attr)))] = v;
+    long gi = global_index(prefixed(m->gp, intern_c(attr)));
+    G[gi] = v;
 }
 
 static void load_module_file(Str *full, Value mv, const char *file, const char *src, long len,
@@ -15771,6 +15772,7 @@ static void exec_from(Frame *f, Node *n)
     Str *full = resolve_from_name(n);
     Value m = import_one(full), names;
     int i;
+    long gi;
     if (n->op == 1) {
         long k;
         Module *md = (Module *)m.u.o;
@@ -15787,7 +15789,8 @@ static void exec_from(Frame *f, Node *n)
                     throw_new(cls_AttributeError, "module '%.100s' has no attribute '%.100s'",
                               md->name->s, AS_STR(nm)->s);
             }
-            G[global_index(prefixed(n->pfx, intern_str(AS_STR(nm))))] = v;
+            gi = global_index(prefixed(n->pfx, intern_str(AS_STR(nm))));
+            G[gi] = v;
         }
         vsp -= 2;
         return;
@@ -16015,7 +16018,7 @@ static Value exec_eval(Args *x, int is_eval)
             for (i = 0; i < AS_DICT(dd)->used; i++) {
                 DEnt *e = &AS_DICT(dd)->e[i];
                 if (e->k.t == T_STR)
-                    G[global_index(prefixed(gp, intern_str(AS_STR(e->k))))] = e->v;
+                    { long gi2 = global_index(prefixed(gp, intern_str(AS_STR(e->k)))); G[gi2] = e->v; }
             }
         }
     } else {
@@ -16024,7 +16027,7 @@ static Value exec_eval(Args *x, int is_eval)
             for (i = 0; i < AS_DICT(ld)->used; i++) {
                 DEnt *e = &AS_DICT(ld)->e[i];
                 if (e->k.t == T_STR)
-                    G[global_index(prefixed(gp, intern_str(AS_STR(e->k))))] = e->v;
+                    { long gi2 = global_index(prefixed(gp, intern_str(AS_STR(e->k)))); G[gi2] = e->v; }
             }
         }
     }

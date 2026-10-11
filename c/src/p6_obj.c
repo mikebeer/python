@@ -1162,7 +1162,7 @@ static void set_attr(Value o, Str *nm, Value v)
         return;
     case T_MODULE: {
         Module *md = (Module *)o.u.o;
-        if (md->gp) G[module_slot(md, nm, 1)] = v;
+        if (md->gp) { long gs = module_slot(md, nm, 1); G[gs] = v; }
         else amap_set(&md->ns, nm, v);
         return; }
     default: break;

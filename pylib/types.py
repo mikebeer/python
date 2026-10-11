@@ -16,7 +16,11 @@ BuiltinFunctionType = type(len)
 BuiltinMethodType = BuiltinFunctionType
 MethodType = type(_C().m)
 NoneType = type(None)
-GeneratorType = type((lambda: (yield))())
+def _g():
+    yield
+
+
+GeneratorType = type(_g())
 ModuleType = type(__import__("sys"))
 
 

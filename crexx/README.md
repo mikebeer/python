@@ -68,7 +68,7 @@ results of any type, `__abs__ __round__ __format__ __call__ __enter__ __exit__`,
   copies; integer arrays wrap at 64 bits. `numpy.linalg`, `numpy.random` and many helper functions are pure
   Python in `../pylib/numpy/`.
 - Subclassing built-in types (`class X(dict)`, `tuple`, `list`) and `__new__` are not supported; metaclasses are ignored.
-- `str` is a byte string (`len` and indexing count bytes, `ord('é')` fails); tracebacks always report line 1.
+- `str` holds codepoints (the C interpreter uses byte strings); tracebacks always report line 1.
 - `globals()` / `locals()` are snapshots; `exec` inside a function does not write back to its locals.
 - Sets keep insertion order; `random` does not reproduce CPython's sequence; `time.time` is approximate.
 - Float literals near the end of the range and denormals print with fewer digits.

@@ -8,8 +8,12 @@ A Python 3 subset (see [SPEC.md](SPEC.md)) in two implementations that share one
 | `c/` | strict C89, one amalgamated file | portable (VM/370 target); `make -C c`, `./c/py file.py` |
 | `crexx/` | CREXX Level B | `./crexx/py file.py` (compiles on first use, ~2 min) |
 
-Test: `tests/run_tests.sh ./c/py` or `tests/run_tests.sh ./crexx/py` (both 10/10).
+Test: `tests/run_tests.sh ./c/py` or `tests/run_tests.sh ./crexx/py` (both 21/21).
 
 Speed of the C version against CPython 3.13: fib(27) 0.10 s vs 0.08 s, 3M-iteration loop 0.58 s vs 1.35 s,
 list/dict work 0.40 s vs 0.39 s. The CREXX version is a teaching/scripting tool (fib(22) about 1.9 s).
 Gaps are listed in each subdirectory README.
+
+## Manual
+
+The user manual, [Python-CREXX-Guide.pdf](docs/Python-CREXX-Guide.pdf) (also as .docx), covers both interpreters: installing, the language, built-ins, standard library, NumPy, pandas, SciPy, errors, internals, measured performance, restrictions and the C/CREXX differences.
