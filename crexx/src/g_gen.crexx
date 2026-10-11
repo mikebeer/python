@@ -1,0 +1,527 @@
+/* ---------------------------------------------------------------------
+   Generators: resumable statement machine with an explicit record stack
+   --------------------------------------------------------------------- */
+ydepth: procedure = .int
+  arg n = .int
+  t = .int
+  m = .int
+  d = .int
+  i = .int
+  h = .int
+  t = n_t[n]
+  m = 0
+  if t = N_SEQ then do
+    do i = 0 to n_b[n] - 1
+      if n_y[al[n_a[n] + i]] = 1 then do
+        d = ydepth(al[n_a[n] + i])
+        if d > m then m = d
+      end
+    end
+    return m + 1
+  end
+  if t = N_IF then do
+    if n_y[n_b[n]] = 1 then m = ydepth(n_b[n])
+    if n_c[n] > 0 then do
+      if n_y[n_c[n]] = 1 then do
+        d = ydepth(n_c[n])
+        if d > m then m = d
+      end
+    end
+    return m + 1
+  end
+  if t = N_WHILE then do
+    if n_y[n_b[n]] = 1 then m = ydepth(n_b[n])
+    if n_c[n] > 0 then do
+      if n_y[n_c[n]] = 1 then do
+        d = ydepth(n_c[n])
+        if d > m then m = d
+      end
+    end
+    return m + 1
+  end
+  if t = N_FOR then do
+    if n_y[n_c[n]] = 1 then m = ydepth(n_c[n])
+    if n_d[n] > 0 then do
+      if n_y[n_d[n]] = 1 then do
+        d = ydepth(n_d[n])
+        if d > m then m = d
+      end
+    end
+    return m + 1
+  end
+  if t = N_TRY then do
+    if n_y[n_a[n]] = 1 then m = ydepth(n_a[n])
+    do i = 0 to n_c[n] - 1
+      h = al[n_b[n] + i]
+      if n_y[n_c[h]] = 1 then do
+        d = ydepth(n_c[h])
+        if d > m then m = d
+      end
+    end
+    if n_d[n] > 0 then do
+      if n_y[n_d[n]] = 1 then do
+        d = ydepth(n_d[n])
+        if d > m then m = d
+      end
+    end
+    if n_e[n] > 0 then do
+      if n_y[n_e[n]] = 1 then do
+        d = ydepth(n_e[n])
+        if d > m then m = d
+      end
+    end
+    return m + 1
+  end
+  if t = N_WITH then do
+    if n_y[n_c[n]] = 1 then m = ydepth(n_c[n])
+    return m + 1
+  end
+  return 1
+
+gen_new: procedure = .int
+  arg fd = .int, nf = .int
+  g = .int
+  o = .int
+  cap = .int
+  if fd_gd[fd] = 0 then fd_gd[fd] = ydepth(fd_body[fd]) + 2
+  cap = fd_gd[fd]
+  ngn = ngn + 1
+  g = ngn
+  gn_fd[g] = fd
+  gn_fb[g] = nf
+  gn_st[g] = 0
+  gn_sp[g] = 0
+  gn_rb[g] = ngs
+  gn_val[g] = NONE_OOP
+  ngs = ngs + cap + 1
+  gs_n[ngs] = 0
+  o = newobj(K_GEN)
+  ob_x[o % 2] = g
+  return o
+
+gpush: procedure = .void
+  arg rb = .int, sp = .int, node = .int
+  gs_n[rb + sp] = node
+  gs_s[rb + sp] = 0
+  gs_a[rb + sp] = 0
+  gs_b[rb + sp] = 0
+  return
+
+/* an error / control transfer is pending: find the record that handles it.
+   returns the new stack pointer, or -1 when the generator is finished. */
+gx_unw: procedure = .int
+  arg g = .int, sp = .int
+  rb = .int
+  fb = .int
+  n = .int
+  t = .int
+  st = .int
+  i = .int
+  h = .int
+  exc = .int
+  ty = .int
+  tv = .int
+  matched = .int
+  body = .int
+  sv_cur = .int
+  rb = gn_rb[g]
+  fb = gn_fb[g]
+  do while sp > 0
+    n = gs_n[rb + sp]
+    t = n_t[n]
+    if t = N_WHILE | t = N_FOR then do
+      if unw = U_BRK then do
+        unw = 0
+        return sp - 1
+      end
+      if unw = U_CNT then do
+        unw = 0
+        return sp
+      end
+    end
+    else if t = N_TRY then do
+      st = gs_s[rb + sp]
+      if st = 1 & unw = U_RAISE & n_c[n] > 0 then do
+        exc = unw_v
+        matched = 0
+        do i = 0 to n_c[n] - 1
+          h = al[n_b[n] + i]
+          if n_a[h] = 0 then matched = 1
+          else do
+            unw = 0
+            ty = ev(n_a[h], fb)
+            if ty = 0 then leave
+            tv = exc_matches(exc, ty)
+            if unw > 0 then leave
+            unw = U_RAISE
+            unw_v = exc
+            if tv = 1 then matched = 1
+          end
+          if matched = 1 then do
+            unw = 0
+            if n_b[h] > 0 then call store n_b[h], exc, fb
+            gs_s[rb + sp] = 2
+            body = n_c[h]
+            if n_y[body] = 1 then do
+              sp = sp + 1
+              call gpush rb, sp, body
+              return sp
+            end
+            sv_cur = exc_cur
+            exc_cur = exc
+            call ex body, fb
+            exc_cur = sv_cur
+            if unw = 0 then return sp
+            leave
+          end
+        end
+        if unw = 0 then return sp
+      end
+      st = gs_s[rb + sp]
+      if n_e[n] > 0 & st >= 1 & st <= 3 then do
+        gs_b[rb + sp] = unw
+        gs_a[rb + sp] = unw_v
+        unw = 0
+        gs_s[rb + sp] = 4
+        if n_y[n_e[n]] = 1 then do
+          sp = sp + 1
+          call gpush rb, sp, n_e[n]
+          return sp
+        end
+        call ex n_e[n], fb
+        if unw = 0 then do
+          unw = gs_b[rb + sp]
+          unw_v = gs_a[rb + sp]
+        end
+      end
+    end
+    sp = sp - 1
+  end
+  return -1
+
+gen_resume: procedure = .int
+  arg g = .int, sent = .int
+  rb = .int
+  sp = .int
+  fb = .int
+  n = .int
+  t = .int
+  st = .int
+  ch = .int
+  v = .int
+  y = .int
+  c = .int
+  tv = .int
+  b = .int
+  it = .int
+  fd = .int
+  r = .int
+  h = .int
+  if gn_st[g] = 3 then return 0
+  if gn_st[g] = 2 then return raise_exc(C_VALUEERROR, "generator already executing")
+  rb = gn_rb[g]
+  fb = gn_fb[g]
+  fd = gn_fd[g]
+  if gn_st[g] = 0 then do
+    sp = 1
+    call gpush rb, 1, fd_body[fd]
+  end
+  else sp = gn_sp[g]
+  gn_val[g] = sent
+  gn_st[g] = 2
+  do forever
+    if sp = 0 then do
+      gn_st[g] = 3
+      return 0
+    end
+    n = gs_n[rb + sp]
+    st = gs_s[rb + sp]
+    t = n_t[n]
+    if t = N_SEQ then do
+      if st >= n_b[n] then sp = sp - 1
+      else do
+        ch = al[n_a[n] + st]
+        gs_s[rb + sp] = st + 1
+        if n_y[ch] = 1 then do
+          sp = sp + 1
+          call gpush rb, sp, ch
+        end
+        else do
+          call ex ch, fb
+          if unw > 0 then do
+            sp = gx_unw(g, sp)
+            if sp < 0 then leave
+          end
+        end
+      end
+    end
+    else if t = N_EXPR | t = N_ASSIGN then do
+      if t = N_EXPR then y = n_a[n]
+      else y = n_a[n]
+      if n_t[y] = N_YIELD then do
+        if st = 0 then do
+          if n_a[y] = 0 then v = NONE_OOP
+          else v = ev(n_a[y], fb)
+          if v = 0 then do
+            sp = gx_unw(g, sp)
+            if sp < 0 then leave
+          end
+          else do
+            gs_s[rb + sp] = 1
+            gn_sp[g] = sp
+            gn_st[g] = 1
+            return v
+          end
+        end
+        else do
+          if t = N_ASSIGN then do
+            do b = 0 to n_c[n] - 1
+              call store al[n_b[n] + b], gn_val[g], fb
+            end
+            if unw > 0 then do
+              sp = gx_unw(g, sp)
+              if sp < 0 then leave
+              iterate
+            end
+          end
+          sp = sp - 1
+        end
+      end
+      else if n_t[y] = N_YIELDFROM then do
+        if st = 0 then do
+          v = ev(n_a[y], fb)
+          if v \= 0 then it = iter_new(v)
+          else it = 0
+          if it = 0 then do
+            sp = gx_unw(g, sp)
+            if sp < 0 then leave
+            iterate
+          end
+          gs_a[rb + sp] = it
+          gs_s[rb + sp] = 1
+        end
+        v = iter_next(gs_a[rb + sp])
+        if v = 0 then do
+          if unw > 0 then do
+            sp = gx_unw(g, sp)
+            if sp < 0 then leave
+          end
+          else sp = sp - 1
+        end
+        else do
+          gn_sp[g] = sp
+          gn_st[g] = 1
+          return v
+        end
+      end
+      else sp = sp - 1
+    end
+    else if t = N_IF then do
+      if st = 0 then do
+        c = ev(n_a[n], fb)
+        if c = 0 then tv = -1
+        else tv = truthy(c)
+        if unw > 0 then do
+          sp = gx_unw(g, sp)
+          if sp < 0 then leave
+          iterate
+        end
+        gs_s[rb + sp] = 1
+        if tv = 1 then b = n_b[n]
+        else b = n_c[n]
+        if b > 0 then do
+          if n_y[b] = 1 then do
+            sp = sp + 1
+            call gpush rb, sp, b
+          end
+          else do
+            call ex b, fb
+            if unw > 0 then do
+              sp = gx_unw(g, sp)
+              if sp < 0 then leave
+            end
+          end
+        end
+      end
+      else sp = sp - 1
+    end
+    else if t = N_WHILE then do
+      if st = 0 then do
+        c = ev(n_a[n], fb)
+        if c = 0 then tv = -1
+        else tv = truthy(c)
+        if unw > 0 then do
+          sp = gx_unw(g, sp)
+          if sp < 0 then leave
+          iterate
+        end
+        if tv = 1 then do
+          if n_y[n_b[n]] = 1 then do
+            sp = sp + 1
+            call gpush rb, sp, n_b[n]
+          end
+          else do
+            call ex n_b[n], fb
+            if unw > 0 then do
+              sp = gx_unw(g, sp)
+              if sp < 0 then leave
+            end
+          end
+        end
+        else do
+          gs_s[rb + sp] = 2
+          if n_c[n] > 0 then do
+            if n_y[n_c[n]] = 1 then do
+              sp = sp + 1
+              call gpush rb, sp, n_c[n]
+            end
+            else do
+              call ex n_c[n], fb
+              if unw > 0 then do
+                sp = gx_unw(g, sp)
+                if sp < 0 then leave
+              end
+            end
+          end
+        end
+      end
+      else sp = sp - 1
+    end
+    else if t = N_FOR then do
+      if st = 0 then do
+        v = ev(n_b[n], fb)
+        if v \= 0 then it = iter_new(v)
+        else it = 0
+        if it = 0 then do
+          sp = gx_unw(g, sp)
+          if sp < 0 then leave
+          iterate
+        end
+        gs_a[rb + sp] = it
+        gs_s[rb + sp] = 1
+        st = 1
+      end
+      if st = 1 then do
+        v = iter_next(gs_a[rb + sp])
+        if v = 0 then do
+          if unw > 0 then do
+            sp = gx_unw(g, sp)
+            if sp < 0 then leave
+            iterate
+          end
+          gs_s[rb + sp] = 2
+          if n_d[n] > 0 then do
+            if n_y[n_d[n]] = 1 then do
+              sp = sp + 1
+              call gpush rb, sp, n_d[n]
+            end
+            else do
+              call ex n_d[n], fb
+              if unw > 0 then do
+                sp = gx_unw(g, sp)
+                if sp < 0 then leave
+              end
+            end
+          end
+        end
+        else do
+          call store n_a[n], v, fb
+          if unw > 0 then do
+            sp = gx_unw(g, sp)
+            if sp < 0 then leave
+            iterate
+          end
+          if n_y[n_c[n]] = 1 then do
+            sp = sp + 1
+            call gpush rb, sp, n_c[n]
+          end
+          else do
+            call ex n_c[n], fb
+            if unw > 0 then do
+              sp = gx_unw(g, sp)
+              if sp < 0 then leave
+            end
+          end
+        end
+      end
+      else sp = sp - 1
+    end
+    else if t = N_TRY then do
+      if st = 0 then do
+        gs_s[rb + sp] = 1
+        sp = sp + 1
+        call gpush rb, sp, n_a[n]
+      end
+      else if st = 1 then do
+        /* body finished normally */
+        if n_d[n] > 0 then do
+          gs_s[rb + sp] = 3
+          if n_y[n_d[n]] = 1 then do
+            sp = sp + 1
+            call gpush rb, sp, n_d[n]
+          end
+          else do
+            call ex n_d[n], fb
+            if unw > 0 then do
+              sp = gx_unw(g, sp)
+              if sp < 0 then leave
+            end
+          end
+        end
+        else if n_e[n] > 0 then do
+          gs_s[rb + sp] = 4
+          gs_b[rb + sp] = 0
+          if n_y[n_e[n]] = 1 then do
+            sp = sp + 1
+            call gpush rb, sp, n_e[n]
+          end
+          else do
+            call ex n_e[n], fb
+            if unw > 0 then do
+              sp = gx_unw(g, sp)
+              if sp < 0 then leave
+            end
+          end
+        end
+        else sp = sp - 1
+      end
+      else if st = 2 | st = 3 then do
+        if n_e[n] > 0 then do
+          gs_s[rb + sp] = 4
+          gs_b[rb + sp] = 0
+          if n_y[n_e[n]] = 1 then do
+            sp = sp + 1
+            call gpush rb, sp, n_e[n]
+          end
+          else do
+            call ex n_e[n], fb
+            if unw > 0 then do
+              sp = gx_unw(g, sp)
+              if sp < 0 then leave
+            end
+          end
+        end
+        else sp = sp - 1
+      end
+      else do
+        /* finally finished: re-raise what was pending */
+        b = gs_b[rb + sp]
+        if b > 0 then do
+          unw = b
+          unw_v = gs_a[rb + sp]
+          sp = gx_unw(g, sp - 1)
+          if sp < 0 then leave
+        end
+        else sp = sp - 1
+      end
+    end
+    else do
+      r = raise_exc(C_RUNTIMEERROR, "unsupported statement containing yield")
+      sp = gx_unw(g, sp)
+      if sp < 0 then leave
+    end
+  end
+  /* the generator ended: sp < 0 */
+  gn_st[g] = 3
+  if unw = U_RET then unw = 0
+  return 0

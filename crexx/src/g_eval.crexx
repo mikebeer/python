@@ -1,0 +1,1213 @@
+/* ---------------------------------------------------------------------
+   Evaluator
+   --------------------------------------------------------------------- */
+unbound: procedure = .int
+  arg n = .int
+  if n_t[n] = N_GLOBAL | n_t[n] = N_NAMEERR then return raise_exc(C_NAMEERROR, "name '" || n_s[n] || "' is not defined")
+  return raise_exc(C_UNBOUNDLOCALERROR, "cannot access local variable '" || n_s[n] || "' where it is not associated with a value")
+
+make_func: procedure = .int
+  arg fd = .int, fb = .int
+  f = .int
+  j = .int
+  nr = .int
+  dn = .int
+  v = .int
+  f = newobj(K_FUNC)
+  ob_x[f % 2] = fd
+  ob_y[f % 2] = fb
+  nr = fd_nr[fd]
+  ob_p[f % 2] = alloc_slots(nr + 1)
+  do j = 1 to nr
+    dn = pr_def[fd_ps[fd] + j - 1]
+    if dn > 0 then do
+      v = ev(dn, fb)
+      if v = 0 then return 0
+      sl[ob_p[f % 2] + j - 1] = v
+    end
+  end
+  return f
+
+/* evaluate complex call arguments (star / keyword); returns 1 or 0 */
+eval_cargs: procedure = .int
+  arg n = .int, fb = .int, base = .int
+  i = .int
+  a = .int
+  v = .int
+  t = .int
+  l = .int
+  j = .int
+  e = .int
+  d = .int
+  ea_nk = 0
+  do i = 0 to n_c[n] - 1
+    a = al[n_b[n] + i]
+    t = n_t[a]
+    if t = N_STARRED then do
+      v = ev(n_a[a], fb)
+      if v = 0 then return 0
+      l = iter_list(v)
+      if l = 0 then return 0
+      do j = 0 to ob_n[l % 2] - 1
+        call push sl[ob_p[l % 2] + j]
+      end
+    end
+    else if t \= N_KWARG & t \= N_DSTAR then do
+      v = ev(a, fb)
+      if v = 0 then return 0
+      call push v
+    end
+  end
+  ea_np = asp - base
+  do i = 0 to n_c[n] - 1
+    a = al[n_b[n] + i]
+    t = n_t[a]
+    if t = N_KWARG then do
+      v = ev(n_a[a], fb)
+      if v = 0 then return 0
+      call push v
+      asn[asp] = n_s[a]
+      ea_nk = ea_nk + 1
+    end
+    else if t = N_DSTAR then do
+      v = ev(n_a[a], fb)
+      if v = 0 then return 0
+      if kind_of(v) \= K_DICT then do
+        call raise_exc C_TYPEERROR, "argument after ** must be a mapping, not " || type_name(v)
+        return 0
+      end
+      e = dd_head[ob_x[v % 2]]
+      do while e > 0
+        if de_live[e] = 1 then do
+          if kind_of(de_key[e]) \= K_STR then do
+            call raise_exc C_TYPEERROR, "keywords must be strings"
+            return 0
+          end
+          call push de_val[e]
+          asn[asp] = ob_s[de_key[e] % 2]
+          ea_nk = ea_nk + 1
+        end
+        e = de_next[e]
+      end
+    end
+  end
+  return 1
+
+ev: procedure = .int
+  arg n = .int, fb = .int
+  t = .int
+  v = .int
+  l = .int
+  r = .int
+  op = .int
+  o = .int
+  ix = .int
+  c = .int
+  i = .int
+  cnt = .int
+  st = .int
+  a = .int
+  f = .int
+  d = .int
+  base = .int
+  fnode = .int
+  fv = .int
+  selfo = .int
+  bm = .int
+  nargs = .int
+  ck = .int
+  k = .int
+  s = .string
+  e = .int
+  fd = .int
+  nf = .int
+  it = .int
+  size = .int
+  sub = .int
+  tv = .int
+  s2 = .string
+  t = n_t[n]
+  if t = N_LOCAL then do
+    v = vp[fb + n_a[n]]
+    if v = 0 then return unbound(n)
+    return v
+  end
+  if t = N_CONST then return n_a[n]
+  if t = N_BINOP then do
+    l = ev(n_a[n], fb)
+    if l = 0 then return 0
+    r = ev(n_b[n], fb)
+    if r = 0 then return 0
+    op = n_c[n]
+    if l // 2 \= 0 & r // 2 \= 0 then do
+      if op = O_ADD then do
+        v = l + r - 1
+        if v < BIGOOP & v > 0 - BIGOOP then return v
+      end
+      else if op = O_SUB then do
+        v = l - r + 1
+        if v < BIGOOP & v > 0 - BIGOOP then return v
+      end
+    end
+    return arith(op, l, r)
+  end
+  if t = N_CMP then do
+    l = ev(n_a[n], fb)
+    if l = 0 then return 0
+    r = ev(n_b[n], fb)
+    if r = 0 then return 0
+    op = n_c[n]
+    if l // 2 \= 0 & r // 2 \= 0 then do
+      tv = 0
+      select
+        when op = CMP_EQ then do
+          if l = r then tv = 1
+        end
+        when op = CMP_NE then do
+          if l \= r then tv = 1
+        end
+        when op = CMP_LT then do
+          if l < r then tv = 1
+        end
+        when op = CMP_LE then do
+          if l <= r then tv = 1
+        end
+        when op = CMP_GT then do
+          if l > r then tv = 1
+        end
+        when op = CMP_GE then do
+          if l >= r then tv = 1
+        end
+        otherwise tv = 2
+      end
+      if tv = 1 then return TRUE_OOP
+      if tv = 0 then return FALSE_OOP
+    end
+    return cmp_general(op, l, r)
+  end
+  if t = N_CALL then do
+    fnode = n_a[n]
+    base = asp
+    selfo = 0
+    bm = 0
+    if n_t[fnode] = N_ATTR then do
+      o = ev(n_a[fnode], fb)
+      if o = 0 then return 0
+      fv = getattr_call(o, n_b[fnode], fnode)
+      if fv = 0 then return 0
+      selfo = ev_self
+      bm = ev_bm
+    end
+    else do
+      fv = ev(fnode, fb)
+      if fv = 0 then return 0
+    end
+    if selfo > 0 & bm = 0 then call push selfo
+    ck = 0
+    if n_d[n] = 0 then do
+      nargs = n_c[n]
+      st = n_b[n]
+      do i = 0 to nargs - 1
+        a = ev(al[st + i], fb)
+        if a = 0 then do
+          asp = base
+          return 0
+        end
+        asp = asp + 1
+        ast[asp] = a
+        asn[asp] = ""
+      end
+      cnt = asp - base
+    end
+    else do
+      if eval_cargs(n, fb, base) = 0 then do
+        asp = base
+        return 0
+      end
+      cnt = ea_np
+      ck = ea_nk
+    end
+    if bm = 1 then r = bmeth(selfo, n_b[fnode], base, cnt, ck)
+    else if bm = 2 then r = bmeth_unbound(selfo, n_b[fnode], base, cnt, ck)
+    else r = docall(fv, base, cnt, ck)
+    asp = base
+    return r
+  end
+  if t = N_ATTR then do
+    o = ev(n_a[n], fb)
+    if o = 0 then return 0
+    return getattr_obj(o, n_b[n], n)
+  end
+  if t = N_GLOBAL then do
+    v = vp[gfb + n_a[n]]
+    if v = 0 then return unbound(n)
+    return v
+  end
+  if t = N_SUBSCR then do
+    o = ev(n_a[n], fb)
+    if o = 0 then return 0
+    ix = n_b[n]
+    if n_t[ix] = N_SLICE then do
+      l = NONE_OOP
+      r = NONE_OOP
+      c = NONE_OOP
+      if n_a[ix] > 0 then do
+        l = ev(n_a[ix], fb)
+        if l = 0 then return 0
+      end
+      if n_b[ix] > 0 then do
+        r = ev(n_b[ix], fb)
+        if r = 0 then return 0
+      end
+      if n_c[ix] > 0 then do
+        c = ev(n_c[ix], fb)
+        if c = 0 then return 0
+      end
+      return getslice(o, l, r, c)
+    end
+    ix = ev(ix, fb)
+    if ix = 0 then return 0
+    if ix // 2 \= 0 & o // 2 = 0 then do
+      if ob_k[o % 2] = K_LIST then do
+        i = (ix - 1) % 2
+        if i >= 0 & i < ob_n[o % 2] then return sl[ob_p[o % 2] + i]
+      end
+    end
+    return getitem(o, ix)
+  end
+  if t = N_UP then do
+    f = fb
+    do d = 1 to n_b[n]
+      f = vp[f + 1]
+    end
+    v = vp[f + n_a[n]]
+    if v = 0 then return unbound(n)
+    return v
+  end
+  if t = N_AND then do
+    l = ev(n_a[n], fb)
+    if l = 0 then return 0
+    if l = TRUE_OOP then return ev(n_b[n], fb)
+    if l = FALSE_OOP | l = NONE_OOP | l = 1 then return l
+    if truthy(l) = 0 then do
+      if unw > 0 then return 0
+      return l
+    end
+    return ev(n_b[n], fb)
+  end
+  if t = N_OR then do
+    l = ev(n_a[n], fb)
+    if l = 0 then return 0
+    if l = TRUE_OOP then return l
+    if l = FALSE_OOP | l = NONE_OOP | l = 1 then return ev(n_b[n], fb)
+    if truthy(l) = 1 then return l
+    if unw > 0 then return 0
+    return ev(n_b[n], fb)
+  end
+  if t = N_NOT then do
+    l = ev(n_a[n], fb)
+    if l = 0 then return 0
+    if truthy(l) = 1 then return FALSE_OOP
+    if unw > 0 then return 0
+    return TRUE_OOP
+  end
+  if t = N_IFEXP then do
+    c = ev(n_a[n], fb)
+    if c = 0 then return 0
+    if c = TRUE_OOP then return ev(n_b[n], fb)
+    if c = FALSE_OOP | c = NONE_OOP then return ev(n_c[n], fb)
+    v = truthy(c)
+    if unw > 0 then return 0
+    if v = 1 then return ev(n_b[n], fb)
+    return ev(n_c[n], fb)
+  end
+  if t = N_UNARY then do
+    l = ev(n_a[n], fb)
+    if l = 0 then return 0
+    return unary(n_c[n], l)
+  end
+  if t = N_CHAIN then do
+    cnt = n_b[n]
+    st = n_a[n]
+    l = ev(al[st], fb)
+    if l = 0 then return 0
+    do i = 1 to cnt - 1
+      r = ev(al[st + i], fb)
+      if r = 0 then return 0
+      v = cmp_general(al[st + cnt + i - 1], l, r)
+      if v = 0 then return 0
+      if v = FALSE_OOP then return v
+      if truthy(v) = 0 then return FALSE_OOP
+      l = r
+    end
+    return TRUE_OOP
+  end
+  if t = N_TUPLE | t = N_LIST | t = N_SET then do
+    cnt = n_b[n]
+    st = n_a[n]
+    if t = N_SET then do
+      o = dict_new(K_SET)
+      do i = 0 to cnt - 1
+        a = al[st + i]
+        if n_t[a] = N_STARRED then do
+          v = ev(n_a[a], fb)
+          if v = 0 then return 0
+          l = iter_list(v)
+          if l = 0 then return 0
+          do d = 0 to ob_n[l % 2] - 1
+            call dset o, sl[ob_p[l % 2] + d], TRUE_OOP
+          end
+        end
+        else do
+          v = ev(a, fb)
+          if v = 0 then return 0
+          call dset o, v, TRUE_OOP
+        end
+      end
+      return o
+    end
+    o = mklist(cnt)
+    do i = 0 to cnt - 1
+      a = al[st + i]
+      if n_t[a] = N_STARRED then do
+        v = ev(n_a[a], fb)
+        if v = 0 then return 0
+        l = iter_list(v)
+        if l = 0 then return 0
+        do d = 0 to ob_n[l % 2] - 1
+          call list_append o, sl[ob_p[l % 2] + d]
+        end
+      end
+      else do
+        v = ev(a, fb)
+        if v = 0 then return 0
+        call list_append o, v
+      end
+    end
+    if t = N_TUPLE then return tup_of_list(o)
+    return o
+  end
+  if t = N_DICT then do
+    o = dict_new(K_DICT)
+    st = n_a[n]
+    do i = 0 to n_b[n] - 1
+      a = al[st + 2 * i]
+      if a = 0 then do
+        v = ev(al[st + 2 * i + 1], fb)
+        if v = 0 then return 0
+        if kind_of(v) \= K_DICT then return raise_exc(C_TYPEERROR, "'" || type_name(v) || "' object is not a mapping")
+        call dict_update o, v
+      end
+      else do
+        l = ev(a, fb)
+        if l = 0 then return 0
+        v = ev(al[st + 2 * i + 1], fb)
+        if v = 0 then return 0
+        call dset o, l, v
+      end
+    end
+    return o
+  end
+  if t = N_FSTR then do
+    s = ""
+    st = n_a[n]
+    do i = 0 to n_b[n] - 1
+      a = al[st + i]
+      if n_t[a] = N_CONST then s = s || ob_s[n_a[a] % 2]
+      else do
+        s2 = fmt_node(a, fb)
+        if unw > 0 then return 0
+        s = s || s2
+      end
+    end
+    return mkstr(s)
+  end
+  if t = N_FUNC then return make_func(n_a[n], fb)
+  if t = N_COMP then do
+    fd = n_a[n]
+    it = ev(n_c[n], fb)
+    if it = 0 then return 0
+    size = fd_ns[fd]
+    nf = alloc_frame(size)
+    vp[nf + 1] = fb
+    vp[nf + 2] = it
+    k = n_b[n]
+    if k = 1 then o = mklist(8)
+    else if k = 3 then o = dict_new(K_DICT)
+    else o = dict_new(K_SET)
+    vp[nf + 3] = o
+    call ex fd_body[fd], nf
+    if (fd_fl[fd] // 4) < 2 then call free_frame nf, size
+    if unw > 0 then return 0
+    return o
+  end
+  if t = N_GENEXP then do
+    fd = n_a[n]
+    it = ev(n_c[n], fb)
+    if it = 0 then return 0
+    size = fd_ns[fd]
+    nf = alloc_frame(size)
+    vp[nf + 1] = fb
+    vp[nf + 2] = it
+    return gen_new(fd, nf)
+  end
+  if t = N_SUPER then do
+    f = fb
+    do d = 1 to n_b[n]
+      f = vp[f + 1]
+    end
+    o = newobj(K_SUPER)
+    ob_x[o % 2] = vp[f + 2]
+    ob_y[o % 2] = cd_obj[n_a[n]]
+    return o
+  end
+  if t = N_NAMEERR then return unbound(n)
+  if t = N_STARRED then return raise_exc(C_SYNTAXERROR, "can't use starred expression here")
+  if t = N_YIELD | t = N_YIELDFROM then return raise_exc(C_RUNTIMEERROR, "yield used in an unsupported position")
+  return raise_exc(C_RUNTIMEERROR, "cannot evaluate node " || t)
+
+/* comparison of any two values; returns a bool oop or 0 */
+cmp_general: procedure = .int
+  arg op = .int, l = .int, r = .int
+  v = .int
+  if op = CMP_EQ | op = CMP_NE then do
+    v = py_eq(l, r)
+    if unw > 0 then return 0
+    if op = CMP_NE then v = 1 - v
+    if v = 1 then return TRUE_OOP
+    return FALSE_OOP
+  end
+  if op = CMP_IS then return mkbool(is_same(l, r))
+  if op = CMP_ISNOT then return mkbool(1 - is_same(l, r))
+  if op = CMP_IN | op = CMP_NOTIN then do
+    v = py_contains(r, l)
+    if unw > 0 then return 0
+    if op = CMP_NOTIN then v = 1 - v
+    if v = 1 then return TRUE_OOP
+    return FALSE_OOP
+  end
+  return py_cmp(op, l, r)
+
+is_same: procedure = .int
+  arg l = .int, r = .int
+  if l = r then return 1
+  if l // 2 = 0 & r // 2 = 0 then do
+    if ob_k[l % 2] = K_STR & ob_k[r % 2] = K_STR then do
+      if ob_s[l % 2] == ob_s[r % 2] & length(ob_s[l % 2]) <= 1 then return 1
+    end
+  end
+  return 0
+
+/* format one replacement field of an f-string */
+fmt_node: procedure = .string
+  arg a = .int, fb = .int
+  v = .int
+  sp = .string
+  sv = .int
+  conv = .int
+  v = ev(n_a[a], fb)
+  if v = 0 then return ""
+  conv = n_b[a]
+  if conv = 114 | conv = 97 then v = mkstr(repr_of(v))
+  else if conv = 115 then v = mkstr(str_of(v))
+  if unw > 0 then return ""
+  sp = ""
+  if n_c[a] > 0 then do
+    sv = ev(n_c[a], fb)
+    if sv = 0 then return ""
+    sp = ob_s[sv % 2]
+  end
+  return format_value(v, sp)
+
+/* ---------------------------------------------------------------------
+   Statements
+   --------------------------------------------------------------------- */
+exc_matches: procedure = .int
+  arg exc = .int, ty = .int
+  i = .int
+  k = .int
+  k = kind_of(ty)
+  if k = K_CLASS then return cls_issub(ob_c[exc % 2], ob_x[ty % 2])
+  if k = K_TUPLE then do
+    do i = 0 to ob_n[ty % 2] - 1
+      if exc_matches(exc, sl[ob_p[ty % 2] + i]) = 1 then return 1
+    end
+    return 0
+  end
+  call raise_exc C_TYPEERROR, "catching classes that do not inherit from BaseException is not allowed"
+  return 0
+
+do_raise: procedure = .void
+  arg v = .int
+  e = .int
+  k = .int
+  r = .int
+  k = kind_of(v)
+  if k = K_CLASS then do
+    if cls_issub(ob_x[v % 2], C_BASEEXCEPTION) = 0 then do
+      r = raise_exc(C_TYPEERROR, "exceptions must derive from BaseException")
+      return
+    end
+    e = instantiate(ob_x[v % 2], asp + 0, 0, 0)
+    if e = 0 then return
+    unw = U_RAISE
+    unw_v = e
+    return
+  end
+  if k = K_INST then do
+    if cls_issub(ob_c[v % 2], C_BASEEXCEPTION) = 1 then do
+      unw = U_RAISE
+      unw_v = v
+      return
+    end
+  end
+  r = raise_exc(C_TYPEERROR, "exceptions must derive from BaseException")
+  return
+
+/* the in-place version of a binary operator */
+aug_op_apply: procedure = .int
+  arg op = .int, cur = .int, v = .int
+  k = .int
+  m = .int
+  l = .int
+  k = kind_of(cur)
+  if k = K_LIST & op = O_ADD then do
+    l = iter_list(v)
+    if l = 0 then return 0
+    call list_extend_from cur, l
+    return cur
+  end
+  if k = K_LIST & op = O_MUL & numkind(v) = 1 then do
+    l = seq_repeat(cur, ival(v))
+    ob_p[cur % 2] = ob_p[l % 2]
+    ob_n[cur % 2] = ob_n[l % 2]
+    ob_x[cur % 2] = ob_x[l % 2]
+    return cur
+  end
+  if k = K_SET & kind_of(v) = K_SET & (op = O_BITOR | op = O_BITAND | op = O_SUB | op = O_BITXOR) then do
+    l = set_op(op, cur, v)
+    ob_x[cur % 2] = ob_x[l % 2]
+    return cur
+  end
+  if k = K_DICT & op = O_BITOR & kind_of(v) = K_DICT then do
+    call dict_update cur, v
+    return cur
+  end
+  if k = K_INST then do
+    m = cls_find(ob_c[cur % 2], iopd[op])
+    if m > 0 then return call2(m, cur, v)
+  end
+  return arith(op, cur, v)
+
+ex: procedure = .void
+  arg n = .int, fb = .int
+  t = .int
+  v = .int
+  i = .int
+  c = .int
+  tv = .int
+  r = .int
+  o = .int
+  ix = .int
+  brk = .int
+  st = .int
+  cnt = .int
+  it = .int
+  a = .int
+  b = .int
+  stp = .int
+  tg = .int
+  itn = .int
+  d = .int
+  f = .int
+  hs = .int
+  h = .int
+  ty = .int
+  sv = .int
+  sv2 = .int
+  svc = .int
+  m = .int
+  ex1 = .int
+  ex2 = .int
+  base = .int
+  tt = .int
+  op = .int
+  nm = .string
+  s2 = .string
+  ok_range = .int
+  t = n_t[n]
+  if t = N_EXPR then do
+    v = ev(n_a[n], fb)
+    return
+  end
+  if t = N_ASSIGN then do
+    v = ev(n_a[n], fb)
+    if v = 0 then return
+    st = n_b[n]
+    do i = 0 to n_c[n] - 1
+      tg = al[st + i]
+      tt = n_t[tg]
+      if tt = N_LOCAL then vp[fb + n_a[tg]] = v
+      else do
+        call store tg, v, fb
+        if unw > 0 then return
+      end
+    end
+    return
+  end
+  if t = N_SEQ then do
+    st = n_a[n]
+    do i = 0 to n_b[n] - 1
+      call ex al[st + i], fb
+      if unw > 0 then return
+    end
+    return
+  end
+  if t = N_RETURN then do
+    if n_a[n] = 0 then unw_v = NONE_OOP
+    else do
+      v = ev(n_a[n], fb)
+      if v = 0 then return
+      unw_v = v
+    end
+    unw = U_RET
+    return
+  end
+  if t = N_IF then do
+    c = ev(n_a[n], fb)
+    if c = 0 then return
+    if c = TRUE_OOP then tv = 1
+    else if c = FALSE_OOP | c = NONE_OOP then tv = 0
+    else do
+      tv = truthy(c)
+      if unw > 0 then return
+    end
+    if tv = 1 then call ex n_b[n], fb
+    else if n_c[n] > 0 then call ex n_c[n], fb
+    return
+  end
+  if t = N_FOR then do
+    tg = n_a[n]
+    itn = n_b[n]
+    brk = 0
+    /* fast path: for x in range(...) */
+    if n_t[itn] = N_CALL then do
+      if n_t[n_a[itn]] = N_CONST & n_a[n_a[itn]] = range_oop & n_d[itn] = 0 & n_c[itn] >= 1 & n_c[itn] <= 3 then do
+        cnt = n_c[itn]
+        st = n_b[itn]
+        a = 0
+        b = 0
+        stp = 1
+        ok_range = 1
+        v = ev(al[st], fb)
+        if v = 0 then return
+        if v // 2 = 0 then ok_range = 0
+        if cnt = 1 then b = (v - 1) % 2
+        else do
+          a = (v - 1) % 2
+          v = ev(al[st + 1], fb)
+          if v = 0 then return
+          if v // 2 = 0 then ok_range = 0
+          b = (v - 1) % 2
+          if cnt = 3 then do
+            v = ev(al[st + 2], fb)
+            if v = 0 then return
+            if v // 2 = 0 then ok_range = 0
+            stp = (v - 1) % 2
+            if stp = 0 then do
+              r = raise_exc(C_VALUEERROR, "range() arg 3 must not be zero")
+              return
+            end
+          end
+        end
+        if ok_range = 1 then do
+          i = a
+          do forever
+            if stp > 0 then do
+              if i >= b then leave
+            end
+            else do
+              if i <= b then leave
+            end
+            if n_t[tg] = N_LOCAL then vp[fb + n_a[tg]] = i * 2 + 1
+            else do
+              call store tg, i * 2 + 1, fb
+              if unw > 0 then return
+            end
+            call ex n_c[n], fb
+            if unw > 0 then do
+              if unw = U_BRK then do
+                unw = 0
+                brk = 1
+                leave
+              end
+              else if unw = U_CNT then unw = 0
+              else return
+            end
+            i = i + stp
+          end
+          if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
+          return
+        end
+      end
+    end
+    v = ev(itn, fb)
+    if v = 0 then return
+    it = iter_new(v)
+    if it = 0 then return
+    do forever
+      v = iter_next(it)
+      if v = 0 then do
+        if unw > 0 then return
+        leave
+      end
+      if n_t[tg] = N_LOCAL then vp[fb + n_a[tg]] = v
+      else do
+        call store tg, v, fb
+        if unw > 0 then return
+      end
+      call ex n_c[n], fb
+      if unw > 0 then do
+        if unw = U_BRK then do
+          unw = 0
+          brk = 1
+          leave
+        end
+        else if unw = U_CNT then unw = 0
+        else return
+      end
+    end
+    if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
+    return
+  end
+  if t = N_WHILE then do
+    brk = 0
+    do forever
+      c = ev(n_a[n], fb)
+      if c = 0 then return
+      if c = TRUE_OOP then tv = 1
+      else if c = FALSE_OOP | c = NONE_OOP then tv = 0
+      else do
+        tv = truthy(c)
+        if unw > 0 then return
+      end
+      if tv = 0 then leave
+      call ex n_b[n], fb
+      if unw > 0 then do
+        if unw = U_BRK then do
+          unw = 0
+          brk = 1
+          leave
+        end
+        else if unw = U_CNT then unw = 0
+        else return
+      end
+    end
+    if brk = 0 & n_c[n] > 0 then call ex n_c[n], fb
+    return
+  end
+  if t = N_AUG then do
+    tg = n_a[n]
+    tt = n_t[tg]
+    op = n_c[n]
+    if tt = N_ATTR then do
+      o = ev(n_a[tg], fb)
+      if o = 0 then return
+      c = getattr_obj(o, n_b[tg], tg)
+      if c = 0 then return
+      v = ev(n_b[n], fb)
+      if v = 0 then return
+      r = aug_op_apply(op, c, v)
+      if r = 0 then return
+      call setattr_obj o, n_b[tg], r
+      return
+    end
+    if tt = N_SUBSCR then do
+      o = ev(n_a[tg], fb)
+      if o = 0 then return
+      ix = ev(n_b[tg], fb)
+      if ix = 0 then return
+      c = getitem(o, ix)
+      if c = 0 then return
+      v = ev(n_b[n], fb)
+      if v = 0 then return
+      r = aug_op_apply(op, c, v)
+      if r = 0 then return
+      call setitem o, ix, r
+      return
+    end
+    c = ev(tg, fb)
+    if c = 0 then return
+    v = ev(n_b[n], fb)
+    if v = 0 then return
+    if c // 2 \= 0 & v // 2 \= 0 & op = O_ADD then do
+      r = c + v - 1
+      if r >= BIGOOP | r <= 0 - BIGOOP then r = arith(op, c, v)
+    end
+    else r = aug_op_apply(op, c, v)
+    if r = 0 then return
+    call store tg, r, fb
+    return
+  end
+  if t = N_BREAK then do
+    unw = U_BRK
+    return
+  end
+  if t = N_CONTINUE then do
+    unw = U_CNT
+    return
+  end
+  if t = N_PASS then return
+  if t = N_COMPADD then do
+    if n_c[n] = 3 then do
+      ix = ev(n_b[n], fb)
+      if ix = 0 then return
+    end
+    v = ev(n_a[n], fb)
+    if v = 0 then return
+    if n_c[n] = 1 then call list_append vp[fb + 3], v
+    else if n_c[n] = 3 then call dset vp[fb + 3], ix, v
+    else call dset vp[fb + 3], v, TRUE_OOP
+    return
+  end
+  if t = N_DEF then do
+    f = make_func(n_a[n], fb)
+    if f = 0 then return
+    do i = n_d[n] to 1 by -1
+      v = ev(al[n_c[n] + i - 1], fb)
+      if v = 0 then return
+      f = call1(v, f)
+      if f = 0 then return
+    end
+    call store n_b[n], f, fb
+    return
+  end
+  if t = N_CLASS then do
+    call exec_class n, fb
+    return
+  end
+  if t = N_TRY then do
+    call exec_try n, fb
+    return
+  end
+  if t = N_RAISE then do
+    if n_a[n] = 0 then do
+      if exc_cur = 0 then do
+        r = raise_exc(C_RUNTIMEERROR, "No active exception to reraise")
+        return
+      end
+      unw = U_RAISE
+      unw_v = exc_cur
+      return
+    end
+    v = ev(n_a[n], fb)
+    if v = 0 then return
+    call do_raise v
+    return
+  end
+  if t = N_ASSERT then do
+    c = ev(n_a[n], fb)
+    if c = 0 then return
+    tv = truthy(c)
+    if unw > 0 then return
+    if tv = 1 then return
+    if n_b[n] > 0 then do
+      v = ev(n_b[n], fb)
+      if v = 0 then return
+      unw = U_RAISE
+      o = inst_new(C_ASSERTIONERROR)
+      tt = mktuple(1)
+      sl[ob_p[tt % 2]] = v
+      call inst_set o, M_ARGS, tt
+      unw_v = o
+      return
+    end
+    unw = U_RAISE
+    unw_v = exc_new0(C_ASSERTIONERROR)
+    return
+  end
+  if t = N_WITH then do
+    call exec_with n, fb
+    return
+  end
+  if t = N_DEL then do
+    do i = 0 to n_b[n] - 1
+      call del_target al[n_a[n] + i], fb
+      if unw > 0 then return
+    end
+    return
+  end
+  if t = N_IMPORT then do
+    v = mod_get(n_s[n])
+    if v = 0 then do
+      r = raise_exc(C_MODULENOTFOUNDERROR, "No module named '" || n_s[n] || "'")
+      return
+    end
+    call store n_a[n], v, fb
+    return
+  end
+  if t = N_FROMIMPORT then do
+    v = mod_get(n_s[n])
+    if v = 0 then do
+      r = raise_exc(C_MODULENOTFOUNDERROR, "No module named '" || n_s[n] || "'")
+      return
+    end
+    do i = 0 to n_b[n] - 1
+      nm = ob_s[na_const(al[n_a[n] + 2 * i]) % 2]
+      s2 = modattr[n_s[n] || "." || nm]
+      if s2 == "" then do
+        r = raise_exc(C_IMPORTERROR, "cannot import name '" || nm || "' from '" || n_s[n] || "'")
+        return
+      end
+      call store al[n_a[n] + 2 * i + 1], s2 as .int, fb
+    end
+    return
+  end
+  r = raise_exc(C_RUNTIMEERROR, "cannot execute node " || t)
+  return
+
+na_const: procedure = .int
+  arg n = .int
+  return n_a[n]
+
+del_target: procedure = .void
+  arg tg = .int, fb = .int
+  tt = .int
+  o = .int
+  ix = .int
+  i = .int
+  r = .int
+  tt = n_t[tg]
+  if tt = N_NAME | tt = N_LOCAL | tt = N_GLOBAL | tt = N_UP then do
+    r = ev(tg, fb)
+    if r = 0 then return
+    call store tg, 0, fb
+    return
+  end
+  if tt = N_SUBSCR then do
+    o = ev(n_a[tg], fb)
+    if o = 0 then return
+    if n_t[n_b[tg]] = N_SLICE then ix = eval_slice(n_b[tg], fb)
+    else ix = ev(n_b[tg], fb)
+    if ix = 0 then return
+    call delitem o, ix
+    return
+  end
+  if tt = N_ATTR then do
+    o = ev(n_a[tg], fb)
+    if o = 0 then return
+    if kind_of(o) = K_INST then do
+      if inst_del(o, n_b[tg]) = 0 then r = raise_exc(C_ATTRIBUTEERROR, n_s[tg])
+      return
+    end
+    r = raise_exc(C_ATTRIBUTEERROR, n_s[tg])
+    return
+  end
+  if tt = N_TUPLE | tt = N_LIST then do
+    do i = 0 to n_b[tg] - 1
+      call del_target al[n_a[tg] + i], fb
+      if unw > 0 then return
+    end
+    return
+  end
+  r = raise_exc(C_SYNTAXERROR, "cannot delete")
+  return
+
+exec_class: procedure = .void
+  arg n = .int, fb = .int
+  cd = .int
+  bo = .int
+  bc = .int
+  c = .int
+  nf = .int
+  j = .int
+  v = .int
+  i = .int
+  r = .int
+  cobj = .int
+  size = .int
+  cd = n_a[n]
+  bc = C_OBJECT
+  if n_c[n] > 0 then do
+    bo = ev(n_c[n], fb)
+    if bo = 0 then return
+    if kind_of(bo) \= K_CLASS then do
+      r = raise_exc(C_TYPEERROR, "bases must be types")
+      return
+    end
+    bc = ob_x[bo % 2]
+  end
+  c = define_class(cd_name[cd], bc)
+  if (cl_flags[c] // 2) = 1 then cl_flags[c] = cl_flags[c] - 1
+  cl_dflt[c] = cl_dflt[bc]
+  cobj = cl_obj[c]
+  cd_obj[cd] = cobj
+  size = cd_ns[cd]
+  nf = alloc_frame(size)
+  vp[nf + 1] = fb
+  call ex cd_body[cd], nf
+  if unw > 0 then return
+  do j = cd_cv0[cd] to cd_cv1[cd]
+    if cv_scope[j] = cd_sc[cd] then do
+      v = vp[nf + cv_slot[j]]
+      if v \= 0 then call cls_set c, nameid(cv_name[j]), v
+    end
+  end
+  v = cobj
+  do i = n_e[n] to 1 by -1
+    r = ev(al[n_d[n] + i - 1], fb)
+    if r = 0 then return
+    v = call1(r, v)
+    if v = 0 then return
+  end
+  call store n_b[n], v, fb
+  return
+
+exec_try: procedure = .void
+  arg n = .int, fb = .int
+  hs = .int
+  hc = .int
+  i = .int
+  h = .int
+  ty = .int
+  tv = .int
+  exc = .int
+  matched = .int
+  sv_unw = .int
+  sv_v = .int
+  sv_cur = .int
+  r = .int
+  hs = n_b[n]
+  hc = n_c[n]
+  call ex n_a[n], fb
+  if unw = U_RAISE & hc > 0 then do
+    exc = unw_v
+    matched = 0
+    do i = 0 to hc - 1
+      h = al[hs + i]
+      if n_a[h] = 0 then matched = 1
+      else do
+        unw = 0
+        ty = ev(n_a[h], fb)
+        if ty = 0 then do
+          /* error while evaluating the exception type */
+          leave
+        end
+        tv = exc_matches(exc, ty)
+        if unw > 0 then leave
+        unw = U_RAISE
+        unw_v = exc
+        if tv = 1 then matched = 1
+      end
+      if matched = 1 then do
+        unw = 0
+        if n_b[h] > 0 then call store n_b[h], exc, fb
+        sv_cur = exc_cur
+        exc_cur = exc
+        call ex n_c[h], fb
+        exc_cur = sv_cur
+        if n_b[h] > 0 then do
+          sv_unw = unw
+          sv_v = unw_v
+          unw = 0
+          call store n_b[h], 0, fb
+          unw = sv_unw
+          unw_v = sv_v
+        end
+        leave
+      end
+    end
+  end
+  else if unw = 0 & n_d[n] > 0 then call ex n_d[n], fb
+  if n_e[n] > 0 then do
+    sv_unw = unw
+    sv_v = unw_v
+    unw = 0
+    call ex n_e[n], fb
+    if unw = 0 then do
+      unw = sv_unw
+      unw_v = sv_v
+    end
+  end
+  return
+
+exec_with: procedure = .void
+  arg n = .int, fb = .int
+  ctx = .int
+  en = .int
+  exm = .int
+  r = .int
+  sv_unw = .int
+  sv_v = .int
+  exc = .int
+  k = .int
+  ctx = ev(n_a[n], fb)
+  if ctx = 0 then return
+  k = kind_of(ctx)
+  if k = K_FILE then do
+    if n_b[n] > 0 then call store n_b[n], ctx, fb
+    if unw > 0 then return
+    call ex n_c[n], fb
+    sv_unw = unw
+    sv_v = unw_v
+    unw = 0
+    call file_close ctx
+    unw = sv_unw
+    unw_v = sv_v
+    return
+  end
+  if k \= K_INST then do
+    r = raise_exc(C_ATTRIBUTEERROR, "__enter__")
+    return
+  end
+  en = cls_find(ob_c[ctx % 2], M___ENTER__)
+  exm = cls_find(ob_c[ctx % 2], M___EXIT__)
+  if en = 0 | exm = 0 then do
+    r = raise_exc(C_ATTRIBUTEERROR, "__enter__")
+    return
+  end
+  r = call1(en, ctx)
+  if r = 0 then return
+  if n_b[n] > 0 then do
+    call store n_b[n], r, fb
+    if unw > 0 then return
+  end
+  call ex n_c[n], fb
+  if unw = 0 then do
+    r = call_exit(exm, ctx, NONE_OOP, NONE_OOP)
+    return
+  end
+  if unw = U_RAISE then do
+    exc = unw_v
+    unw = 0
+    r = call_exit(exm, ctx, cl_obj[ob_c[exc % 2]], exc)
+    if unw > 0 then return
+    if r \= 0 then do
+      if truthy(r) = 1 then return
+    end
+    unw = U_RAISE
+    unw_v = exc
+    return
+  end
+  sv_unw = unw
+  sv_v = unw_v
+  unw = 0
+  r = call_exit(exm, ctx, NONE_OOP, NONE_OOP)
+  if unw = 0 then do
+    unw = sv_unw
+    unw_v = sv_v
+  end
+  return
+
+call_exit: procedure = .int
+  arg exm = .int, ctx = .int, a = .int, b = .int
+  base = .int
+  r = .int
+  base = asp
+  call push ctx
+  call push a
+  call push b
+  call push NONE_OOP
+  r = docall(exm, base, 4, 0)
+  asp = base
+  return r

@@ -1,0 +1,965 @@
+/* ---------------------------------------------------------------------
+   Arithmetic, comparison, equality, containment
+   --------------------------------------------------------------------- */
+numkind: procedure = .int
+  arg x = .int
+  k = .int
+  if x // 2 \= 0 then return 1
+  k = ob_k[x % 2]
+  if k = K_BOOL then return 1
+  if k = K_BIG then return 2
+  if k = K_FLOAT then return 3
+  return 0
+
+tofloat: procedure = .float
+  arg x = .int
+  if x // 2 \= 0 then return ((x - 1) % 2) as .float
+  if ob_k[x % 2] = K_BOOL then do
+    if x = TRUE_OOP then return 1.0
+    return 0.0
+  end
+  if ob_k[x % 2] = K_BIG then return parse_flt(ob_s[x % 2])
+  return ob_f[x % 2]
+
+err_binop: procedure = .int
+  arg sym = .string, x = .int, y = .int
+  return raise_exc(C_TYPEERROR, "unsupported operand type(s) for " || sym || ": '" || type_name(x) || "' and '" || type_name(y) || "'")
+
+op_sym: procedure = .string
+  arg op = .int
+  select
+    when op = O_ADD then return "+"
+    when op = O_SUB then return "-"
+    when op = O_MUL then return "*"
+    when op = O_DIV then return "/"
+    when op = O_FLOORDIV then return "//"
+    when op = O_MOD then return "%"
+    when op = O_POW then return "** or pow()"
+    when op = O_LSHIFT then return "<<"
+    when op = O_RSHIFT then return ">>"
+    when op = O_BITAND then return "&"
+    when op = O_BITOR then return "|"
+    when op = O_BITXOR then return "^"
+    when op = O_MATMUL then return "@"
+    otherwise return "?"
+  end
+  return "?"
+
+/* arithmetic on two numbers (kinds: 1 small/bool, 2 big, 3 float) */
+numarith: procedure = .int
+  arg op = .int, x = .int, y = .int
+  kx = .int
+  ky = .int
+  fx = .float
+  fy = .float
+  a = .int
+  b = .int
+  q = .int
+  r = .int
+  sx = .string
+  sy = .string
+  fa = .float
+  fb2 = .float
+  res = .int
+  m = .int
+  kx = numkind(x)
+  ky = numkind(y)
+  if kx = 3 | ky = 3 then do
+    fx = tofloat(x)
+    fy = tofloat(y)
+    select
+      when op = O_ADD then return mkfloat(fx + fy)
+      when op = O_SUB then return mkfloat(fx - fy)
+      when op = O_MUL then return mkfloat(fx * fy)
+      when op = O_DIV then do
+        if fy = 0.0 then do
+          if ky = 3 | kx = 3 then return raise_exc(C_ZERODIVISIONERROR, "float division by zero")
+          return raise_exc(C_ZERODIVISIONERROR, "division by zero")
+        end
+        return mkfloat(fx / fy)
+      end
+      when op = O_FLOORDIV then do
+        if fy = 0.0 then return raise_exc(C_ZERODIVISIONERROR, "float floor division by zero")
+        return mkfloat(rxfloat..floor(fx / fy))
+      end
+      when op = O_MOD then do
+        if fy = 0.0 then return raise_exc(C_ZERODIVISIONERROR, "float modulo by zero")
+        fa = fx - fy * rxfloat..floor(fx / fy)
+        return mkfloat(fa)
+      end
+      when op = O_POW then do
+        if fx = 0.0 & fy < 0.0 then return raise_exc(C_ZERODIVISIONERROR, "0.0 cannot be raised to a negative power")
+        return mkfloat(rxfloat..pow(fx, fy))
+      end
+      otherwise return err_binop(op_sym(op), x, y)
+    end
+  end
+  if kx = 1 & ky = 1 then do
+    a = ival(x)
+    b = ival(y)
+    select
+      when op = O_ADD then return mkint(a + b)
+      when op = O_SUB then return mkint(a - b)
+      when op = O_MUL then do
+        fa = a as .float
+        fb2 = b as .float
+        if rxfloat..fabs(fa * fb2) < 900000000000000000.0 then return mkint(a * b)
+        return big_norm(smul(a as .string, b as .string))
+      end
+      when op = O_DIV then do
+        if b = 0 then return raise_exc(C_ZERODIVISIONERROR, "division by zero")
+        return mkfloat((a as .float) / (b as .float))
+      end
+      when op = O_FLOORDIV | op = O_MOD then do
+        if b = 0 then return raise_exc(C_ZERODIVISIONERROR, "integer division or modulo by zero")
+        q = a % b
+        r = a // b
+        if r \= 0 & ((r < 0) \= (b < 0)) then do
+          q = q - 1
+          r = r + b
+        end
+        if op = O_FLOORDIV then return mkint(q)
+        return mkint(r)
+      end
+      when op = O_POW then return int_pow(x, y)
+      when op = O_LSHIFT then do
+        if b < 0 then return raise_exc(C_VALUEERROR, "negative shift count")
+        if b < 60 & a > -1000000 & a < 1000000 & b < 40 then return mkint(a * (2 ** b))
+        return big_norm(smul(a as .string, big_pow("2", b)))
+      end
+      when op = O_RSHIFT then do
+        if b < 0 then return raise_exc(C_VALUEERROR, "negative shift count")
+        if b > 62 then do
+          if a < 0 then return mkint(-1)
+          return mkint(0)
+        end
+        assembler ishr r, a, b
+        return mkint(r)
+      end
+      when op = O_BITAND then do
+        assembler iand r, a, b
+        return mkint(r)
+      end
+      when op = O_BITOR then do
+        assembler ior r, a, b
+        return mkint(r)
+      end
+      when op = O_BITXOR then do
+        assembler ixor r, a, b
+        return mkint(r)
+      end
+      otherwise return err_binop(op_sym(op), x, y)
+    end
+  end
+  /* at least one big integer */
+  sx = num_str(x)
+  sy = num_str(y)
+  select
+    when op = O_ADD then return big_norm(sadd(sx, sy))
+    when op = O_SUB then return big_norm(ssub(sx, sy))
+    when op = O_MUL then return big_norm(smul(sx, sy))
+    when op = O_DIV then do
+      if sy == "0" then return raise_exc(C_ZERODIVISIONERROR, "division by zero")
+      return mkfloat(tofloat(x) / tofloat(y))
+    end
+    when op = O_FLOORDIV | op = O_MOD then do
+      if sy == "0" then return raise_exc(C_ZERODIVISIONERROR, "integer division or modulo by zero")
+      call sdivmod sx, sy
+      if sr \== "0" & ((left(sx, 1) == "-") \= (left(sy, 1) == "-")) then do
+        if op = O_FLOORDIV then return big_norm(ssub(sq, "1"))
+        return big_norm(sadd(sr, sy))
+      end
+      if op = O_FLOORDIV then return big_norm(sq)
+      return big_norm(sr)
+    end
+    when op = O_POW then return int_pow(x, y)
+    when op = O_LSHIFT then do
+      if ky \= 1 then return raise_exc(C_OVERFLOWERROR, "shift count too large")
+      b = ival(y)
+      if b < 0 then return raise_exc(C_VALUEERROR, "negative shift count")
+      return big_norm(smul(sx, big_pow("2", b)))
+    end
+    when op = O_RSHIFT then do
+      if ky \= 1 then return mkint(0)
+      b = ival(y)
+      call sdivmod sx, big_pow("2", b)
+      if sr \== "0" & left(sx, 1) == "-" then return big_norm(ssub(sq, "1"))
+      return big_norm(sq)
+    end
+    otherwise return raise_exc(C_TYPEERROR, "bitwise operation on huge integers is not supported")
+  end
+  return 0
+
+int_pow: procedure = .int
+  arg x = .int, y = .int
+  a = .int
+  b = .int
+  r = .int
+  est = .float
+  fa = .float
+  if numkind(y) = 2 then do
+    return raise_exc(C_OVERFLOWERROR, "exponent too large")
+  end
+  b = ival(y)
+  if b < 0 then do
+    if numkind(x) = 1 & ival(x) = 0 then return raise_exc(C_ZERODIVISIONERROR, "0.0 cannot be raised to a negative power")
+    return mkfloat(rxfloat..pow(tofloat(x), b as .float))
+  end
+  if numkind(x) = 1 then do
+    a = ival(x)
+    if a = 0 | a = 1 then do
+      if b = 0 then return mkint(1)
+      return mkint(a)
+    end
+    if a = -1 then do
+      if b // 2 = 0 then return mkint(1)
+      return mkint(-1)
+    end
+    fa = a as .float
+    est = (b as .float) * rxfloat..log10(rxfloat..fabs(fa))
+    if est < 17.0 then do
+      r = 1
+      do while b > 0
+        if b // 2 = 1 then r = r * a
+        b = b % 2
+        if b > 0 then a = a * a
+      end
+      return mkint(r)
+    end
+  end
+  return big_norm(big_pow(num_str(x), b))
+
+arith: procedure = .int
+  arg op = .int, x = .int, y = .int
+  kx = .int
+  ky = .int
+  m = .int
+  r = .int
+  o = .int
+  i = .int
+  n = .int
+  s = .string
+  cnt = .int
+  e = .int
+  d = .int
+  p = .int
+  q = .int
+  kx = kind_of(x)
+  ky = kind_of(y)
+  if numkind(x) > 0 & numkind(y) > 0 then return numarith(op, x, y)
+  if kx = K_INST | ky = K_INST then do
+    if kx = K_INST then do
+      m = cls_find(ob_c[x % 2], opd[op])
+      if m > 0 then do
+        r = call2(m, x, y)
+        if r \= NOTIMPL_OOP then return r
+        if unw > 0 then return 0
+      end
+    end
+    if ky = K_INST then do
+      m = cls_find(ob_c[y % 2], ropd[op])
+      if m > 0 then do
+        r = call2(m, y, x)
+        if r \= NOTIMPL_OOP then return r
+        if unw > 0 then return 0
+      end
+    end
+    return err_binop(op_sym(op), x, y)
+  end
+  select
+    when op = O_ADD then do
+      if kx = K_STR & ky = K_STR then return mkstr(ob_s[x % 2] || ob_s[y % 2])
+      if kx = K_LIST & ky = K_LIST then do
+        o = mklist(ob_n[x % 2] + ob_n[y % 2])
+        call list_extend_from o, x
+        call list_extend_from o, y
+        return o
+      end
+      if kx = K_TUPLE & ky = K_TUPLE then do
+        n = ob_n[x % 2] + ob_n[y % 2]
+        o = mktuple(n)
+        do i = 0 to ob_n[x % 2] - 1
+          sl[ob_p[o % 2] + i] = sl[ob_p[x % 2] + i]
+        end
+        do i = 0 to ob_n[y % 2] - 1
+          sl[ob_p[o % 2] + ob_n[x % 2] + i] = sl[ob_p[y % 2] + i]
+        end
+        return o
+      end
+    end
+    when op = O_MUL then do
+      if (kx = K_STR | kx = K_LIST | kx = K_TUPLE) & numkind(y) = 1 then return seq_repeat(x, ival(y))
+      if (ky = K_STR | ky = K_LIST | ky = K_TUPLE) & numkind(x) = 1 then return seq_repeat(y, ival(x))
+    end
+    when op = O_MOD then do
+      if kx = K_STR then return fmt_percent(ob_s[x % 2], y)
+    end
+    when op = O_BITOR | op = O_BITAND | op = O_SUB | op = O_BITXOR then do
+      if kx = K_SET & ky = K_SET then return set_op(op, x, y)
+      if kx = K_DICT & ky = K_DICT & op = O_BITOR then do
+        o = dict_copy(x)
+        call dict_update o, y
+        return o
+      end
+    end
+    otherwise nop
+  end
+  return err_binop(op_sym(op), x, y)
+
+seq_repeat: procedure = .int
+  arg x = .int, n = .int
+  k = .int
+  o = .int
+  i = .int
+  j = .int
+  m = .int
+  k = ob_k[x % 2]
+  if n < 0 then n = 0
+  if k = K_STR then return mkstr(copies(ob_s[x % 2], n))
+  m = ob_n[x % 2]
+  if k = K_LIST then o = mklist(m * n)
+  else o = mktuple(m * n)
+  if k = K_LIST then do
+    do i = 1 to n
+      do j = 0 to m - 1
+        call list_append o, sl[ob_p[x % 2] + j]
+      end
+    end
+  end
+  else do
+    do i = 0 to n - 1
+      do j = 0 to m - 1
+        sl[ob_p[o % 2] + i * m + j] = sl[ob_p[x % 2] + j]
+      end
+    end
+  end
+  return o
+
+list_extend_from: procedure = .void
+  arg o = .int, src = .int
+  i = .int
+  do i = 0 to ob_n[src % 2] - 1
+    call list_append o, sl[ob_p[src % 2] + i]
+  end
+  return
+
+dict_copy: procedure = .int
+  arg x = .int
+  o = .int
+  e = .int
+  d = .int
+  o = dict_new(ob_k[x % 2])
+  d = ob_x[x % 2]
+  e = dd_head[d]
+  do while e > 0
+    if de_live[e] = 1 then call dict_put ob_x[o % 2], de_hk[e], de_key[e], de_val[e]
+    e = de_next[e]
+  end
+  return o
+
+dict_update: procedure = .void
+  arg o = .int, src = .int
+  e = .int
+  e = dd_head[ob_x[src % 2]]
+  do while e > 0
+    if de_live[e] = 1 then call dict_put ob_x[o % 2], de_hk[e], de_key[e], de_val[e]
+    e = de_next[e]
+  end
+  return
+
+set_op: procedure = .int
+  arg op = .int, x = .int, y = .int
+  o = .int
+  e = .int
+  dx = .int
+  dy = .int
+  dx = ob_x[x % 2]
+  dy = ob_x[y % 2]
+  o = dict_new(K_SET)
+  e = dd_head[dx]
+  do while e > 0
+    if de_live[e] = 1 then do
+      if op = O_BITOR then call dict_put ob_x[o % 2], de_hk[e], de_key[e], TRUE_OOP
+      else if op = O_BITAND then do
+        if dict_find(dy, de_hk[e]) > 0 then call dict_put ob_x[o % 2], de_hk[e], de_key[e], TRUE_OOP
+      end
+      else if op = O_SUB then do
+        if dict_find(dy, de_hk[e]) = 0 then call dict_put ob_x[o % 2], de_hk[e], de_key[e], TRUE_OOP
+      end
+      else do
+        if dict_find(dy, de_hk[e]) = 0 then call dict_put ob_x[o % 2], de_hk[e], de_key[e], TRUE_OOP
+      end
+    end
+    e = de_next[e]
+  end
+  if op = O_BITOR | op = O_BITXOR then do
+    e = dd_head[dy]
+    do while e > 0
+      if de_live[e] = 1 then do
+        if op = O_BITOR then call dict_put ob_x[o % 2], de_hk[e], de_key[e], TRUE_OOP
+        else do
+          if dict_find(dx, de_hk[e]) = 0 then call dict_put ob_x[o % 2], de_hk[e], de_key[e], TRUE_OOP
+        end
+      end
+      e = de_next[e]
+    end
+  end
+  return o
+
+unary: procedure = .int
+  arg op = .int, x = .int
+  k = .int
+  a = .int
+  r = .int
+  m = .int
+  k = numkind(x)
+  if op = 1 then do
+    if k = 1 then return mkint(0 - ival(x))
+    if k = 3 then return mkfloat(0.0 - ob_f[x % 2])
+    if k = 2 then return big_norm(sneg(ob_s[x % 2]))
+    if kind_of(x) = K_INST then do
+      m = cls_find(ob_c[x % 2], M___NEG__)
+      if m > 0 then return call1(m, x)
+    end
+    return raise_exc(C_TYPEERROR, "bad operand type for unary -: '" || type_name(x) || "'")
+  end
+  if op = 2 then do
+    if k = 1 then return mkint(ival(x))
+    if k > 0 then return x
+    return raise_exc(C_TYPEERROR, "bad operand type for unary +: '" || type_name(x) || "'")
+  end
+  if k = 1 then do
+    a = ival(x)
+    assembler inot r, a
+    return mkint(r)
+  end
+  if k = 2 then return big_norm(ssub(sneg(ob_s[x % 2]), "1"))
+  return raise_exc(C_TYPEERROR, "bad operand type for unary ~: '" || type_name(x) || "'")
+
+/* numeric comparison: -1, 0, 1 or 2 (unordered) */
+numcmp: procedure = .int
+  arg x = .int, y = .int
+  kx = .int
+  ky = .int
+  fx = .float
+  fy = .float
+  a = .int
+  b = .int
+  kx = numkind(x)
+  ky = numkind(y)
+  if kx = 3 | ky = 3 then do
+    fx = tofloat(x)
+    fy = tofloat(y)
+    if fx \= fx | fy \= fy then return 2
+    if fx < fy then return -1
+    if fx > fy then return 1
+    return 0
+  end
+  if kx = 1 & ky = 1 then do
+    a = ival(x)
+    b = ival(y)
+    if a < b then return -1
+    if a > b then return 1
+    return 0
+  end
+  return scmp(num_str(x), num_str(y))
+
+/* equality of two values; returns 0/1 (errors set unw) */
+py_eq: procedure = .int
+  arg x = .int, y = .int
+  kx = .int
+  ky = .int
+  i = .int
+  n = .int
+  e = .int
+  m = .int
+  r = .int
+  d = .int
+  if x = y then do
+    if x // 2 = 0 then do
+      if ob_k[x % 2] = K_FLOAT then do
+        if ob_f[x % 2] \= ob_f[x % 2] then return 0
+      end
+    end
+    return 1
+  end
+  if x // 2 \= 0 & y // 2 \= 0 then return 0
+  kx = kind_of(x)
+  ky = kind_of(y)
+  if numkind(x) > 0 & numkind(y) > 0 then do
+    if numcmp(x, y) = 0 then return 1
+    return 0
+  end
+  if kx = K_STR & ky = K_STR then do
+    if ob_s[x % 2] == ob_s[y % 2] then return 1
+    return 0
+  end
+  if kx = K_INST then do
+    m = cls_find(ob_c[x % 2], M___EQ__)
+    if m > 0 then do
+      r = call2(m, x, y)
+      if r = 0 then return 0
+      if r = NOTIMPL_OOP then return 0
+      return truthy(r)
+    end
+    return 0
+  end
+  if ky = K_INST then do
+    m = cls_find(ob_c[y % 2], M___EQ__)
+    if m > 0 then do
+      r = call2(m, y, x)
+      if r = 0 then return 0
+      if r = NOTIMPL_OOP then return 0
+      return truthy(r)
+    end
+    return 0
+  end
+  if (kx = K_LIST & ky = K_LIST) | (kx = K_TUPLE & ky = K_TUPLE) then do
+    n = ob_n[x % 2]
+    if n \= ob_n[y % 2] then return 0
+    do i = 0 to n - 1
+      if py_eq(sl[ob_p[x % 2] + i], sl[ob_p[y % 2] + i]) = 0 then return 0
+      if unw > 0 then return 0
+    end
+    return 1
+  end
+  if kx = K_DICT & ky = K_DICT then do
+    if dd_n[ob_x[x % 2]] \= dd_n[ob_x[y % 2]] then return 0
+    e = dd_head[ob_x[x % 2]]
+    do while e > 0
+      if de_live[e] = 1 then do
+        d = dict_find(ob_x[y % 2], de_hk[e])
+        if d = 0 then return 0
+        if py_eq(de_val[e], de_val[d]) = 0 then return 0
+      end
+      e = de_next[e]
+    end
+    return 1
+  end
+  if kx = K_SET & ky = K_SET then do
+    if dd_n[ob_x[x % 2]] \= dd_n[ob_x[y % 2]] then return 0
+    e = dd_head[ob_x[x % 2]]
+    do while e > 0
+      if de_live[e] = 1 then do
+        if dict_find(ob_x[y % 2], de_hk[e]) = 0 then return 0
+      end
+      e = de_next[e]
+    end
+    return 1
+  end
+  if kx = K_RANGE & ky = K_RANGE then do
+    if range_len(x) = 0 & range_len(y) = 0 then return 1
+    if range_len(x) = range_len(y) & ob_n[x % 2] = ob_n[y % 2] & ob_y[x % 2] = ob_y[y % 2] then return 1
+    return 0
+  end
+  if kx = K_BMETH & ky = K_BMETH then do
+    if ob_x[x % 2] = ob_x[y % 2] & ob_y[x % 2] = ob_y[y % 2] then return 1
+  end
+  return 0
+
+cmp_res: procedure = .int
+  arg op = .int, c = .int
+  if op = CMP_LT then do
+    if c < 0 then return TRUE_OOP
+    return FALSE_OOP
+  end
+  if op = CMP_LE then do
+    if c <= 0 then return TRUE_OOP
+    return FALSE_OOP
+  end
+  if op = CMP_GT then do
+    if c > 0 then return TRUE_OOP
+    return FALSE_OOP
+  end
+  if c >= 0 then return TRUE_OOP
+  return FALSE_OOP
+
+/* rich comparison; op is CMP_LT .. CMP_GE; result is a bool oop or 0 on error */
+py_cmp: procedure = .int
+  arg op = .int, x = .int, y = .int
+  kx = .int
+  ky = .int
+  c = .int
+  m = .int
+  r = .int
+  nid = .int
+  rnid = .int
+  i = .int
+  n = .int
+  n2 = .int
+  eq = .int
+  a = .int
+  b = .int
+  s1 = .string
+  s2 = .string
+  kx = numkind(x)
+  ky = numkind(y)
+  if kx > 0 & ky > 0 then do
+    c = numcmp(x, y)
+    if c = 2 then return FALSE_OOP
+    return cmp_res(op, c)
+  end
+  kx = kind_of(x)
+  ky = kind_of(y)
+  if kx = K_STR & ky = K_STR then do
+    s1 = ob_s[x % 2]
+    s2 = ob_s[y % 2]
+    c = 1
+    if s1 << s2 then c = -1
+    else if s1 == s2 then c = 0
+    return cmp_res(op, c)
+  end
+  if (kx = K_LIST & ky = K_LIST) | (kx = K_TUPLE & ky = K_TUPLE) then do
+    n = ob_n[x % 2]
+    n2 = ob_n[y % 2]
+    i = 0
+    do while i < n & i < n2
+      a = sl[ob_p[x % 2] + i]
+      b = sl[ob_p[y % 2] + i]
+      eq = py_eq(a, b)
+      if unw > 0 then return 0
+      if eq = 0 then do
+        /* the first differing element decides */
+        return py_cmp(op, a, b)
+      end
+      i = i + 1
+    end
+    c = 1
+    if n < n2 then c = -1
+    else if n = n2 then c = 0
+    return cmp_res(op, c)
+  end
+  if kx = K_SET & ky = K_SET then do
+    return set_cmp(op, x, y)
+  end
+  if kx = K_INST | ky = K_INST then do
+    nid = cmpd[op]
+    rnid = cmpr[op]
+    if kx = K_INST then do
+      m = cls_find(ob_c[x % 2], nid)
+      if m > 0 then do
+        r = call2(m, x, y)
+        if r \= NOTIMPL_OOP then return r
+        if unw > 0 then return 0
+      end
+    end
+    if ky = K_INST then do
+      m = cls_find(ob_c[y % 2], rnid)
+      if m > 0 then do
+        r = call2(m, y, x)
+        if r \= NOTIMPL_OOP then return r
+        if unw > 0 then return 0
+      end
+    end
+  end
+  s1 = "<"
+  if op = CMP_LE then s1 = "<="
+  if op = CMP_GT then s1 = ">"
+  if op = CMP_GE then s1 = ">="
+  return raise_exc(C_TYPEERROR, "'" || s1 || "' not supported between instances of '" || type_name(x) || "' and '" || type_name(y) || "'")
+
+set_cmp: procedure = .int
+  arg op = .int, x = .int, y = .int
+  sub = .int
+  e = .int
+  dx = .int
+  dy = .int
+  dx = ob_x[x % 2]
+  dy = ob_x[y % 2]
+  /* op LE: x subset of y ; GE: y subset of x ; LT/GT proper */
+  if op = CMP_LE | op = CMP_LT then do
+    e = dd_head[dx]
+    do while e > 0
+      if de_live[e] = 1 then do
+        if dict_find(dy, de_hk[e]) = 0 then return FALSE_OOP
+      end
+      e = de_next[e]
+    end
+    if op = CMP_LT & dd_n[dx] = dd_n[dy] then return FALSE_OOP
+    return TRUE_OOP
+  end
+  e = dd_head[dy]
+  do while e > 0
+    if de_live[e] = 1 then do
+      if dict_find(dx, de_hk[e]) = 0 then return FALSE_OOP
+    end
+    e = de_next[e]
+  end
+  if op = CMP_GT & dd_n[dx] = dd_n[dy] then return FALSE_OOP
+  return TRUE_OOP
+
+/* x in container: 0/1, errors set unw */
+py_contains: procedure = .int
+  arg c = .int, x = .int
+  k = .int
+  i = .int
+  n = .int
+  e = .int
+  m = .int
+  r = .int
+  it = .int
+  v = .int
+  a = .int
+  b = .int
+  st = .int
+  k = kind_of(c)
+  select
+    when k = K_STR then do
+      if kind_of(x) \= K_STR then do
+        call raise_exc C_TYPEERROR, "'in <string>' requires string as left operand, not " || type_name(x)
+        return 0
+      end
+      if pos(ob_s[x % 2], ob_s[c % 2]) > 0 | ob_s[x % 2] == "" then return 1
+      return 0
+    end
+    when k = K_LIST | k = K_TUPLE then do
+      n = ob_n[c % 2]
+      do i = 0 to n - 1
+        if py_eq(sl[ob_p[c % 2] + i], x) = 1 then return 1
+        if unw > 0 then return 0
+      end
+      return 0
+    end
+    when k = K_DICT | k = K_SET then do
+      if dict_find(ob_x[c % 2], hashkey(x)) > 0 then return 1
+      return 0
+    end
+    when k = K_RANGE then do
+      if numkind(x) \= 1 then return 0
+      v = ival(x)
+      a = ob_n[c % 2]
+      b = ob_x[c % 2]
+      st = ob_y[c % 2]
+      if st > 0 then do
+        if v < a | v >= b then return 0
+      end
+      else do
+        if v > a | v <= b then return 0
+      end
+      if (v - a) // st = 0 then return 1
+      return 0
+    end
+    when k = K_INST then do
+      m = cls_find(ob_c[c % 2], M___CONTAINS__)
+      if m > 0 then do
+        r = call2(m, c, x)
+        if r = 0 then return 0
+        return truthy(r)
+      end
+      it = iter_new(c)
+      if it = 0 then return 0
+      do forever
+        v = iter_next(it)
+        if v = 0 then leave
+        if py_eq(v, x) = 1 then return 1
+        if unw > 0 then return 0
+      end
+      return 0
+    end
+    when k = K_GEN | k = K_ITER then do
+      do forever
+        v = iter_next(c)
+        if v = 0 then leave
+        if py_eq(v, x) = 1 then return 1
+      end
+      return 0
+    end
+    otherwise do
+      call raise_exc C_TYPEERROR, "argument of type '" || type_name(c) || "' is not iterable"
+      return 0
+    end
+  end
+  return 0
+
+/* ---------------------------------------------------------------------
+   repr and str
+   --------------------------------------------------------------------- */
+repr_str: procedure = .string
+  arg s = .string
+  q = .string
+  r = .string
+  i = .int
+  n = .int
+  c = .string
+  v = .int
+  q = "'"
+  if pos("'", s) > 0 & pos('"', s) = 0 then q = '"'
+  r = q
+  n = length(s)
+  do i = 1 to n
+    c = substr(s, i, 1)
+    if c == q | c == "\" then r = r || "\" || c
+    else if c == '0a'x then r = r || "\n"
+    else if c == '09'x then r = r || "\t"
+    else if c == '0d'x then r = r || "\r"
+    else do
+      v = c2d(c)
+      if v < 32 | v = 127 then r = r || "\x" || right(d2x(v), 2, "0")
+      else r = r || c
+    end
+  end
+  return r || q
+
+repr_of: procedure = .string
+  arg x = .int
+  k = .int
+  s = .string
+  i = .int
+  n = .int
+  m = .int
+  r = .int
+  e = .int
+  d = .int
+  first = .int
+  c = .int
+  if x // 2 \= 0 then return ((x - 1) % 2) as .string
+  k = ob_k[x % 2]
+  select
+    when k = K_STR then return repr_str(ob_s[x % 2])
+    when k = K_FLOAT then return float_repr(ob_f[x % 2])
+    when k = K_BIG then return ob_s[x % 2]
+    when k = K_BOOL then do
+      if x = TRUE_OOP then return "True"
+      return "False"
+    end
+    when k = K_NONE then return "None"
+    when k = K_LIST | k = K_TUPLE then do
+      n = ob_n[x % 2]
+      if depth_guard > 200 then return "..."
+      depth_guard = depth_guard + 1
+      if k = K_LIST then s = "["
+      else s = "("
+      do i = 0 to n - 1
+        if i > 0 then s = s || ", "
+        s = s || repr_of(sl[ob_p[x % 2] + i])
+        if unw > 0 then do
+          depth_guard = depth_guard - 1
+          return ""
+        end
+      end
+      depth_guard = depth_guard - 1
+      if k = K_TUPLE & n = 1 then s = s || ","
+      if k = K_LIST then return s || "]"
+      return s || ")"
+    end
+    when k = K_DICT then do
+      if depth_guard > 200 then return "{...}"
+      depth_guard = depth_guard + 1
+      s = "{"
+      first = 1
+      e = dd_head[ob_x[x % 2]]
+      do while e > 0
+        if de_live[e] = 1 then do
+          if first = 0 then s = s || ", "
+          first = 0
+          s = s || repr_of(de_key[e]) || ": " || repr_of(de_val[e])
+          if unw > 0 then do
+            depth_guard = depth_guard - 1
+            return ""
+          end
+        end
+        e = de_next[e]
+      end
+      depth_guard = depth_guard - 1
+      return s || "}"
+    end
+    when k = K_SET then do
+      if dd_n[ob_x[x % 2]] = 0 then return "set()"
+      s = "{"
+      first = 1
+      e = dd_head[ob_x[x % 2]]
+      do while e > 0
+        if de_live[e] = 1 then do
+          if first = 0 then s = s || ", "
+          first = 0
+          s = s || repr_of(de_key[e])
+        end
+        e = de_next[e]
+      end
+      return s || "}"
+    end
+    when k = K_RANGE then do
+      s = "range(" || ob_n[x % 2] || ", " || ob_x[x % 2]
+      if ob_y[x % 2] \= 1 then s = s || ", " || ob_y[x % 2]
+      return s || ")"
+    end
+    when k = K_FUNC then return "<function " || fd_name[ob_x[x % 2]] || " at 0x" || right(d2x(x * 8), 12, "0") || ">"
+    when k = K_BUILTIN then return "<built-in function " || bi_name[ob_x[x % 2]] || ">"
+    when k = K_CLASS then do
+      c = ob_x[x % 2]
+      if cl_flags[c] // 2 = 1 then return "<class '" || cl_name[c] || "'>"
+      return "<class '__main__." || cl_name[c] || "'>"
+    end
+    when k = K_MODULE then return "<module '" || ob_s[x % 2] || "'>"
+    when k = K_BMETH then return "<bound method " || fd_name[ob_x[ob_x[x % 2] % 2]] || " of " || repr_of(ob_y[x % 2]) || ">"
+    when k = K_GEN then return "<generator object " || fd_name[gn_fd[ob_x[x % 2]]] || " at 0x" || right(d2x(x * 8), 12, "0") || ">"
+    when k = K_ITER then return "<iterator object at 0x" || right(d2x(x * 8), 12, "0") || ">"
+    when k = K_NOTIMPL then return "NotImplemented"
+    when k = K_ELLIPSIS then return "Ellipsis"
+    when k = K_INST then do
+      m = cls_find(ob_c[x % 2], M___REPR__)
+      if m > 0 then do
+        r = call1(m, x)
+        if r = 0 then return ""
+        if kind_of(r) \= K_STR then do
+          call raise_exc C_TYPEERROR, "__repr__ returned non-string (type " || type_name(r) || ")"
+          return ""
+        end
+        return ob_s[r % 2]
+      end
+      if cls_issub(ob_c[x % 2], C_BASEEXCEPTION) = 1 then return exc_repr(x)
+      return "<__main__." || cl_name[ob_c[x % 2]] || " object at 0x" || right(d2x(x * 8), 12, "0") || ">"
+    end
+    otherwise return "<object at 0x" || right(d2x(x * 8), 12, "0") || ">"
+  end
+  return "?"
+
+exc_args: procedure = .int
+  arg x = .int
+  a = .int
+  a = inst_get(x, M_ARGS)
+  if a = 0 then return mktuple(0)
+  return a
+
+exc_repr: procedure = .string
+  arg x = .int
+  a = .int
+  s = .string
+  a = exc_args(x)
+  s = repr_of(a)
+  if ob_n[a % 2] = 1 then s = left(s, length(s) - 2) || ")"
+  return cl_name[ob_c[x % 2]] || s
+
+exc_str: procedure = .string
+  arg x = .int
+  a = .int
+  a = exc_args(x)
+  if ob_n[a % 2] = 0 then return ""
+  if ob_n[a % 2] = 1 then do
+    if cls_issub(ob_c[x % 2], C_KEYERROR) = 1 then return repr_of(sl[ob_p[a % 2]])
+    return str_of(sl[ob_p[a % 2]])
+  end
+  return repr_of(a)
+
+str_of: procedure = .string
+  arg x = .int
+  k = .int
+  m = .int
+  r = .int
+  if x // 2 \= 0 then return ((x - 1) % 2) as .string
+  k = ob_k[x % 2]
+  if k = K_STR then return ob_s[x % 2]
+  if k = K_INST then do
+    m = cls_find(ob_c[x % 2], M___STR__)
+    if m > 0 then do
+      r = call1(m, x)
+      if r = 0 then return ""
+      if kind_of(r) \= K_STR then do
+        call raise_exc C_TYPEERROR, "__str__ returned non-string (type " || type_name(r) || ")"
+        return ""
+      end
+      return ob_s[r % 2]
+    end
+    if cls_issub(ob_c[x % 2], C_BASEEXCEPTION) = 1 then return exc_str(x)
+  end
+  return repr_of(x)

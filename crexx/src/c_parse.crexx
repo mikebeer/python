@@ -1,0 +1,1967 @@
+/* ---------------------------------------------------------------------
+   Parser: tokens -> node arrays, with scope resolution
+   --------------------------------------------------------------------- */
+perr: procedure = .void
+  arg msg = .string
+  if pe = 0 then do
+    pe = 1
+    pe_msg = "SyntaxError: " || msg || " (line " || tk_l[tpp] || ")"
+  end
+  tpp = ntk
+  return
+
+mk: procedure = .int
+  arg t = .int, a = .int, b = .int, c = .int
+  nnode = nnode + 1
+  n_t[nnode] = t
+  n_a[nnode] = a
+  n_b[nnode] = b
+  n_c[nnode] = c
+  n_d[nnode] = 0
+  n_y[nnode] = 0
+  n_s[nnode] = ""
+  n_ln[nnode] = tk_l[tpp]
+  n_ic[nnode] = 0
+  n_ig[nnode] = 0
+  n_iv[nnode] = 0
+  return nnode
+
+mkc: procedure = .int
+  arg oop = .int
+  return mk(N_CONST, oop, 0, 0)
+
+at: procedure = .int
+  arg s = .string
+  if tk_s[tpp] \== s then return 0
+  if tk_t[tpp] = T_OP | tk_t[tpp] = T_KW then return 1
+  return 0
+
+atnext: procedure = .int
+  arg s = .string
+  if tk_s[tpp + 1] \== s then return 0
+  if tk_t[tpp + 1] = T_OP | tk_t[tpp + 1] = T_KW then return 1
+  return 0
+
+accept: procedure = .int
+  arg s = .string
+  if at(s) = 1 then do
+    tpp = tpp + 1
+    return 1
+  end
+  return 0
+
+expect: procedure = .void
+  arg s = .string
+  if at(s) = 1 then tpp = tpp + 1
+  else call perr "expected '" || s || "'"
+  return
+
+expect_name: procedure = .string
+  r = .string
+  if tk_t[tpp] = T_NAME then do
+    r = tk_s[tpp]
+    tpp = tpp + 1
+    return r
+  end
+  call perr "expected a name"
+  return "?"
+
+/* list of node ids pushed on ps since base -> al; returns al start */
+plist: procedure = .int
+  arg base = .int
+  st = .int
+  i = .int
+  st = nal + 1
+  do i = base + 1 to psp
+    nal = nal + 1
+    al[nal] = ps[i]
+  end
+  psp = base
+  return st
+
+/* ---- scopes ---- */
+scope_push: procedure = .int
+  arg kind = .int
+  s = .int
+  nsc = nsc + 1
+  s = nsc
+  sc_kind[s] = kind
+  sc_par[s] = cursc
+  sc_n[s] = 2
+  sc_fl[s] = 0
+  sc_id[s] = 0
+  sc_rf0[s] = nrf + 1
+  sc_cd[s] = 0
+  if cursc > 0 then do
+    sc_cd[s] = sc_cd[cursc]
+    if sc_kind[cursc] = SK_CLASS then sc_cd[s] = sc_id[cursc]
+  end
+  cursc = s
+  return s
+
+/* bind a name in the current scope: returns its slot (0 if declared global/nonlocal) */
+bind_name: procedure = .int
+  arg name = .string
+  key = .string
+  v = .string
+  sl0 = .int
+  key = cursc || "|" || name
+  v = scm[key]
+  if v == "" then do
+    sl0 = sc_n[cursc]
+    sc_n[cursc] = sl0 + 1
+    scm[key] = sl0 as .string
+    if sc_kind[cursc] = SK_CLASS then do
+      ncv = ncv + 1
+      cv_name[ncv] = name
+      cv_slot[ncv] = sl0
+      cv_scope[ncv] = cursc
+    end
+    return sl0
+  end
+  return v as .int
+
+mkname: procedure = .int
+  arg name = .string
+  n = .int
+  n = mk(N_NAME, 0, 0, 0)
+  n_s[n] = name
+  nrf = nrf + 1
+  rf_node[nrf] = n
+  rf_sc[nrf] = cursc
+  rf_dep[nrf] = 0
+  return n
+
+/* mark all enclosing function scopes as having inner scopes (frames stay alive) */
+mark_closure: procedure = .void
+  s = .int
+  s = cursc
+  do while s > 0
+    if (sc_fl[s] // 4) < 2 then sc_fl[s] = sc_fl[s] + 2
+    s = sc_par[s]
+  end
+  return
+
+builtin_lookup: procedure = .int
+  arg name = .string
+  v = .string
+  v = bimap[name]
+  if v == "" then return 0
+  return v as .int
+
+/* resolve all pending references of scope sc (called when the scope ends) */
+scope_end: procedure = .void
+  arg sc = .int
+  r = .int
+  n = .int
+  name = .string
+  v = .string
+  slot = .int
+  par = .int
+  b = .int
+  do r = sc_rf0[sc] to nrf
+    if rf_sc[r] = sc then do
+      n = rf_node[r]
+      name = n_s[n]
+      v = scm[sc || "|" || name]
+      slot = 0
+      if v \== "" then slot = v as .int
+      if sc_kind[sc] = SK_CLASS & rf_dep[r] > 0 then slot = 0
+      if sc_kind[sc] = SK_MODULE then do
+        /* module scope: global slot, builtin, or error */
+        if slot > 0 then do
+          n_t[n] = N_GLOBAL
+          n_a[n] = slot
+        end
+        else do
+          b = builtin_lookup(name)
+          if b > 0 then do
+            n_t[n] = N_CONST
+            n_a[n] = b
+          end
+          else n_t[n] = N_NAMEERR
+        end
+        rf_sc[r] = 0
+      end
+      else if slot = -1 then do
+        /* declared global: module slot (create when needed) */
+        v = scm["1|" || name]
+        if v == "" then do
+          slot = sc_n[1]
+          sc_n[1] = slot + 1
+          scm["1|" || name] = slot as .string
+        end
+        else slot = v as .int
+        n_t[n] = N_GLOBAL
+        n_a[n] = slot
+        rf_sc[r] = 0
+      end
+      else if slot > 0 then do
+        if rf_dep[r] = 0 then do
+          n_t[n] = N_LOCAL
+          n_a[n] = slot
+        end
+        else do
+          n_t[n] = N_UP
+          n_a[n] = slot
+          n_b[n] = rf_dep[r]
+        end
+        rf_sc[r] = 0
+      end
+      else do
+        /* not local: look in the enclosing scope */
+        rf_sc[r] = sc_par[sc]
+        rf_dep[r] = rf_dep[r] + 1
+      end
+    end
+  end
+  cursc = sc_par[sc]
+  return
+
+/* ---- expressions ---- */
+p_test: procedure = .int
+  c = .int
+  e = .int
+  f = .int
+  if at("lambda") = 1 then return p_lambda()
+  e = p_or()
+  if at("if") = 1 then do
+    tpp = tpp + 1
+    c = p_or()
+    call expect "else"
+    f = p_test()
+    return mk(N_IFEXP, c, e, f)
+  end
+  return e
+
+p_or: procedure = .int
+  l = .int
+  r = .int
+  l = p_and()
+  do while at("or") = 1
+    tpp = tpp + 1
+    r = p_and()
+    l = mk(N_OR, l, r, 0)
+  end
+  return l
+
+p_and: procedure = .int
+  l = .int
+  r = .int
+  l = p_not()
+  do while at("and") = 1
+    tpp = tpp + 1
+    r = p_not()
+    l = mk(N_AND, l, r, 0)
+  end
+  return l
+
+p_not: procedure = .int
+  x = .int
+  if at("not") = 1 then do
+    tpp = tpp + 1
+    x = p_not()
+    return mk(N_NOT, x, 0, 0)
+  end
+  return p_cmp()
+
+cmp_op: procedure = .int
+  t = .int
+  s = .string
+  t = tk_t[tpp]
+  s = tk_s[tpp]
+  if t = T_OP then do
+    if s == "==" then return CMP_EQ
+    if s == "!=" then return CMP_NE
+    if s == "<" then return CMP_LT
+    if s == "<=" then return CMP_LE
+    if s == ">" then return CMP_GT
+    if s == ">=" then return CMP_GE
+    return 0
+  end
+  if t = T_KW then do
+    if s == "in" then return CMP_IN
+    if s == "is" then do
+      if tk_s[tpp + 1] == "not" & tk_t[tpp + 1] = T_KW then return CMP_ISNOT
+      return CMP_IS
+    end
+    if s == "not" then do
+      if tk_s[tpp + 1] == "in" & tk_t[tpp + 1] = T_KW then return CMP_NOTIN
+    end
+  end
+  return 0
+
+p_cmp: procedure = .int
+  l = .int
+  r = .int
+  op = .int
+  base = .int
+  cnt = .int
+  st = .int
+  k = .int
+  n = .int
+  l = p_bin(1)
+  op = cmp_op()
+  if op = 0 then return l
+  base = psp
+  psp = psp + 1
+  ps[psp] = l
+  cnt = 1
+  do while op > 0
+    if op = CMP_ISNOT | op = CMP_NOTIN then tpp = tpp + 2
+    else tpp = tpp + 1
+    r = p_bin(1)
+    cnt = cnt + 1
+    psp = psp + 1
+    ps[psp] = r
+    psp = psp + 1
+    ps[psp] = op
+    op = cmp_op()
+  end
+  /* ps: l, r1, op1, r2, op2 ... -> operands then ops */
+  if cnt = 2 then do
+    n = mk(N_CMP, ps[base + 1], ps[base + 2], ps[base + 3])
+    psp = base
+    return n
+  end
+  st = nal + 1
+  nal = nal + 1
+  al[nal] = ps[base + 1]
+  do k = 1 to cnt - 1
+    nal = nal + 1
+    al[nal] = ps[base + 1 + k * 2 - 1]
+  end
+  do k = 1 to cnt - 1
+    nal = nal + 1
+    al[nal] = ps[base + 1 + k * 2]
+  end
+  psp = base
+  return mk(N_CHAIN, st, cnt, 0)
+
+bin_op: procedure = .int
+  arg lvl = .int
+  s = .string
+  if tk_t[tpp] \= T_OP then return 0
+  s = tk_s[tpp]
+  select
+    when lvl = 1 then do
+      if s == "|" then return O_BITOR
+    end
+    when lvl = 2 then do
+      if s == "^" then return O_BITXOR
+    end
+    when lvl = 3 then do
+      if s == "&" then return O_BITAND
+    end
+    when lvl = 4 then do
+      if s == "<<" then return O_LSHIFT
+      if s == ">>" then return O_RSHIFT
+    end
+    when lvl = 5 then do
+      if s == "+" then return O_ADD
+      if s == "-" then return O_SUB
+    end
+    otherwise do
+      if s == "*" then return O_MUL
+      if s == "/" then return O_DIV
+      if s == "//" then return O_FLOORDIV
+      if s == "%" then return O_MOD
+      if s == "@" then return O_MATMUL
+    end
+  end
+  return 0
+
+p_bin: procedure = .int
+  arg lvl = .int
+  l = .int
+  r = .int
+  op = .int
+  if lvl > 6 then return p_factor()
+  l = p_bin(lvl + 1)
+  do forever
+    op = bin_op(lvl)
+    if op = 0 then leave
+    tpp = tpp + 1
+    r = p_bin(lvl + 1)
+    l = mk(N_BINOP, l, r, op)
+  end
+  return l
+
+p_factor: procedure = .int
+  x = .int
+  v = .int
+  f = .float
+  if at("-") = 1 then do
+    tpp = tpp + 1
+    x = p_factor()
+    if n_t[x] = N_CONST & n_a[x] // 2 \= 0 & n_a[x] > -1000000000000000 & n_a[x] < 1000000000000000 then do
+      n_a[x] = 1 - (n_a[x] - 1)
+      return x
+    end
+    if n_t[x] = N_CONST then do
+      if ob_k[n_a[x] % 2] = K_FLOAT then do
+        f = ob_f[n_a[x] % 2]
+        return mkc(mkfloat(0.0 - f))
+      end
+    end
+    return mk(N_UNARY, x, 0, 1)
+  end
+  if at("+") = 1 then do
+    tpp = tpp + 1
+    x = p_factor()
+    return mk(N_UNARY, x, 0, 2)
+  end
+  if at("~") = 1 then do
+    tpp = tpp + 1
+    x = p_factor()
+    return mk(N_UNARY, x, 0, 3)
+  end
+  return p_power()
+
+p_power: procedure = .int
+  b = .int
+  e = .int
+  b = p_atomexpr()
+  if at("**") = 1 then do
+    tpp = tpp + 1
+    e = p_factor()
+    return mk(N_BINOP, b, e, O_POW)
+  end
+  return b
+
+/* does the bracketed construct starting at tpp contain a 'for' at depth 0 ? */
+has_for: procedure = .int
+  i = .int
+  dep = .int
+  i = tpp
+  dep = 0
+  do forever
+    if tk_t[i] = T_EOF then return 0
+    if tk_t[i] = T_OP then do
+      if pos(tk_s[i], "([{") > 0 & length(tk_s[i]) = 1 then dep = dep + 1
+      else if pos(tk_s[i], ")]}") > 0 & length(tk_s[i]) = 1 then do
+        dep = dep - 1
+        if dep < 0 then return 0
+      end
+      else if dep = 0 & tk_s[i] == "," then return 0
+    end
+    else if tk_t[i] = T_KW & dep = 0 then do
+      if tk_s[i] == "for" then return 1
+    end
+    i = i + 1
+  end
+  return 0
+
+p_atomexpr: procedure = .int
+  e = .int
+  e = p_atom()
+  do forever
+    if at("(") = 1 then e = p_call(e)
+    else if at("[") = 1 then e = p_subscript(e)
+    else if at(".") = 1 then do
+      tpp = tpp + 1
+      e = mk(N_ATTR, e, 0, 0)
+      n_s[e] = expect_name()
+      n_b[e] = nameid(n_s[e])
+    end
+    else leave
+  end
+  return e
+
+p_call: procedure = .int
+  arg f = .int
+  base = .int
+  a = .int
+  n = .int
+  st = .int
+  cnt = .int
+  flags = .int
+  nm = .string
+  sc = .int
+  tpp = tpp + 1
+  base = psp
+  flags = 0
+  /* zero-argument super() inside a method */
+  if n_t[f] = N_NAME & n_s[f] == "super" & at(")") = 1 then do
+    tpp = tpp + 1
+    n_t[f] = N_SUPER
+    if rf_node[nrf] = f then rf_sc[nrf] = 0
+    n_a[f] = sc_cd[cursc]
+    n_b[f] = 0
+    sc = cursc
+    do while sc > 0 & sc_par[sc] > 0 & sc_kind[sc_par[sc]] \= SK_CLASS
+      n_b[f] = n_b[f] + 1
+      sc = sc_par[sc]
+    end
+    return f
+  end
+  do while at(")") = 0 & tk_t[tpp] \= T_EOF
+    if at("*") = 1 then do
+      tpp = tpp + 1
+      a = p_test()
+      a = mk(N_STARRED, a, 0, 0)
+      flags = 1
+    end
+    else if at("**") = 1 then do
+      tpp = tpp + 1
+      a = p_test()
+      a = mk(N_DSTAR, a, 0, 0)
+      flags = 1
+    end
+    else if tk_t[tpp] = T_NAME & tk_t[tpp + 1] = T_OP & tk_s[tpp + 1] == "=" then do
+      nm = tk_s[tpp]
+      tpp = tpp + 2
+      a = p_test()
+      a = mk(N_KWARG, a, 0, 0)
+      n_s[a] = nm
+      flags = 1
+    end
+    else if has_for() = 1 then a = p_comp(0, "")
+    else a = p_test()
+    psp = psp + 1
+    ps[psp] = a
+    if accept(",") = 0 then leave
+  end
+  call expect ")"
+  cnt = psp - base
+  st = plist(base)
+  n = mk(N_CALL, f, st, cnt)
+  n_d[n] = flags
+  return n
+
+p_subscript: procedure = .int
+  arg o = .int
+  base = .int
+  a = .int
+  b = .int
+  c = .int
+  cnt = .int
+  tup = .int
+  st = .int
+  tpp = tpp + 1
+  base = psp
+  tup = 0
+  do forever
+    a = 0
+    b = 0
+    c = 0
+    if at(":") = 0 then a = p_test_star()
+    if at(":") = 1 then do
+      tpp = tpp + 1
+      if at(":") = 0 & at("]") = 0 & at(",") = 0 then b = p_test()
+      if at(":") = 1 then do
+        tpp = tpp + 1
+        if at("]") = 0 & at(",") = 0 then c = p_test()
+      end
+      a = mk(N_SLICE, a, b, c)
+    end
+    psp = psp + 1
+    ps[psp] = a
+    if at(",") = 1 then do
+      tpp = tpp + 1
+      tup = 1
+      if at("]") = 1 then leave
+    end
+    else leave
+  end
+  call expect "]"
+  cnt = psp - base
+  if cnt = 1 & tup = 0 then do
+    a = ps[psp]
+    psp = base
+  end
+  else do
+    st = plist(base)
+    a = mk(N_TUPLE, st, cnt, 0)
+  end
+  return mk(N_SUBSCR, o, a, 0)
+
+p_test_star: procedure = .int
+  x = .int
+  if at("*") = 1 then do
+    tpp = tpp + 1
+    x = p_bin(1)
+    return mk(N_STARRED, x, 0, 0)
+  end
+  return p_test()
+
+/* comma separated expressions (a tuple when there is a comma) */
+p_testlist: procedure = .int
+  base = .int
+  a = .int
+  cnt = .int
+  st = .int
+  comma = .int
+  base = psp
+  comma = 0
+  do forever
+    a = p_test_star()
+    psp = psp + 1
+    ps[psp] = a
+    if at(",") = 1 then do
+      tpp = tpp + 1
+      comma = 1
+      if tk_t[tpp] = T_NL | tk_t[tpp] = T_EOF | at("=") = 1 | at(")") = 1 | at(":") = 1 | at(";") = 1 | at("]") = 1 then leave
+    end
+    else leave
+  end
+  if comma = 0 then do
+    a = ps[psp]
+    psp = base
+    return a
+  end
+  cnt = psp - base
+  st = plist(base)
+  return mk(N_TUPLE, st, cnt, 0)
+
+/* target list for 'for' loops / comprehensions: stops before 'in' */
+p_targetlist: procedure = .int
+  base = .int
+  a = .int
+  cnt = .int
+  st = .int
+  comma = .int
+  base = psp
+  comma = 0
+  do forever
+    if at("*") = 1 then do
+      tpp = tpp + 1
+      a = p_bin(1)
+      a = mk(N_STARRED, a, 0, 0)
+    end
+    else a = p_bin(1)
+    psp = psp + 1
+    ps[psp] = a
+    if at(",") = 1 then do
+      tpp = tpp + 1
+      comma = 1
+      if at("in") = 1 then leave
+    end
+    else leave
+  end
+  if comma = 0 then do
+    a = ps[psp]
+    psp = base
+    return a
+  end
+  cnt = psp - base
+  st = plist(base)
+  return mk(N_TUPLE, st, cnt, 0)
+
+/* turn an expression node into an assignment target (binds names) */
+mk_target: procedure = .void
+  arg n = .int
+  t = .int
+  i = .int
+  dmy = .int
+  t = n_t[n]
+  if t = N_NAME then dmy = bind_name(n_s[n])
+  else if t = N_TUPLE | t = N_LIST then do
+    do i = 0 to n_b[n] - 1
+      call mk_target al[n_a[n] + i]
+    end
+  end
+  else if t = N_STARRED then call mk_target n_a[n]
+  else if t = N_ATTR | t = N_SUBSCR then nop
+  else call perr "cannot assign to expression"
+  return
+
+p_atom: procedure = .int
+  t = .int
+  s = .string
+  n = .int
+  x = .int
+  base = .int
+  cnt = .int
+  st = .int
+  t = tk_t[tpp]
+  s = tk_s[tpp]
+  if t = T_NAME then do
+    tpp = tpp + 1
+    return mkname(s)
+  end
+  if t = T_NUM then do
+    n = mkc(tk_i[tpp] * 2 + 1)
+    tpp = tpp + 1
+    return n
+  end
+  if t = T_BIG then do
+    n = mkc(mkbig(s))
+    tpp = tpp + 1
+    return n
+  end
+  if t = T_FLT then do
+    n = mkc(mkfloat(tk_f[tpp]))
+    tpp = tpp + 1
+    return n
+  end
+  if t = T_STR then return p_strings()
+  if t = T_KW then do
+    if s == "None" then do
+      tpp = tpp + 1
+      return mkc(NONE_OOP)
+    end
+    if s == "True" then do
+      tpp = tpp + 1
+      return mkc(TRUE_OOP)
+    end
+    if s == "False" then do
+      tpp = tpp + 1
+      return mkc(FALSE_OOP)
+    end
+    if s == "yield" then return p_yield()
+    if s == "await" then do
+      tpp = tpp + 1
+      return p_atomexpr()
+    end
+    if s == "lambda" then return p_lambda()
+  end
+  if t = T_OP then do
+    if s == "(" then do
+      tpp = tpp + 1
+      if at(")") = 1 then do
+        tpp = tpp + 1
+        return mk(N_TUPLE, 0, 0, 0)
+      end
+      if at("yield") = 1 then do
+        x = p_yield()
+        call expect ")"
+        return x
+      end
+      if has_for() = 1 then do
+        x = p_comp(0, ")")
+        return x
+      end
+      x = p_test_star()
+      if at(",") = 1 then do
+        base = psp
+        psp = psp + 1
+        ps[psp] = x
+        do while accept(",") = 1
+          if at(")") = 1 then leave
+          x = p_test_star()
+          psp = psp + 1
+          ps[psp] = x
+        end
+        call expect ")"
+        cnt = psp - base
+        st = plist(base)
+        return mk(N_TUPLE, st, cnt, 0)
+      end
+      call expect ")"
+      if n_t[x] = N_STARRED then call perr "can't use starred expression here"
+      return x
+    end
+    if s == "[" then do
+      tpp = tpp + 1
+      if at("]") = 1 then do
+        tpp = tpp + 1
+        return mk(N_LIST, 0, 0, 0)
+      end
+      if has_for() = 1 then return p_comp(1, "]")
+      base = psp
+      do forever
+        x = p_test_star()
+        psp = psp + 1
+        ps[psp] = x
+        if accept(",") = 0 then leave
+        if at("]") = 1 then leave
+      end
+      call expect "]"
+      cnt = psp - base
+      st = plist(base)
+      return mk(N_LIST, st, cnt, 0)
+    end
+    if s == "{" then return p_brace()
+    if s == "..." then do
+      tpp = tpp + 1
+      return mkc(ELLIPSIS_OOP)
+    end
+  end
+  call perr "invalid syntax near '" || s || "'"
+  return mkc(NONE_OOP)
+
+/* adjacent string literals (with f-strings) */
+p_strings: procedure = .int
+  acc = .string
+  base = .int
+  cnt = .int
+  st = .int
+  n = .int
+  isf = .int
+  anyf = .int
+  fl = .int
+  x = .int
+  acc = ""
+  anyf = 0
+  base = psp
+  do while tk_t[tpp] = T_STR
+    fl = tk_i[tpp]
+    if fl = 0 then acc = acc || tk_s[tpp]
+    else do
+      anyf = 1
+      /* flush literal accumulated so far */
+      if acc \== "" then do
+        psp = psp + 1
+        ps[psp] = mkc(mkstr(acc))
+        acc = ""
+      end
+      isf = 0
+      if fl = 3 then isf = 1
+      call fstring_parts tk_s[tpp], isf
+    end
+    tpp = tpp + 1
+  end
+  if anyf = 0 then return mkc(mkstr(acc))
+  if acc \== "" then do
+    psp = psp + 1
+    ps[psp] = mkc(mkstr(acc))
+  end
+  cnt = psp - base
+  st = plist(base)
+  return mk(N_FSTR, st, cnt, 0)
+
+/* parse an f-string body into parts pushed on ps (raw flag: no escapes) */
+fstring_parts: procedure = .void
+  arg raw = .string, isr = .int
+  i = .int
+  n = .int
+  c = .string
+  lit = .string
+  j = .int
+  dep = .int
+  q = .string
+  stop = .int
+  ex = .string
+  conv = .int
+  spec = .int
+  x = .int
+  f = .int
+  ch = .string
+  nx = .string
+  sp = .string
+  dbg = .int
+  fm = .int
+  k = .int
+  endj = .int
+  base2 = .int
+  cnt2 = .int
+  st2 = .int
+  i = 1
+  n = length(raw)
+  lit = ""
+  do while i <= n
+    c = substr(raw, i, 1)
+    if c == "{" then do
+      if substr(raw, i + 1, 1) == "{" then do
+        lit = lit || "{"
+        i = i + 2
+        iterate
+      end
+      if lit \== "" then do
+        psp = psp + 1
+        if isr = 1 then ps[psp] = mkc(mkstr(lit))
+        else ps[psp] = mkc(mkstr(unescape(lit)))
+        lit = ""
+      end
+      /* find the end of the expression */
+      j = i + 1
+      dep = 0
+      stop = 0
+      do while j <= n & stop = 0
+        ch = substr(raw, j, 1)
+        nx = substr(raw, j + 1, 1)
+        if ch == "'" | ch == '"' then do
+          k = pos(ch, raw, j + 1)
+          if k = 0 then j = n + 1
+          else j = k + 1
+          iterate
+        end
+        if ch == "(" | ch == "[" | ch == "{" then dep = dep + 1
+        else if ch == ")" | ch == "]" then dep = dep - 1
+        else if ch == "}" then do
+          if dep = 0 then stop = 1
+          else dep = dep - 1
+        end
+        else if dep = 0 & ch == "!" & nx \== "=" then stop = 1
+        else if dep = 0 & ch == ":" then stop = 1
+        else if dep = 0 & ch == "=" & nx \== "=" & substr(raw, j - 1, 1) \== "=" & substr(raw, j - 1, 1) \== "!" & substr(raw, j - 1, 1) \== "<" & substr(raw, j - 1, 1) \== ">" then stop = 2
+        if stop = 0 then j = j + 1
+      end
+      ex = substr(raw, i + 1, j - i - 1)
+      conv = 0
+      spec = 0
+      dbg = 0
+      if stop = 2 then do
+        dbg = 1
+        lit = ex || "="
+        j = j + 1
+        ch = substr(raw, j, 1)
+      end
+      ch = substr(raw, j, 1)
+      if ch == "!" then do
+        conv = c2d(substr(raw, j + 1, 1))
+        j = j + 2
+        ch = substr(raw, j, 1)
+      end
+      if ch == ":" then do
+        /* format spec up to the matching close brace; may hold nested fields */
+        k = j + 1
+        dep = 0
+        do while k <= n
+          ch = substr(raw, k, 1)
+          if ch == "{" then dep = dep + 1
+          else if ch == "}" then do
+            if dep = 0 then leave
+            dep = dep - 1
+          end
+          k = k + 1
+        end
+        sp = substr(raw, j + 1, k - j - 1)
+        j = k
+        base2 = psp
+        call fstring_parts sp, 1
+        if psp = base2 + 1 & n_t[ps[psp]] = N_CONST then do
+          spec = ps[psp]
+          psp = base2
+        end
+        else if psp = base2 then spec = mkc(mkstr(""))
+        else do
+          cnt2 = psp - base2
+          st2 = plist(base2)
+          spec = mk(N_FSTR, st2, cnt2, 0)
+        end
+      end
+      if substr(raw, j, 1) \== "}" then do
+        call perr "f-string: expecting '}'"
+        return
+      end
+      x = sub_expr(ex)
+      if dbg = 1 then do
+        psp = psp + 1
+        ps[psp] = mkc(mkstr(lit))
+        lit = ""
+        if conv = 0 & spec = 0 then conv = 114
+      end
+      f = mk(N_FMT, x, conv, spec)
+      psp = psp + 1
+      ps[psp] = f
+      i = j + 1
+      iterate
+    end
+    if c == "}" then do
+      if substr(raw, i + 1, 1) == "}" then i = i + 1
+      lit = lit || "}"
+      i = i + 1
+      iterate
+    end
+    lit = lit || c
+    i = i + 1
+  end
+  if lit \== "" then do
+    psp = psp + 1
+    if isr = 1 then ps[psp] = mkc(mkstr(lit))
+    else ps[psp] = mkc(mkstr(unescape(lit)))
+  end
+  return
+
+/* parse an expression from text (f-string fields) */
+sub_expr: procedure = .int
+  arg text = .string
+  svt = .int
+  base = .int
+  x = .int
+  svt = tpp
+  base = ntk + 1
+  call lex_text text, 1
+  tpp = base
+  x = p_testlist()
+  tpp = svt
+  return x
+
+p_yield: procedure = .int
+  x = .int
+  tpp = tpp + 1
+  if (sc_fl[cursc] // 2) = 0 then sc_fl[cursc] = sc_fl[cursc] + 1
+  if at("from") = 1 then do
+    tpp = tpp + 1
+    x = p_test()
+    x = mk(N_YIELDFROM, x, 0, 0)
+    n_y[x] = 1
+    return x
+  end
+  x = 0
+  if tk_t[tpp] \= T_NL & at(")") = 0 & at("=") = 0 & at(";") = 0 & at("]") = 0 & tk_t[tpp] \= T_EOF then x = p_testlist()
+  x = mk(N_YIELD, x, 0, 0)
+  n_y[x] = 1
+  return x
+
+/* ---- brace displays ---- */
+p_brace: procedure = .int
+  k = .int
+  v = .int
+  base = .int
+  cnt = .int
+  st = .int
+  n = .int
+  isdict = .int
+  tpp = tpp + 1
+  if at("}") = 1 then do
+    tpp = tpp + 1
+    return mk(N_DICT, 0, 0, 0)
+  end
+  if has_for() = 1 then return p_comp(2, "}")
+  base = psp
+  isdict = -1
+  do forever
+    if at("**") = 1 then do
+      tpp = tpp + 1
+      v = p_bin(1)
+      psp = psp + 1
+      ps[psp] = 0
+      psp = psp + 1
+      ps[psp] = v
+      isdict = 1
+    end
+    else do
+      k = p_test_star()
+      if at(":") = 1 then do
+        tpp = tpp + 1
+        v = p_test()
+        psp = psp + 1
+        ps[psp] = k
+        psp = psp + 1
+        ps[psp] = v
+        isdict = 1
+      end
+      else do
+        psp = psp + 1
+        ps[psp] = k
+        isdict = 0
+      end
+    end
+    if accept(",") = 0 then leave
+    if at("}") = 1 then leave
+  end
+  call expect "}"
+  cnt = psp - base
+  st = plist(base)
+  if isdict = 1 then return mk(N_DICT, st, cnt % 2, 0)
+  return mk(N_SET, st, cnt, 0)
+
+/* comprehension: kind 0 generator, 1 list, 2 set or dict; closer is the closing token.
+   The element has not been parsed yet. */
+p_comp: procedure = .int
+  arg kind = .int, closer = .string
+  sc = .int
+  par = .int
+  fd = .int
+  elt = .int
+  keyn = .int
+  isdict = .int
+  cl0 = .int
+  ncl = .int
+  i = .int
+  tgt = .int
+  itr = .int
+  firstit = .int
+  body = .int
+  cond = .int
+  n = .int
+  dmy = .int
+  c0 = .int
+  k = .int
+  ck = .int
+  x = .int
+  par = cursc
+  nfd = nfd + 1
+  fd = nfd
+  sc = scope_push(SK_COMP)
+  sc_id[sc] = fd
+  dmy = bind_name(".0")
+  dmy = bind_name(".r")
+  if kind = 0 then sc_fl[sc] = 1
+  /* element (and key) */
+  keyn = 0
+  isdict = 0
+  elt = p_test_star()
+  if kind = 2 & at(":") = 1 then do
+    tpp = tpp + 1
+    keyn = elt
+    elt = p_test()
+    isdict = 1
+  end
+  /* for clauses: stored on the parse stack as (target, iter, ncond, conds...) */
+  cl0 = psp
+  ncl = 0
+  firstit = 0
+  do while at("for") = 1
+    tpp = tpp + 1
+    tgt = p_targetlist()
+    call mk_target tgt
+    call expect "in"
+    if ncl = 0 then do
+      cursc = par
+      itr = p_or()
+      cursc = sc
+      firstit = itr
+      itr = mk(N_LOCAL, 2, 0, 0)
+    end
+    else itr = p_or()
+    ncl = ncl + 1
+    psp = psp + 1
+    ps[psp] = tgt
+    psp = psp + 1
+    ps[psp] = itr
+    c0 = psp + 1
+    psp = psp + 1
+    ps[psp] = 0
+    do while at("if") = 1
+      tpp = tpp + 1
+      cond = p_or()
+      psp = psp + 1
+      ps[psp] = cond
+      ps[c0] = ps[c0] + 1
+    end
+  end
+  if closer \== "" then call expect closer
+  /* innermost statement */
+  if kind = 0 then do
+    x = mk(N_YIELD, elt, 0, 0)
+    n_y[x] = 1
+    body = mk(N_EXPR, x, 0, 0)
+    n_y[body] = 1
+  end
+  else do
+    ck = 1
+    if kind = 2 & isdict = 0 then ck = 4
+    if kind = 2 & isdict = 1 then ck = 3
+    body = mk(N_COMPADD, elt, keyn, ck)
+  end
+  call build_comp_nest cl0, ncl, body
+  body = comp_result
+  psp = cl0
+  fd_body[fd] = body
+  call finish_scope_fd fd, sc, 0
+  call scope_end sc
+  if kind = 0 then call mark_closure
+  if kind = 0 then n = mk(N_GENEXP, fd, 0, firstit)
+  else n = mk(N_COMP, fd, ck, firstit)
+  return n
+
+/* nest 'for'/'if' statements around body; clauses are on ps from cl0+1 */
+build_comp_nest: procedure = .void
+  arg cl0 = .int, ncl = .int, body = .int
+  pos0 = .int
+  starts = .int[]
+  i = .int
+  p = .int
+  nc2 = .int
+  j = .int
+  cur = .int
+  tgt = .int
+  itr = .int
+  cnd = .int
+  f = .int
+  p = cl0 + 1
+  do i = 1 to ncl
+    starts[i] = p
+    p = p + 3 + ps[p + 2]
+  end
+  cur = body
+  do i = ncl to 1 by -1
+    p = starts[i]
+    nc2 = ps[p + 2]
+    do j = nc2 to 1 by -1
+      cnd = ps[p + 2 + j]
+      cur = mk(N_IF, cnd, cur, 0)
+      n_y[cur] = n_y[n_b[cur]]
+    end
+    f = mk(N_FOR, ps[p], ps[p + 1], cur)
+    n_d[f] = 0
+    n_y[f] = n_y[cur]
+    cur = f
+  end
+  comp_result = cur
+  return
+
+/* ---- lambda and parameters ---- */
+p_params: procedure = .int
+  arg endtok = .string, ann = .int
+  base = .int
+  mode = .int
+  nm = .string
+  d = .int
+  kind = .int
+  base = npq
+  mode = 0
+  do while at(endtok) = 0 & tk_t[tpp] \= T_EOF
+    if at("*") = 1 then do
+      tpp = tpp + 1
+      mode = 2
+      if tk_t[tpp] = T_NAME then do
+        nm = expect_name()
+        if ann = 1 & accept(":") = 1 then d = p_test()
+        npq = npq + 1
+        pq_name[npq] = nm
+        pq_def[npq] = 0
+        pq_kind[npq] = 1
+      end
+    end
+    else if at("**") = 1 then do
+      tpp = tpp + 1
+      nm = expect_name()
+      if ann = 1 & accept(":") = 1 then d = p_test()
+      npq = npq + 1
+      pq_name[npq] = nm
+      pq_def[npq] = 0
+      pq_kind[npq] = 3
+    end
+    else if at("/") = 1 then tpp = tpp + 1
+    else do
+      nm = expect_name()
+      if ann = 1 & accept(":") = 1 then d = p_test()
+      d = 0
+      if accept("=") = 1 then d = p_test()
+      npq = npq + 1
+      pq_name[npq] = nm
+      pq_def[npq] = d
+      pq_kind[npq] = mode
+    end
+    if accept(",") = 0 then leave
+  end
+  return base
+
+/* create the function record for scope sc from the parameter records after base */
+setup_params: procedure = .void
+  arg fd = .int, base = .int
+  i = .int
+  dmy = .int
+  np = .int
+  nk = .int
+  k = .int
+  fd_ps[fd] = npr + 1
+  np = 0
+  nk = 0
+  fd_vs[fd] = 0
+  fd_ks[fd] = 0
+  do i = base + 1 to npq
+    npr = npr + 1
+    pr_name[npr] = pq_name[i]
+    pr_def[npr] = pq_def[i]
+    pr_kind[npr] = pq_kind[i]
+    pr_slot[npr] = bind_name(pq_name[i])
+    k = pq_kind[i]
+    if k = 0 then np = np + 1
+    else if k = 1 then fd_vs[fd] = pr_slot[npr]
+    else if k = 2 then nk = nk + 1
+    else fd_ks[fd] = pr_slot[npr]
+  end
+  fd_np[fd] = np
+  fd_nk[fd] = nk
+  fd_cx[fd] = 0
+  if fd_vs[fd] > 0 | fd_ks[fd] > 0 | nk > 0 then fd_cx[fd] = 1
+  fd_nr[fd] = npr - fd_ps[fd] + 1
+  return
+
+finish_scope_fd: procedure = .void
+  arg fd = .int, sc = .int, isl = .int
+  fd_ns[fd] = sc_n[sc]
+  fd_fl[fd] = sc_fl[sc]
+  fd_cd[fd] = sc_cd[sc]
+  return
+
+p_lambda: procedure = .int
+  fd = .int
+  sc = .int
+  base = .int
+  body = .int
+  r = .int
+  n = .int
+  tpp = tpp + 1
+  base = p_params(":", 0)
+  call expect ":"
+  nfd = nfd + 1
+  fd = nfd
+  sc = scope_push(SK_FUNC)
+  sc_id[sc] = fd
+  call setup_params fd, base
+  npq = base
+  body = p_test()
+  r = mk(N_RETURN, body, 0, 0)
+  fd_body[fd] = r
+  fd_name[fd] = "<lambda>"
+  call finish_scope_fd fd, sc, 1
+  call scope_end sc
+  call mark_closure
+  n = mk(N_FUNC, fd, 0, 0)
+  return n
+
+/* ---- statements ---- */
+p_file: procedure = .int
+  base = .int
+  s = .int
+  cnt = .int
+  st = .int
+  base = psp
+  do while tk_t[tpp] \= T_EOF
+    if tk_t[tpp] = T_NL then tpp = tpp + 1
+    else do
+      call p_stmt
+    end
+  end
+  cnt = psp - base
+  st = plist(base)
+  return mkseq(st, cnt)
+
+mkseq: procedure = .int
+  arg st = .int, cnt = .int
+  n = .int
+  i = .int
+  y = .int
+  n = mk(N_SEQ, st, cnt, 0)
+  y = 0
+  do i = 0 to cnt - 1
+    if n_y[al[st + i]] = 1 then y = 1
+  end
+  n_y[n] = y
+  return n
+
+/* parse one statement (possibly several simple statements) and push its node(s) on ps */
+p_stmt: procedure = .void
+  n = .int
+  s = .string
+  t = .int
+  t = tk_t[tpp]
+  s = tk_s[tpp]
+  if t = T_KW then do
+    select
+      when s == "if" then do
+        n = p_if()
+        psp = psp + 1
+        ps[psp] = n
+        return
+      end
+      when s == "while" then do
+        n = p_while()
+        psp = psp + 1
+        ps[psp] = n
+        return
+      end
+      when s == "for" then do
+        n = p_for()
+        psp = psp + 1
+        ps[psp] = n
+        return
+      end
+      when s == "try" then do
+        n = p_try()
+        psp = psp + 1
+        ps[psp] = n
+        return
+      end
+      when s == "with" then do
+        n = p_with()
+        psp = psp + 1
+        ps[psp] = n
+        return
+      end
+      when s == "def" then do
+        n = p_def(0, 0)
+        psp = psp + 1
+        ps[psp] = n
+        return
+      end
+      when s == "class" then do
+        n = p_class(0, 0)
+        psp = psp + 1
+        ps[psp] = n
+        return
+      end
+      when s == "async" then do
+        tpp = tpp + 1
+        return
+      end
+      otherwise nop
+    end
+  end
+  if t = T_OP & s == "@" then do
+    n = p_decorated()
+    psp = psp + 1
+    ps[psp] = n
+    return
+  end
+  if t = T_IND then do
+    call perr "unexpected indent"
+    return
+  end
+  call p_simple_line
+  return
+
+/* simple statements separated by ';' up to the end of line */
+p_simple_line: procedure = .void
+  n = .int
+  do forever
+    n = p_simple()
+    psp = psp + 1
+    ps[psp] = n
+    if accept(";") = 1 then do
+      if tk_t[tpp] = T_NL | tk_t[tpp] = T_EOF then leave
+    end
+    else leave
+  end
+  if tk_t[tpp] = T_NL then tpp = tpp + 1
+  else if tk_t[tpp] \= T_EOF & tk_t[tpp] \= T_DED then call perr "invalid syntax near '" || tk_s[tpp] || "'"
+  return
+
+/* suite after ':' ; returns a node */
+p_suite: procedure = .int
+  base = .int
+  cnt = .int
+  st = .int
+  n = .int
+  depth_save = .int
+  if tk_t[tpp] = T_NL then do
+    tpp = tpp + 1
+    if tk_t[tpp] \= T_IND then do
+      call perr "expected an indented block"
+      return mk(N_PASS, 0, 0, 0)
+    end
+    tpp = tpp + 1
+    base = psp
+    do while tk_t[tpp] \= T_DED & tk_t[tpp] \= T_EOF
+      if tk_t[tpp] = T_NL then tpp = tpp + 1
+      else call p_stmt
+    end
+    if tk_t[tpp] = T_DED then tpp = tpp + 1
+    cnt = psp - base
+    st = plist(base)
+    return mkseq(st, cnt)
+  end
+  base = psp
+  call p_simple_line
+  cnt = psp - base
+  st = plist(base)
+  return mkseq(st, cnt)
+
+p_if: procedure = .int
+  c = .int
+  b = .int
+  e = .int
+  n = .int
+  tpp = tpp + 1
+  c = p_test()
+  call expect ":"
+  b = p_suite()
+  e = 0
+  if at("elif") = 1 then e = p_if_elif()
+  else if at("else") = 1 then do
+    tpp = tpp + 1
+    call expect ":"
+    e = p_suite()
+  end
+  n = mk(N_IF, c, b, e)
+  n_y[n] = 0
+  if n_y[b] = 1 then n_y[n] = 1
+  if e > 0 then do
+    if n_y[e] = 1 then n_y[n] = 1
+  end
+  return n
+
+p_if_elif: procedure = .int
+  return p_if()
+
+p_while: procedure = .int
+  c = .int
+  b = .int
+  e = .int
+  n = .int
+  tpp = tpp + 1
+  c = p_test()
+  call expect ":"
+  b = p_suite()
+  e = 0
+  if at("else") = 1 then do
+    tpp = tpp + 1
+    call expect ":"
+    e = p_suite()
+  end
+  n = mk(N_WHILE, c, b, e)
+  if n_y[b] = 1 then n_y[n] = 1
+  if e > 0 then do
+    if n_y[e] = 1 then n_y[n] = 1
+  end
+  return n
+
+p_for: procedure = .int
+  tgt = .int
+  it = .int
+  b = .int
+  e = .int
+  n = .int
+  tpp = tpp + 1
+  tgt = p_targetlist()
+  call mk_target tgt
+  call expect "in"
+  it = p_testlist()
+  call expect ":"
+  b = p_suite()
+  e = 0
+  if at("else") = 1 then do
+    tpp = tpp + 1
+    call expect ":"
+    e = p_suite()
+  end
+  n = mk(N_FOR, tgt, it, b)
+  n_d[n] = e
+  if n_y[b] = 1 then n_y[n] = 1
+  if e > 0 then do
+    if n_y[e] = 1 then n_y[n] = 1
+  end
+  return n
+
+p_try: procedure = .int
+  body = .int
+  hs = .int
+  hc = .int
+  el = .int
+  fin = .int
+  n = .int
+  h = .int
+  ty = .int
+  nm = .int
+  hb = .int
+  base = .int
+  y = .int
+  i = .int
+  tpp = tpp + 1
+  call expect ":"
+  body = p_suite()
+  base = psp
+  y = n_y[body]
+  el = 0
+  fin = 0
+  do while at("except") = 1
+    tpp = tpp + 1
+    ty = 0
+    nm = 0
+    if at(":") = 0 then do
+      ty = p_test()
+      if accept("as") = 1 then do
+        nm = mkname(expect_name())
+        call mk_target nm
+      end
+      else if accept(",") = 1 then do
+        call perr "invalid except clause"
+      end
+    end
+    call expect ":"
+    hb = p_suite()
+    if n_y[hb] = 1 then y = 1
+    h = mk(N_HANDLER, ty, nm, hb)
+    psp = psp + 1
+    ps[psp] = h
+  end
+  hc = psp - base
+  hs = plist(base)
+  if at("else") = 1 then do
+    tpp = tpp + 1
+    call expect ":"
+    el = p_suite()
+    if n_y[el] = 1 then y = 1
+  end
+  if at("finally") = 1 then do
+    tpp = tpp + 1
+    call expect ":"
+    fin = p_suite()
+    if n_y[fin] = 1 then y = 1
+  end
+  n = mk(N_TRY, body, hs, hc)
+  n_d[n] = el
+  n_e[n] = fin
+  n_y[n] = y
+  return n
+
+p_with: procedure = .int
+  ctx = .int
+  tgt = .int
+  b = .int
+  n = .int
+  tpp = tpp + 1
+  ctx = p_test()
+  tgt = 0
+  if accept("as") = 1 then do
+    tgt = p_bin(1)
+    call mk_target tgt
+  end
+  if accept(",") = 1 then do
+    /* with a, b: -> nested with */
+    b = p_with_rest()
+  end
+  else do
+    call expect ":"
+    b = p_suite()
+  end
+  n = mk(N_WITH, ctx, tgt, b)
+  if n_y[b] = 1 then n_y[n] = 1
+  return n
+
+p_with_rest: procedure = .int
+  ctx = .int
+  tgt = .int
+  b = .int
+  n = .int
+  ctx = p_test()
+  tgt = 0
+  if accept("as") = 1 then do
+    tgt = p_bin(1)
+    call mk_target tgt
+  end
+  if accept(",") = 1 then b = p_with_rest()
+  else do
+    call expect ":"
+    b = p_suite()
+  end
+  n = mk(N_WITH, ctx, tgt, b)
+  if n_y[b] = 1 then n_y[n] = 1
+  return n
+
+p_decorated: procedure = .int
+  base = .int
+  x = .int
+  cnt = .int
+  st = .int
+  n = .int
+  base = psp
+  do while at("@") = 1
+    tpp = tpp + 1
+    x = p_test()
+    psp = psp + 1
+    ps[psp] = x
+    if tk_t[tpp] = T_NL then tpp = tpp + 1
+  end
+  cnt = psp - base
+  st = plist(base)
+  if at("def") = 1 then return p_def(st, cnt)
+  if at("class") = 1 then return p_class(st, cnt)
+  call perr "decorator must precede def or class"
+  return mk(N_PASS, 0, 0, 0)
+
+p_def: procedure = .int
+  arg decst = .int, deccnt = .int
+  name = .string
+  tn = .int
+  base = .int
+  fd = .int
+  sc = .int
+  body = .int
+  n = .int
+  dmy = .int
+  tpp = tpp + 1
+  name = expect_name()
+  tn = mkname(name)
+  dmy = bind_name(name)
+  call expect "("
+  base = p_params(")", 1)
+  call expect ")"
+  if accept("->") = 1 then dmy = p_test()
+  call expect ":"
+  nfd = nfd + 1
+  fd = nfd
+  sc = scope_push(SK_FUNC)
+  sc_id[sc] = fd
+  call setup_params fd, base
+  fd_name[fd] = name
+  npq = base
+  body = p_suite()
+  fd_body[fd] = body
+  call finish_scope_fd fd, sc, 0
+  call scope_end sc
+  call mark_closure
+  n = mk(N_DEF, fd, tn, decst)
+  n_d[n] = deccnt
+  return n
+
+p_class: procedure = .int
+  arg decst = .int, deccnt = .int
+  name = .string
+  tn = .int
+  cd = .int
+  sc = .int
+  body = .int
+  n = .int
+  dmy = .int
+  basen = .int
+  nb2 = .int
+  i = .int
+  tpp = tpp + 1
+  name = expect_name()
+  tn = mkname(name)
+  dmy = bind_name(name)
+  basen = 0
+  if accept("(") = 1 then do
+    if at(")") = 0 then do
+      basen = p_test()
+      do while accept(",") = 1
+        if at(")") = 0 then dmy = p_test()
+      end
+    end
+    call expect ")"
+  end
+  call expect ":"
+  ncd = ncd + 1
+  cd = ncd
+  sc = scope_push(SK_CLASS)
+  sc_id[sc] = cd
+  cd_sc[cd] = sc
+  cd_name[cd] = name
+  cd_cv0[cd] = ncv + 1
+  body = p_suite()
+  cd_body[cd] = body
+  cd_ns[cd] = sc_n[sc]
+  cd_cv1[cd] = ncv
+  call scope_end sc
+  call mark_closure
+  n = mk(N_CLASS, cd, tn, basen)
+  n_d[n] = decst
+  n_e[n] = deccnt
+  return n
+
+/* ---- simple statements ---- */
+p_simple: procedure = .int
+  s = .string
+  t = .int
+  n = .int
+  x = .int
+  y = .int
+  base = .int
+  cnt = .int
+  st = .int
+  op = .int
+  dmy = .int
+  nm = .string
+  t = tk_t[tpp]
+  s = tk_s[tpp]
+  if t = T_KW then do
+    select
+      when s == "pass" then do
+        tpp = tpp + 1
+        return mk(N_PASS, 0, 0, 0)
+      end
+      when s == "break" then do
+        tpp = tpp + 1
+        return mk(N_BREAK, 0, 0, 0)
+      end
+      when s == "continue" then do
+        tpp = tpp + 1
+        return mk(N_CONTINUE, 0, 0, 0)
+      end
+      when s == "return" then do
+        tpp = tpp + 1
+        x = 0
+        if tk_t[tpp] \= T_NL & tk_t[tpp] \= T_EOF & at(";") = 0 then x = p_testlist()
+        return mk(N_RETURN, x, 0, 0)
+      end
+      when s == "raise" then do
+        tpp = tpp + 1
+        x = 0
+        y = 0
+        if tk_t[tpp] \= T_NL & tk_t[tpp] \= T_EOF & at(";") = 0 then do
+          x = p_test()
+          if accept("from") = 1 then y = p_test()
+        end
+        return mk(N_RAISE, x, y, 0)
+      end
+      when s == "global" | s == "nonlocal" then do
+        tpp = tpp + 1
+        do forever
+          nm = expect_name()
+          if s == "global" then scm[cursc || "|" || nm] = "-1"
+          else scm[cursc || "|" || nm] = "-2"
+          if accept(",") = 0 then leave
+        end
+        return mk(N_PASS, 0, 0, 0)
+      end
+      when s == "del" then do
+        tpp = tpp + 1
+        base = psp
+        do forever
+          x = p_bin(1)
+          call mk_target x
+          psp = psp + 1
+          ps[psp] = x
+          if accept(",") = 0 then leave
+          if tk_t[tpp] = T_NL then leave
+        end
+        cnt = psp - base
+        st = plist(base)
+        return mk(N_DEL, st, cnt, 0)
+      end
+      when s == "assert" then do
+        tpp = tpp + 1
+        x = p_test()
+        y = 0
+        if accept(",") = 1 then y = p_test()
+        return mk(N_ASSERT, x, y, 0)
+      end
+      when s == "import" then return p_import()
+      when s == "from" then return p_from()
+      otherwise nop
+    end
+  end
+  /* expression statement / assignment */
+  x = p_testlist()
+  if at("=") = 1 then do
+    base = psp
+    psp = psp + 1
+    ps[psp] = x
+    do while accept("=") = 1
+      if at("yield") = 1 then x = p_yield()
+      else x = p_testlist()
+      psp = psp + 1
+      ps[psp] = x
+    end
+    /* last is the value, others are targets */
+    y = ps[psp]
+    psp = psp - 1
+    do op = base + 1 to psp
+      call mk_target ps[op]
+    end
+    cnt = psp - base
+    st = plist(base)
+    n = mk(N_ASSIGN, y, st, cnt)
+    n_y[n] = n_y[y]
+    return n
+  end
+  if tk_t[tpp] = T_OP then do
+    op = aug_op()
+    if op > 0 then do
+      tpp = tpp + 1
+      call mk_target x
+      if at("yield") = 1 then y = p_yield()
+      else y = p_testlist()
+      n = mk(N_AUG, x, y, op)
+      return n
+    end
+    if at(":") = 1 then do
+      /* annotated assignment */
+      tpp = tpp + 1
+      dmy = p_test()
+      if accept("=") = 1 then do
+        y = p_testlist()
+        call mk_target x
+        base = psp
+        psp = psp + 1
+        ps[psp] = x
+        st = plist(base)
+        return mk(N_ASSIGN, y, st, 1)
+      end
+      return mk(N_PASS, 0, 0, 0)
+    end
+  end
+  n = mk(N_EXPR, x, 0, 0)
+  n_y[n] = n_y[x]
+  return n
+
+aug_op: procedure = .int
+  s = .string
+  s = tk_s[tpp]
+  if s == "+=" then return O_ADD
+  if s == "-=" then return O_SUB
+  if s == "*=" then return O_MUL
+  if s == "/=" then return O_DIV
+  if s == "//=" then return O_FLOORDIV
+  if s == "%=" then return O_MOD
+  if s == "**=" then return O_POW
+  if s == "<<=" then return O_LSHIFT
+  if s == ">>=" then return O_RSHIFT
+  if s == "&=" then return O_BITAND
+  if s == "|=" then return O_BITOR
+  if s == "^=" then return O_BITXOR
+  if s == "@=" then return O_MATMUL
+  return 0
+
+dotted_name: procedure = .string
+  r = .string
+  r = expect_name()
+  do while at(".") = 1
+    tpp = tpp + 1
+    r = r || "." || expect_name()
+  end
+  return r
+
+p_import: procedure = .int
+  full = .string
+  alias = .string
+  tn = .int
+  base = .int
+  n = .int
+  cnt = .int
+  st = .int
+  dmy = .int
+  tpp = tpp + 1
+  base = psp
+  do forever
+    full = dotted_name()
+    alias = full
+    if pos(".", full) > 0 then alias = left(full, pos(".", full) - 1)
+    if accept("as") = 1 then alias = expect_name()
+    tn = mkname(alias)
+    dmy = bind_name(alias)
+    n = mk(N_IMPORT, tn, 0, 0)
+    n_s[n] = full
+    psp = psp + 1
+    ps[psp] = n
+    if accept(",") = 0 then leave
+  end
+  cnt = psp - base
+  if cnt = 1 then do
+    n = ps[psp]
+    psp = base
+    return n
+  end
+  st = plist(base)
+  return mkseq(st, cnt)
+
+p_from: procedure = .int
+  full = .string
+  nm = .string
+  alias = .string
+  tn = .int
+  base = .int
+  n = .int
+  cnt = .int
+  st = .int
+  dmy = .int
+  paren = .int
+  tpp = tpp + 1
+  full = dotted_name()
+  call expect "import"
+  paren = accept("(")
+  base = psp
+  if at("*") = 1 then do
+    tpp = tpp + 1
+    n = mk(N_FROMIMPORT, 0, 0, 0)
+    n_s[n] = full
+    n_d[n] = 1
+    return n
+  end
+  do forever
+    nm = expect_name()
+    alias = nm
+    if accept("as") = 1 then alias = expect_name()
+    tn = mkname(alias)
+    dmy = bind_name(alias)
+    psp = psp + 1
+    ps[psp] = mkc(mkstr(nm))
+    psp = psp + 1
+    ps[psp] = tn
+    if accept(",") = 0 then leave
+    if paren = 1 & at(")") = 1 then leave
+  end
+  if paren = 1 then call expect ")"
+  cnt = (psp - base) % 2
+  st = plist(base)
+  n = mk(N_FROMIMPORT, st, cnt, 0)
+  n_s[n] = full
+  return n

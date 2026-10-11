@@ -1,0 +1,777 @@
+/* ---------------------------------------------------------------------
+   Items, slices, targets, iterators
+   --------------------------------------------------------------------- */
+mkchr: procedure = .int
+  arg ch = .string
+  c = .int
+  c = c2d(ch)
+  if c < 256 & length(ch) = 1 then do
+    if chr_oop[c + 1] = 0 then chr_oop[c + 1] = mkstr(ch)
+    return chr_oop[c + 1]
+  end
+  return mkstr(ch)
+
+/* normalise slice bounds for a sequence of length n; result in sl_a (start), sl_b (step), sl_n (count) */
+slice_calc: procedure = .int
+  arg n = .int, lo = .int, hi = .int, st = .int
+  step = .int
+  lower = .int
+  upper = .int
+  start = .int
+  stop = .int
+  v = .int
+  if st = NONE_OOP | st = 0 then step = 1
+  else do
+    if numkind(st) \= 1 then return raise_exc(C_TYPEERROR, "slice indices must be integers or None or have an __index__ method")
+    step = ival(st)
+  end
+  if step = 0 then return raise_exc(C_VALUEERROR, "slice step cannot be zero")
+  if step > 0 then do
+    lower = 0
+    upper = n
+  end
+  else do
+    lower = -1
+    upper = n - 1
+  end
+  if lo = NONE_OOP | lo = 0 then do
+    if step > 0 then start = lower
+    else start = upper
+  end
+  else do
+    if numkind(lo) \= 1 then return raise_exc(C_TYPEERROR, "slice indices must be integers or None or have an __index__ method")
+    start = ival(lo)
+    if start < 0 then start = start + n
+    if start < lower then start = lower
+    if start > upper then start = upper
+  end
+  if hi = NONE_OOP | hi = 0 then do
+    if step > 0 then stop = upper
+    else stop = lower
+  end
+  else do
+    if numkind(hi) \= 1 then return raise_exc(C_TYPEERROR, "slice indices must be integers or None or have an __index__ method")
+    stop = ival(hi)
+    if stop < 0 then stop = stop + n
+    if stop < lower then stop = lower
+    if stop > upper then stop = upper
+  end
+  sl_a = start
+  sl_b = step
+  if step > 0 then do
+    if stop > start then sl_n = (stop - start - 1) % step + 1
+    else sl_n = 0
+  end
+  else do
+    if start > stop then sl_n = (start - stop - 1) % (0 - step) + 1
+    else sl_n = 0
+  end
+  return 1
+
+getslice: procedure = .int
+  arg o = .int, lo = .int, hi = .int, st = .int
+  k = .int
+  r = .int
+  i = .int
+  p = .int
+  s = .string
+  res = .string
+  t = .int
+  k = kind_of(o)
+  if k = K_STR then do
+    s = ob_s[o % 2]
+    r = slice_calc(length(s), lo, hi, st)
+    if r = 0 then return 0
+    if sl_b = 1 then return mkstr(substr(s, sl_a + 1, sl_n))
+    res = ""
+    p = sl_a
+    do i = 1 to sl_n
+      res = res || substr(s, p + 1, 1)
+      p = p + sl_b
+    end
+    return mkstr(res)
+  end
+  if k = K_LIST | k = K_TUPLE then do
+    r = slice_calc(ob_n[o % 2], lo, hi, st)
+    if r = 0 then return 0
+    if k = K_LIST then t = mklist(sl_n)
+    else t = mktuple(sl_n)
+    p = sl_a
+    do i = 0 to sl_n - 1
+      if k = K_LIST then call list_append t, sl[ob_p[o % 2] + p]
+      else sl[ob_p[t % 2] + i] = sl[ob_p[o % 2] + p]
+      p = p + sl_b
+    end
+    return t
+  end
+  if k = K_RANGE then do
+    r = slice_calc(range_len(o), lo, hi, st)
+    if r = 0 then return 0
+    return mkrange(ob_n[o % 2] + sl_a * ob_y[o % 2], ob_n[o % 2] + (sl_a + sl_n * sl_b) * ob_y[o % 2], sl_b * ob_y[o % 2])
+  end
+  if k = K_INST then do
+    r = cls_find(ob_c[o % 2], M___GETITEM__)
+    if r > 0 then do
+      t = newobj(K_SLICE)
+      ob_n[t % 2] = lo
+      ob_x[t % 2] = hi
+      ob_y[t % 2] = st
+      return call2(r, o, t)
+    end
+  end
+  return raise_exc(C_TYPEERROR, "'" || type_name(o) || "' object is not subscriptable")
+
+idx_int: procedure = .int
+  arg x = .int
+  if x // 2 \= 0 then return (x - 1) % 2
+  if ob_k[x % 2] = K_BOOL then return ival(x)
+  return 0
+
+getitem: procedure = .int
+  arg o = .int, ix = .int
+  k = .int
+  i = .int
+  n = .int
+  e = .int
+  m = .int
+  t = .int
+  s = .string
+  a = .int
+  st = .int
+  if o // 2 \= 0 then return raise_exc(C_TYPEERROR, "'int' object is not subscriptable")
+  k = ob_k[o % 2]
+  if k = K_LIST | k = K_TUPLE then do
+    if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL then do
+      if ob_k[ix % 2] = K_SLICE then return getslice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+      if kind_of(ix) = K_INST then do
+        m = cls_find(ob_c[ix % 2], M___INDEX__)
+        if m > 0 then ix = call1(m, ix)
+      end
+      else return raise_exc(C_TYPEERROR, "list indices must be integers or slices, not " || type_name(ix))
+    end
+    i = idx_int(ix)
+    n = ob_n[o % 2]
+    if i < 0 then i = i + n
+    if i < 0 | i >= n then do
+      if k = K_LIST then return raise_exc(C_INDEXERROR, "list index out of range")
+      return raise_exc(C_INDEXERROR, "tuple index out of range")
+    end
+    return sl[ob_p[o % 2] + i]
+  end
+  if k = K_DICT then do
+    e = dict_find(ob_x[o % 2], hashkey(ix))
+    if e > 0 then return de_val[e]
+    if ob_y[o % 2] \= 0 then do
+      t = callz(ob_y[o % 2])
+      if t = 0 then return 0
+      call dict_put ob_x[o % 2], hashkey(ix), ix, t
+      return t
+    end
+    return raise_key(ix)
+  end
+  if k = K_STR then do
+    if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then return getslice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL then return raise_exc(C_TYPEERROR, "string indices must be integers, not '" || type_name(ix) || "'")
+    i = idx_int(ix)
+    s = ob_s[o % 2]
+    n = length(s)
+    if i < 0 then i = i + n
+    if i < 0 | i >= n then return raise_exc(C_INDEXERROR, "string index out of range")
+    return mkchr(substr(s, i + 1, 1))
+  end
+  if k = K_RANGE then do
+    if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then return getslice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    i = idx_int(ix)
+    n = range_len(o)
+    if i < 0 then i = i + n
+    if i < 0 | i >= n then return raise_exc(C_INDEXERROR, "range object index out of range")
+    return mkint(ob_n[o % 2] + i * ob_y[o % 2])
+  end
+  if k = K_INST then do
+    m = cls_find(ob_c[o % 2], M___GETITEM__)
+    if m > 0 then return call2(m, o, ix)
+    return raise_exc(C_TYPEERROR, "'" || type_name(o) || "' object is not subscriptable")
+  end
+  if k = K_CLASS then return o
+  return raise_exc(C_TYPEERROR, "'" || type_name(o) || "' object is not subscriptable")
+
+raise_key: procedure = .int
+  arg key = .int
+  e = .int
+  t = .int
+  e = inst_new(C_KEYERROR)
+  t = mktuple(1)
+  sl[ob_p[t % 2]] = key
+  call inst_set e, M_ARGS, t
+  return raise_obj(e)
+
+setitem: procedure = .void
+  arg o = .int, ix = .int, v = .int
+  k = .int
+  i = .int
+  n = .int
+  m = .int
+  r = .int
+  it = .int
+  src = .int
+  newl = .int
+  j = .int
+  cnt = .int
+  if o // 2 \= 0 then do
+    r = raise_exc(C_TYPEERROR, "'int' object does not support item assignment")
+    return
+  end
+  k = ob_k[o % 2]
+  if k = K_LIST then do
+    if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then do
+      call setslice o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2], v
+      return
+    end
+    if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL then do
+      r = raise_exc(C_TYPEERROR, "list indices must be integers or slices, not " || type_name(ix))
+      return
+    end
+    i = idx_int(ix)
+    n = ob_n[o % 2]
+    if i < 0 then i = i + n
+    if i < 0 | i >= n then do
+      r = raise_exc(C_INDEXERROR, "list assignment index out of range")
+      return
+    end
+    sl[ob_p[o % 2] + i] = v
+    return
+  end
+  if k = K_DICT then do
+    call dict_put ob_x[o % 2], hashkey(ix), ix, v
+    return
+  end
+  if k = K_INST then do
+    m = cls_find(ob_c[o % 2], M___SETITEM__)
+    if m > 0 then do
+      r = call3(m, o, ix, v)
+      return
+    end
+  end
+  r = raise_exc(C_TYPEERROR, "'" || type_name(o) || "' object does not support item assignment")
+  return
+
+setslice: procedure = .void
+  arg o = .int, lo = .int, hi = .int, st = .int, v = .int
+  r = .int
+  src = .int
+  newl = .int
+  i = .int
+  j = .int
+  n = .int
+  cnt = .int
+  p = .int
+  n = ob_n[o % 2]
+  r = slice_calc(n, lo, hi, st)
+  if r = 0 then return
+  src = iter_list(v)
+  if src = 0 then return
+  if sl_b = 1 then do
+    newl = mklist(n + ob_n[src % 2])
+    do i = 0 to sl_a - 1
+      call list_append newl, sl[ob_p[o % 2] + i]
+    end
+    do i = 0 to ob_n[src % 2] - 1
+      call list_append newl, sl[ob_p[src % 2] + i]
+    end
+    do i = sl_a + sl_n to n - 1
+      call list_append newl, sl[ob_p[o % 2] + i]
+    end
+    ob_p[o % 2] = ob_p[newl % 2]
+    ob_n[o % 2] = ob_n[newl % 2]
+    ob_x[o % 2] = ob_x[newl % 2]
+    return
+  end
+  if ob_n[src % 2] \= sl_n then do
+    r = raise_exc(C_VALUEERROR, "attempt to assign sequence of size " || ob_n[src % 2] || " to extended slice of size " || sl_n)
+    return
+  end
+  p = sl_a
+  do i = 0 to sl_n - 1
+    sl[ob_p[o % 2] + p] = sl[ob_p[src % 2] + i]
+    p = p + sl_b
+  end
+  return
+
+delitem: procedure = .void
+  arg o = .int, ix = .int
+  k = .int
+  i = .int
+  n = .int
+  m = .int
+  r = .int
+  e = .int
+  j = .int
+  newl = .int
+  k = kind_of(o)
+  if k = K_LIST then do
+    if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then do
+      r = slice_calc(ob_n[o % 2], ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+      if r = 0 then return
+      newl = mklist(ob_n[o % 2])
+      do i = 0 to ob_n[o % 2] - 1
+        j = 0
+        if sl_b > 0 then do
+          if i >= sl_a & i < sl_a + sl_n * sl_b & (i - sl_a) // sl_b = 0 then j = 1
+        end
+        else do
+          if i <= sl_a & i > sl_a + sl_n * sl_b & (sl_a - i) // (0 - sl_b) = 0 then j = 1
+        end
+        if j = 0 then call list_append newl, sl[ob_p[o % 2] + i]
+      end
+      ob_p[o % 2] = ob_p[newl % 2]
+      ob_n[o % 2] = ob_n[newl % 2]
+      ob_x[o % 2] = ob_x[newl % 2]
+      return
+    end
+    i = idx_int(ix)
+    n = ob_n[o % 2]
+    if i < 0 then i = i + n
+    if i < 0 | i >= n then do
+      r = raise_exc(C_INDEXERROR, "list assignment index out of range")
+      return
+    end
+    do j = i to n - 2
+      sl[ob_p[o % 2] + j] = sl[ob_p[o % 2] + j + 1]
+    end
+    ob_n[o % 2] = n - 1
+    return
+  end
+  if k = K_DICT | k = K_SET then do
+    e = dict_del(ob_x[o % 2], hashkey(ix))
+    if e = 0 then r = raise_key(ix)
+    return
+  end
+  if k = K_INST then do
+    m = cls_find(ob_c[o % 2], M___DELITEM__)
+    if m > 0 then do
+      r = call2(m, o, ix)
+      return
+    end
+  end
+  r = raise_exc(C_TYPEERROR, "'" || type_name(o) || "' object doesn't support item deletion")
+  return
+
+/* ---- assignment targets ---- */
+store: procedure = .void
+  arg t = .int, v = .int, fb = .int
+  tt = .int
+  f = .int
+  d = .int
+  o = .int
+  r = .int
+  tt = n_t[t]
+  if tt = N_LOCAL then do
+    vp[fb + n_a[t]] = v
+    return
+  end
+  if tt = N_GLOBAL then do
+    vp[gfb + n_a[t]] = v
+    return
+  end
+  if tt = N_UP then do
+    f = fb
+    do d = 1 to n_b[t]
+      f = vp[f + 1]
+    end
+    vp[f + n_a[t]] = v
+    return
+  end
+  if tt = N_ATTR then do
+    o = ev(n_a[t], fb)
+    if o = 0 then return
+    call setattr_obj o, n_b[t], v
+    return
+  end
+  if tt = N_SUBSCR then do
+    o = ev(n_a[t], fb)
+    if o = 0 then return
+    if n_t[n_b[t]] = N_SLICE then do
+      d = n_b[t]
+      call setitem o, eval_slice(d, fb), v
+      return
+    end
+    d = ev(n_b[t], fb)
+    if d = 0 then return
+    call setitem o, d, v
+    return
+  end
+  if tt = N_TUPLE | tt = N_LIST then do
+    call unpack t, v, fb
+    return
+  end
+  r = raise_exc(C_TYPEERROR, "cannot assign")
+  return
+
+/* build a slice object from a N_SLICE node */
+eval_slice: procedure = .int
+  arg n = .int, fb = .int
+  lo = .int
+  hi = .int
+  st = .int
+  o = .int
+  lo = NONE_OOP
+  hi = NONE_OOP
+  st = NONE_OOP
+  if n_a[n] > 0 then do
+    lo = ev(n_a[n], fb)
+    if lo = 0 then return 0
+  end
+  if n_b[n] > 0 then do
+    hi = ev(n_b[n], fb)
+    if hi = 0 then return 0
+  end
+  if n_c[n] > 0 then do
+    st = ev(n_c[n], fb)
+    if st = 0 then return 0
+  end
+  o = newobj(K_SLICE)
+  ob_n[o % 2] = lo
+  ob_x[o % 2] = hi
+  ob_y[o % 2] = st
+  return o
+
+unpack: procedure = .void
+  arg t = .int, v = .int, fb = .int
+  src = .int
+  n = .int
+  cnt = .int
+  star = .int
+  i = .int
+  j = .int
+  before = .int
+  after = .int
+  mid = .int
+  item = .int
+  r = .int
+  tg = .int
+  if kind_of(v) = K_LIST | kind_of(v) = K_TUPLE then src = v
+  else do
+    src = iter_list(v)
+    if src = 0 then return
+  end
+  n = ob_n[src % 2]
+  cnt = n_b[t]
+  star = -1
+  do i = 0 to cnt - 1
+    if n_t[al[n_a[t] + i]] = N_STARRED then star = i
+  end
+  if star < 0 then do
+    if n \= cnt then do
+      if n > cnt then r = raise_exc(C_VALUEERROR, "too many values to unpack (expected " || cnt || ")")
+      else r = raise_exc(C_VALUEERROR, "not enough values to unpack (expected " || cnt || ", got " || n || ")")
+      return
+    end
+    do i = 0 to cnt - 1
+      call store al[n_a[t] + i], sl[ob_p[src % 2] + i], fb
+      if unw > 0 then return
+    end
+    return
+  end
+  before = star
+  after = cnt - 1 - star
+  if n < before + after then do
+    r = raise_exc(C_VALUEERROR, "not enough values to unpack (expected at least " || (before + after) || ", got " || n || ")")
+    return
+  end
+  do i = 0 to before - 1
+    call store al[n_a[t] + i], sl[ob_p[src % 2] + i], fb
+    if unw > 0 then return
+  end
+  mid = mklist(n - before - after)
+  do i = before to n - after - 1
+    call list_append mid, sl[ob_p[src % 2] + i]
+  end
+  call store n_a[al[n_a[t] + star]], mid, fb
+  if unw > 0 then return
+  do i = 0 to after - 1
+    call store al[n_a[t] + star + 1 + i], sl[ob_p[src % 2] + n - after + i], fb
+    if unw > 0 then return
+  end
+  return
+
+/* ---------------------------------------------------------------------
+   Iterators
+   --------------------------------------------------------------------- */
+mkiter: procedure = .int
+  arg sub = .int, x = .int, y = .int
+  o = .int
+  o = newobj(K_ITER)
+  ob_n[o % 2] = sub
+  ob_x[o % 2] = x
+  ob_y[o % 2] = y
+  return o
+
+iter_new: procedure = .int
+  arg x = .int
+  k = .int
+  m = .int
+  r = .int
+  it = .int
+  if x // 2 \= 0 then return raise_exc(C_TYPEERROR, "'int' object is not iterable")
+  k = ob_k[x % 2]
+  select
+    when k = K_LIST | k = K_TUPLE then return mkiter(IT_SEQ, x, 0)
+    when k = K_STR then return mkiter(IT_STR, x, 0)
+    when k = K_RANGE then do
+      it = mkiter(IT_RANGE, ob_n[x % 2], ob_x[x % 2])
+      ob_c[it % 2] = ob_y[x % 2]
+      return it
+    end
+    when k = K_DICT | k = K_SET then return mkiter(IT_DKEYS, x, dd_head[ob_x[x % 2]])
+    when k = K_GEN | k = K_ITER then return x
+    when k = K_INST then do
+      m = cls_find(ob_c[x % 2], M___ITER__)
+      if m > 0 then do
+        r = call1(m, x)
+        if r = 0 then return 0
+        if kind_of(r) = K_GEN | kind_of(r) = K_ITER then return r
+        if kind_of(r) = K_INST then do
+          if cls_find(ob_c[r % 2], M___NEXT__) > 0 then return mkiter(IT_INST, r, 0)
+        end
+        if kind_of(r) = K_LIST | kind_of(r) = K_TUPLE then return mkiter(IT_SEQ, r, 0)
+        return raise_exc(C_TYPEERROR, "iter() returned non-iterator of type '" || type_name(r) || "'")
+      end
+      m = cls_find(ob_c[x % 2], M___GETITEM__)
+      if m > 0 then return mkiter(IT_GETITEM, x, 0)
+      return raise_exc(C_TYPEERROR, "'" || type_name(x) || "' object is not iterable")
+    end
+    when k = K_FILE then do
+      return mkiter(IT_FILE, x, 0)
+    end
+    otherwise return raise_exc(C_TYPEERROR, "'" || type_name(x) || "' object is not iterable")
+  end
+  return 0
+
+/* next item or 0 (exhausted, or an exception is pending in unw) */
+iter_next: procedure = .int
+  arg it = .int
+  ix = .int
+  sub = .int
+  i = .int
+  src = .int
+  v = .int
+  e = .int
+  s = .string
+  step = .int
+  t = .int
+  n = .int
+  j = .int
+  k = .int
+  r = .int
+  m = .int
+  ix = it % 2
+  if ob_k[ix] = K_GEN then return gen_resume(ob_x[ix], NONE_OOP)
+  sub = ob_n[ix]
+  select
+    when sub = IT_SEQ then do
+      src = ob_x[ix]
+      i = ob_y[ix]
+      if i >= ob_n[src % 2] then return 0
+      ob_y[ix] = i + 1
+      return sl[ob_p[src % 2] + i]
+    end
+    when sub = IT_RANGE then do
+      v = ob_x[ix]
+      step = ob_c[ix]
+      if step > 0 then do
+        if v >= ob_y[ix] then return 0
+      end
+      else do
+        if v <= ob_y[ix] then return 0
+      end
+      ob_x[ix] = v + step
+      return v * 2 + 1
+    end
+    when sub = IT_STR then do
+      src = ob_x[ix]
+      i = ob_y[ix]
+      s = ob_s[src % 2]
+      if i >= length(s) then return 0
+      ob_y[ix] = i + 1
+      return mkchr(substr(s, i + 1, 1))
+    end
+    when sub = IT_DKEYS | sub = IT_DITEMS | sub = IT_DVALS then do
+      e = de_live_from(ob_y[ix])
+      if e = 0 then return 0
+      ob_y[ix] = de_next[e]
+      if sub = IT_DKEYS then return de_key[e]
+      if sub = IT_DVALS then return de_val[e]
+      t = mktuple(2)
+      sl[ob_p[t % 2]] = de_key[e]
+      sl[ob_p[t % 2] + 1] = de_val[e]
+      return t
+    end
+    when sub = IT_INST then do
+      r = call1(cls_find(ob_c[ob_x[ix] % 2], M___NEXT__), ob_x[ix])
+      if r = 0 then do
+        if unw = U_RAISE then do
+          if cls_issub(ob_c[unw_v % 2], C_STOPITERATION) = 1 then unw = 0
+        end
+      end
+      return r
+    end
+    when sub = IT_ENUM then do
+      v = iter_next(ob_x[ix])
+      if v = 0 then return 0
+      t = mktuple(2)
+      sl[ob_p[t % 2]] = ob_y[ix] * 2 + 1
+      sl[ob_p[t % 2] + 1] = v
+      ob_y[ix] = ob_y[ix] + 1
+      return t
+    end
+    when sub = IT_ZIP then do
+      n = ob_c[ix]
+      t = mktuple(n)
+      do j = 0 to n - 1
+        v = iter_next(sl[ob_p[ix] + j])
+        if v = 0 then return 0
+        sl[ob_p[t % 2] + j] = v
+      end
+      return t
+    end
+    when sub = IT_MAP then do
+      n = ob_c[ix]
+      m = asp
+      do j = 0 to n - 1
+        v = iter_next(sl[ob_p[ix] + j])
+        if v = 0 then do
+          asp = m
+          return 0
+        end
+        call push v
+      end
+      r = docall(ob_x[ix], m, n, 0)
+      asp = m
+      return r
+    end
+    when sub = IT_FILTER then do
+      do forever
+        v = iter_next(ob_y[ix])
+        if v = 0 then return 0
+        if ob_x[ix] = 0 then do
+          if truthy(v) = 1 then return v
+        end
+        else do
+          r = call1(ob_x[ix], v)
+          if r = 0 then return 0
+          if truthy(r) = 1 then return v
+        end
+        if unw > 0 then return 0
+      end
+    end
+    when sub = IT_REV then do
+      src = ob_x[ix]
+      i = ob_y[ix]
+      if i < 0 then return 0
+      ob_y[ix] = i - 1
+      if kind_of(src) = K_STR then return mkchr(substr(ob_s[src % 2], i + 1, 1))
+      return sl[ob_p[src % 2] + i]
+    end
+    when sub = IT_GETITEM then do
+      i = ob_y[ix]
+      r = call2(cls_find(ob_c[ob_x[ix] % 2], M___GETITEM__), ob_x[ix], mkint(i))
+      if r = 0 then do
+        if unw = U_RAISE then do
+          if cls_issub(ob_c[unw_v % 2], C_INDEXERROR) = 1 | cls_issub(ob_c[unw_v % 2], C_STOPITERATION) = 1 then unw = 0
+        end
+        return 0
+      end
+      ob_y[ix] = i + 1
+      return r
+    end
+    when sub = IT_FILE then do
+      return file_readline(ob_x[ix], 1)
+    end
+    when sub = IT_CHAIN then do
+      do forever
+        src = ob_x[ix]
+        if src = 0 then do
+          if ob_y[ix] >= ob_n[ob_c[ix] % 2] then return 0
+          src = iter_new(sl[ob_p[ob_c[ix] % 2] + ob_y[ix]])
+          if src = 0 then return 0
+          ob_x[ix] = src
+          ob_y[ix] = ob_y[ix] + 1
+        end
+        v = iter_next(src)
+        if v \= 0 then return v
+        if unw > 0 then return 0
+        ob_x[ix] = 0
+      end
+    end
+    when sub = IT_COUNT then do
+      v = ob_x[ix]
+      ob_x[ix] = v + ob_y[ix]
+      return v * 2 + 1
+    end
+    when sub = IT_TAKEWHILE then do
+      if ob_c[ix] = 1 then return 0
+      v = iter_next(ob_y[ix])
+      if v = 0 then return 0
+      r = call1(ob_x[ix], v)
+      if r = 0 then return 0
+      if truthy(r) = 1 then return v
+      ob_c[ix] = 1
+      return 0
+    end
+    when sub = IT_ISLICE then do
+      /* ob_x source, ob_y next index, ob_n2 handled via slots: stop, step, current */
+      do while sl[ob_p[ix] + 2] < ob_y[ix]
+        v = iter_next(ob_x[ix])
+        if v = 0 then return 0
+        sl[ob_p[ix] + 2] = sl[ob_p[ix] + 2] + 1
+      end
+      if sl[ob_p[ix]] >= 0 & ob_y[ix] >= sl[ob_p[ix]] then return 0
+      v = iter_next(ob_x[ix])
+      if v = 0 then return 0
+      sl[ob_p[ix] + 2] = sl[ob_p[ix] + 2] + 1
+      ob_y[ix] = ob_y[ix] + sl[ob_p[ix] + 1]
+      return v
+    end
+    otherwise return 0
+  end
+  return 0
+
+/* all items of an iterable as a new list (0 on error) */
+iter_list: procedure = .int
+  arg x = .int
+  k = .int
+  l = .int
+  it = .int
+  v = .int
+  i = .int
+  n = .int
+  e = .int
+  k = kind_of(x)
+  if k = K_LIST | k = K_TUPLE then do
+    n = ob_n[x % 2]
+    l = mklist(n)
+    do i = 0 to n - 1
+      sl[ob_p[l % 2] + i] = sl[ob_p[x % 2] + i]
+    end
+    ob_n[l % 2] = n
+    return l
+  end
+  if k = K_DICT | k = K_SET then do
+    l = mklist(dd_n[ob_x[x % 2]])
+    e = dd_head[ob_x[x % 2]]
+    do while e > 0
+      if de_live[e] = 1 then call list_append l, de_key[e]
+      e = de_next[e]
+    end
+    return l
+  end
+  it = iter_new(x)
+  if it = 0 then return 0
+  l = mklist(8)
+  do forever
+    v = iter_next(it)
+    if v = 0 then leave
+    call list_append l, v
+  end
+  if unw > 0 then return 0
+  return l

@@ -1,0 +1,574 @@
+/* ---------------------------------------------------------------------
+   Frames, calls, attributes
+   --------------------------------------------------------------------- */
+alloc_frame: procedure = .int
+  arg size = .int
+  fb = .int
+  i = .int
+  fb = fl_head[size]
+  if fb > 0 then fl_head[size] = vp[fb]
+  else do
+    fb = nvp + 1
+    nvp = nvp + size
+  end
+  do i = 0 to size - 1
+    vp[fb + i] = 0
+  end
+  return fb
+
+free_frame: procedure = .void
+  arg fb = .int, size = .int
+  vp[fb] = fl_head[size]
+  fl_head[size] = fb
+  return
+
+/* push an argument on the staging stack */
+push: procedure = .void
+  arg v = .int
+  asp = asp + 1
+  ast[asp] = v
+  asn[asp] = ""
+  return
+
+/* insert v before the first argument at ast[base+1 ..] (total entries = tot) */
+ast_insert: procedure = .void
+  arg base = .int, tot = .int, v = .int
+  i = .int
+  do i = tot to 1 by -1
+    ast[base + i + 1] = ast[base + i]
+    asn[base + i + 1] = asn[base + i]
+  end
+  ast[base + 1] = v
+  asn[base + 1] = ""
+  asp = base + tot + 1
+  return
+
+call0: procedure = .int
+  arg f = .int, a = .int
+  return call1(f, a)
+
+call1: procedure = .int
+  arg f = .int, a = .int
+  base = .int
+  r = .int
+  base = asp
+  call push a
+  r = docall(f, base, 1, 0)
+  asp = base
+  return r
+
+call2: procedure = .int
+  arg f = .int, a = .int, b = .int
+  base = .int
+  r = .int
+  base = asp
+  call push a
+  call push b
+  r = docall(f, base, 2, 0)
+  asp = base
+  return r
+
+call3: procedure = .int
+  arg f = .int, a = .int, b = .int, c = .int
+  base = .int
+  r = .int
+  base = asp
+  call push a
+  call push b
+  call push c
+  r = docall(f, base, 3, 0)
+  asp = base
+  return r
+
+callz: procedure = .int
+  arg f = .int
+  base = .int
+  r = .int
+  base = asp
+  r = docall(f, base, 0, 0)
+  asp = base
+  return r
+
+/* call f with the arguments ast[base+1 .. base+na] positional and na+1 .. na+nk keywords */
+docall: procedure = .int
+  arg f = .int, base = .int, na = .int, nk = .int
+  k = .int
+  r = .int
+  m = .int
+  c = .int
+  if f // 2 \= 0 then return raise_exc(C_TYPEERROR, "'int' object is not callable")
+  k = ob_k[f % 2]
+  select
+    when k = K_FUNC then return callfunc(f, base, na, nk)
+    when k = K_BUILTIN then return bcall(ob_x[f % 2], base, na, nk)
+    when k = K_BMETH then do
+      call ast_insert base, na + nk, ob_y[f % 2]
+      return docall(ob_x[f % 2], base, na + 1, nk)
+    end
+    when k = K_BMETHB then return bmeth(ob_y[f % 2], ob_x[f % 2], base, na, nk)
+    when k = K_CLASS then return instantiate(ob_x[f % 2], base, na, nk)
+    when k = K_INST then do
+      m = cls_find(ob_c[f % 2], M___CALL__)
+      if m = 0 then return raise_exc(C_TYPEERROR, "'" || type_name(f) || "' object is not callable")
+      call ast_insert base, na + nk, f
+      return docall(m, base, na + 1, nk)
+    end
+    when k = K_STATIC then return docall(ob_x[f % 2], base, na, nk)
+    otherwise return raise_exc(C_TYPEERROR, "'" || type_name(f) || "' object is not callable")
+  end
+  return 0
+
+fd_missing: procedure = .int
+  arg fd = .int, names = .string, cnt = .int
+  if cnt = 1 then return raise_exc(C_TYPEERROR, fd_name[fd] || "() missing 1 required positional argument: " || names)
+  return raise_exc(C_TYPEERROR, fd_name[fd] || "() missing " || cnt || " required positional arguments: " || names)
+
+/* general argument binding; returns 1 or 0 (error) */
+bind_args: procedure = .int
+  arg f = .int, fd = .int, nf = .int, base = .int, na = .int, nk = .int
+  i = .int
+  j = .int
+  np = .int
+  r0 = .int
+  nr = .int
+  kd = .int
+  nm = .string
+  found = .int
+  sl0 = .int
+  kw = .int
+  miss = .string
+  nmiss = .int
+  d = .int
+  extra = .int
+  t = .int
+  np = fd_np[fd]
+  r0 = fd_ps[fd]
+  nr = fd_nr[fd]
+  /* positional */
+  do i = 1 to na
+    if i <= np then vp[nf + 1 + i] = ast[base + i]
+  end
+  if na > np then do
+    if fd_vs[fd] = 0 then do
+      call raise_exc C_TYPEERROR, fd_name[fd] || "() takes " || np || " positional argument" || plural(np) || " but " || na || " were given"
+      return 0
+    end
+    vp[nf + fd_vs[fd]] = tup_from_ast(base + np + 1, base + na)
+  end
+  else if fd_vs[fd] > 0 then vp[nf + fd_vs[fd]] = mktuple(0)
+  if fd_ks[fd] > 0 then vp[nf + fd_ks[fd]] = dict_new(K_DICT)
+  /* keywords */
+  do kw = 1 to nk
+    nm = asn[base + na + kw]
+    found = 0
+    do j = 1 to nr
+      kd = pr_kind[r0 + j - 1]
+      if (kd = 0 | kd = 2) & pr_name[r0 + j - 1] == nm then do
+        if vp[nf + pr_slot[r0 + j - 1]] \= 0 then do
+          call raise_exc C_TYPEERROR, fd_name[fd] || "() got multiple values for argument '" || nm || "'"
+          return 0
+        end
+        vp[nf + pr_slot[r0 + j - 1]] = ast[base + na + kw]
+        found = 1
+        leave
+      end
+    end
+    if found = 0 then do
+      if fd_ks[fd] > 0 then call dset vp[nf + fd_ks[fd]], mkstr(nm), ast[base + na + kw]
+      else do
+        call raise_exc C_TYPEERROR, fd_name[fd] || "() got an unexpected keyword argument '" || nm || "'"
+        return 0
+      end
+    end
+  end
+  /* defaults and missing */
+  nmiss = 0
+  miss = ""
+  do j = 1 to nr
+    kd = pr_kind[r0 + j - 1]
+    if kd = 0 | kd = 2 then do
+      if vp[nf + pr_slot[r0 + j - 1]] = 0 then do
+        d = sl[ob_p[f % 2] + j - 1]
+        if d \= 0 then vp[nf + pr_slot[r0 + j - 1]] = d
+        else do
+          nmiss = nmiss + 1
+          if nmiss > 1 then miss = miss || " and "
+          miss = miss || "'" || pr_name[r0 + j - 1] || "'"
+        end
+      end
+    end
+  end
+  if nmiss > 0 then do
+    call fd_missing fd, miss, nmiss
+    return 0
+  end
+  return 1
+
+plural: procedure = .string
+  arg n = .int
+  if n = 1 then return ""
+  return "s"
+
+callfunc: procedure = .int
+  arg f = .int, base = .int, na = .int, nk = .int
+  fd = .int
+  nf = .int
+  size = .int
+  np = .int
+  i = .int
+  r = .int
+  d = .int
+  ok = .int
+  fx = .int
+  fd = ob_x[f % 2]
+  size = fd_ns[fd]
+  np = fd_np[fd]
+  nf = alloc_frame(size)
+  vp[nf + 1] = ob_y[f % 2]
+  if nk = 0 & fd_cx[fd] = 0 & na <= np then do
+    do i = 1 to na
+      vp[nf + 1 + i] = ast[base + i]
+    end
+    if na < np then do
+      do i = na + 1 to np
+        d = sl[ob_p[f % 2] + i - 1]
+        if d = 0 then do
+          call free_frame nf, size
+          return fd_missing(fd, "'" || pr_name[fd_ps[fd] + i - 1] || "'", 1)
+        end
+        vp[nf + 1 + i] = d
+      end
+    end
+  end
+  else do
+    ok = bind_args(f, fd, nf, base, na, nk)
+    if ok = 0 then do
+      call free_frame nf, size
+      return 0
+    end
+  end
+  if fd_fl[fd] // 2 = 1 then return gen_new(fd, nf)
+  cdepth = cdepth + 1
+  if cdepth > 900 then do
+    cdepth = cdepth - 1
+    return raise_exc(C_RECURSIONERROR, "maximum recursion depth exceeded")
+  end
+  call ex fd_body[fd], nf
+  cdepth = cdepth - 1
+  if unw = U_RET then do
+    unw = 0
+    r = unw_v
+  end
+  else if unw = 0 then r = NONE_OOP
+  else r = 0
+  if (fd_fl[fd] // 4) < 2 then call free_frame nf, size
+  return r
+
+/* instantiate a class */
+instantiate: procedure = .int
+  arg c = .int, base = .int, na = .int, nk = .int
+  inst = .int
+  init = .int
+  r = .int
+  fl = .int
+  fl = cl_flags[c]
+  if fl // 2 = 1 & (fl // 4) < 2 then return bcall_type(c, base, na, nk)
+  inst = inst_new(c)
+  if (fl // 4) >= 2 then do
+    call inst_set inst, M_ARGS, tup_from_ast(base + 1, base + na)
+  end
+  init = cls_find(c, M___INIT__)
+  if init > 0 then do
+    call ast_insert base, na + nk, inst
+    r = docall(init, base, na + 1, nk)
+    if r = 0 then return 0
+    if r \= NONE_OOP then return raise_exc(C_TYPEERROR, "__init__() should return None, not '" || type_name(r) || "'")
+  end
+  else if na + nk > 0 & (fl // 4) < 2 then return raise_exc(C_TYPEERROR, cl_name[c] || "() takes no arguments")
+  return inst
+
+/* ---------------------------------------------------------------------
+   Attributes
+   --------------------------------------------------------------------- */
+no_attr: procedure = .int
+  arg o = .int, nid = .int
+  if kind_of(o) = K_CLASS then return raise_exc(C_ATTRIBUTEERROR, "type object '" || cl_name[ob_x[o % 2]] || "' has no attribute '" || nid_name[nid] || "'")
+  if kind_of(o) = K_MODULE then return raise_exc(C_ATTRIBUTEERROR, "module '" || ob_s[o % 2] || "' has no attribute '" || nid_name[nid] || "'")
+  return raise_exc(C_ATTRIBUTEERROR, "'" || type_name(o) || "' object has no attribute '" || nid_name[nid] || "'")
+
+mkbmeth: procedure = .int
+  arg fn = .int, slf = .int
+  o = .int
+  o = newobj(K_BMETH)
+  ob_x[o % 2] = fn
+  ob_y[o % 2] = slf
+  return o
+
+/* a value found in a class table, as seen from instance o (o = 0 for the class itself) */
+bind_attr: procedure = .int
+  arg v = .int, o = .int, c = .int
+  k = .int
+  k = kind_of(v)
+  if k = K_FUNC | k = K_BUILTIN then do
+    if o = 0 then return v
+    return mkbmeth(v, o)
+  end
+  if k = K_PROP then do
+    if o = 0 then return v
+    return call1(ob_x[v % 2], o)
+  end
+  if k = K_STATIC then return ob_x[v % 2]
+  if k = K_CLSM then return mkbmeth(ob_x[v % 2], cl_obj[c])
+  return v
+
+getattr_obj: procedure = .int
+  arg o = .int, nid = .int, node = .int
+  k = .int
+  ix = .int
+  c = .int
+  s = .string
+  v = .int
+  slot = .int
+  m = .int
+  k = kind_of(o)
+  if k = K_INST then do
+    ix = o % 2
+    c = ob_c[ix]
+    if node > 0 then do
+      if n_ic[node] = c & n_iv[node] < 0 then do
+        v = sl[ob_p[ix] - n_iv[node] - 1]
+        if v \= 0 then return v
+      end
+    end
+    s = sm[c || "." || nid]
+    if s \== "" then do
+      slot = s as .int
+      v = sl[ob_p[ix] + slot - 1]
+      if v \= 0 then do
+        if node > 0 then do
+          n_ic[node] = c
+          n_iv[node] = 0 - slot
+        end
+        return v
+      end
+    end
+    v = cls_find(c, nid)
+    if v > 0 then return bind_attr(v, o, c)
+    if nid = M___CLASS__ then return cl_obj[c]
+    m = cls_find(c, M___GETATTR__)
+    if m > 0 then return call2(m, o, mkstr(nid_name[nid]))
+    if nid = M___DICT__ then return inst_dict(o)
+    return no_attr(o, nid)
+  end
+  if k = K_CLASS then do
+    c = ob_x[o % 2]
+    v = cls_find(c, nid)
+    if v > 0 then do
+      if kind_of(v) = K_CLSM then return mkbmeth(ob_x[v % 2], o)
+      if kind_of(v) = K_STATIC then return ob_x[v % 2]
+      return v
+    end
+    if nid = M___NAME__ | nid = M___QUALNAME__ then return mkstr(cl_name[c])
+    if nid = M___BASES__ then do
+      if cl_base[c] = 0 then return mktuple(0)
+      v = mktuple(1)
+      sl[ob_p[v % 2]] = cl_obj[cl_base[c]]
+      return v
+    end
+    if nid = M___MRO__ then return cls_mro(c)
+    if nid = M___MODULE__ then return mkstr("__main__")
+    if nid = M___DOC__ then return NONE_OOP
+    if nid = M___CLASS__ then return cl_obj[C_TYPE]
+    return no_attr(o, nid)
+  end
+  if k = K_MODULE then do
+    s = modattr[ob_s[o % 2] || "." || nid_name[nid]]
+    if s \== "" then return s as .int
+    return no_attr(o, nid)
+  end
+  if k = K_SUPER then do
+    c = cl_base[ob_x[ob_y[o % 2] % 2]]
+    v = cls_find(c, nid)
+    if v = 0 then return raise_exc(C_ATTRIBUTEERROR, "'super' object has no attribute '" || nid_name[nid] || "'")
+    return bind_attr(v, ob_x[o % 2], c)
+  end
+  if k = K_FUNC then do
+    if nid = M___NAME__ | nid = M___QUALNAME__ then return mkstr(fd_name[ob_x[o % 2]])
+    if nid = M___DOC__ then return NONE_OOP
+    if nid = M___CLASS__ then return cl_obj[C_FUNCTION]
+    return no_attr(o, nid)
+  end
+  if k = K_BUILTIN then do
+    if nid = M___NAME__ then return mkstr(bi_name[ob_x[o % 2]])
+    return no_attr(o, nid)
+  end
+  if k = K_BMETH then do
+    if nid = M___NAME__ then return mkstr(fd_name[ob_x[ob_x[o % 2] % 2]])
+    if nid = M___SELF__ then return ob_y[o % 2]
+    if nid = M___FUNC__ then return ob_x[o % 2]
+    return no_attr(o, nid)
+  end
+  if k = K_PROP then do
+    if nid = M_SETTER then return mkbmethb(o, nid)
+    if nid = M_GETTER then return mkbmethb(o, nid)
+    return no_attr(o, nid)
+  end
+  if nid = M___CLASS__ then return cl_obj[cls_of(o)]
+  if nid = M___NAME__ & k = K_GEN then return mkstr(fd_name[gn_fd[ob_x[o % 2]]])
+  if k = K_INT | k = K_BOOL | k = K_BIG then do
+    if nid = M_REAL | nid = M_NUMERATOR then return o
+    if nid = M_IMAG then return mkint(0)
+    if nid = M_DENOMINATOR then return mkint(1)
+  end
+  if k = K_FLOAT then do
+    if nid = M_REAL then return o
+    if nid = M_IMAG then return mkfloat(0.0)
+  end
+  if k = K_RANGE then do
+    if nid = M_START then return mkint(ob_n[o % 2])
+    if nid = M_STOP then return mkint(ob_x[o % 2])
+    if nid = M_STEP then return mkint(ob_y[o % 2])
+  end
+  if k = K_FILE then do
+    if nid = M_NAME then return mkstr(ob_s[o % 2])
+    if nid = M_CLOSED then return mkbool(ob_c[o % 2])
+  end
+  return mkbmethb(o, nid)
+
+inst_dict: procedure = .int
+  arg o = .int
+  d = .int
+  c = .int
+  s = .string
+  i = .int
+  d = dict_new(K_DICT)
+  return d
+
+cls_mro: procedure = .int
+  arg c = .int
+  l = .int
+  l = mklist(4)
+  do while c > 0
+    call list_append l, cl_obj[c]
+    c = cl_base[c]
+  end
+  return tup_of_list(l)
+
+mkbmethb: procedure = .int
+  arg o = .int, nid = .int
+  b = .int
+  b = newobj(K_BMETHB)
+  ob_x[b % 2] = nid
+  ob_y[b % 2] = o
+  return b
+
+/* attribute lookup for a call: a plain function found in the class is returned unbound
+   with ev_self set to the receiver; built-in type methods return 1 with ev_bm = 1 */
+getattr_call: procedure = .int
+  arg o = .int, nid = .int, node = .int
+  k = .int
+  c = .int
+  v = .int
+  s = .string
+  ix = .int
+  slot = .int
+  ev_self = 0
+  ev_bm = 0
+  k = kind_of(o)
+  if k = K_INST then do
+    ix = o % 2
+    c = ob_c[ix]
+    if node > 0 then do
+      if n_ic[node] = c & n_ig[node] = cgen & n_iv[node] > 0 then do
+        ev_self = o
+        return n_iv[node]
+      end
+    end
+    s = sm[c || "." || nid]
+    if s \== "" then do
+      slot = s as .int
+      v = sl[ob_p[ix] + slot - 1]
+      if v \= 0 then return v
+    end
+    v = cls_find(c, nid)
+    if v > 0 then do
+      if kind_of(v) = K_FUNC then do
+        ev_self = o
+        if node > 0 & s == "" then do
+          n_ic[node] = c
+          n_ig[node] = cgen
+          n_iv[node] = v
+        end
+        return v
+      end
+      return bind_attr(v, o, c)
+    end
+    return getattr_obj(o, nid, 0)
+  end
+  if k = K_STR | k = K_LIST | k = K_DICT | k = K_TUPLE | k = K_SET | k = K_FLOAT | k = K_INT | k = K_BIG | k = K_BOOL | k = K_GEN | k = K_FILE | k = K_RANGE then do
+    if nid = M___CLASS__ | nid = M___NAME__ then return getattr_obj(o, nid, 0)
+    if (k = K_INT | k = K_BIG | k = K_BOOL | k = K_FLOAT) & (nid = M_REAL | nid = M_IMAG) then return getattr_obj(o, nid, 0)
+    ev_bm = 1
+    ev_self = o
+    return 1
+  end
+  if k = K_SUPER then do
+    c = cl_base[ob_x[ob_y[o % 2] % 2]]
+    v = cls_find(c, nid)
+    if v = 0 then return raise_exc(C_ATTRIBUTEERROR, "'super' object has no attribute '" || nid_name[nid] || "'")
+    ev_self = ob_x[o % 2]
+    if kind_of(v) = K_FUNC | kind_of(v) = K_BUILTIN then return v
+    return bind_attr(v, ob_x[o % 2], c)
+  end
+  if k = K_CLASS then do
+    c = ob_x[o % 2]
+    v = cls_find(c, nid)
+    if v > 0 then do
+      if kind_of(v) = K_CLSM then return mkbmeth(ob_x[v % 2], o)
+      if kind_of(v) = K_STATIC then return ob_x[v % 2]
+      return v
+    end
+    if cl_flags[c] // 2 = 1 then do
+      /* str.upper(s) style unbound call of a builtin type method */
+      ev_bm = 2
+      ev_self = c
+      return 1
+    end
+  end
+  return getattr_obj(o, nid, 0)
+
+setattr_obj: procedure = .void
+  arg o = .int, nid = .int, v = .int
+  k = .int
+  c = .int
+  p = .int
+  r = .int
+  k = kind_of(o)
+  if k = K_INST then do
+    c = ob_c[o % 2]
+    p = cls_find(c, nid)
+    if p > 0 then do
+      if kind_of(p) = K_PROP then do
+        if ob_y[p % 2] = 0 then do
+          r = raise_exc(C_ATTRIBUTEERROR, "can't set attribute '" || nid_name[nid] || "'")
+          return
+        end
+        r = call2(ob_y[p % 2], o, v)
+        return
+      end
+    end
+    p = cls_find(c, M___SETATTR__)
+    if p > 0 & nid \= M___CLASS__ then do
+      r = call3(p, o, mkstr(nid_name[nid]), v)
+      return
+    end
+    call inst_set o, nid, v
+    return
+  end
+  if k = K_CLASS then do
+    call cls_set ob_x[o % 2], nid, v
+    return
+  end
+  if k = K_FUNC then return
+  r = raise_exc(C_ATTRIBUTEERROR, "'" || type_name(o) || "' object has no attribute '" || nid_name[nid] || "'")
+  return

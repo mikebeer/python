@@ -1,0 +1,529 @@
+/* =========================================================================
+   PY.CREXX  --  a Python 3 subset interpreter written in CREXX (Level B)
+
+   Usage:
+       crexx py.crexx -args [-c code] [file.py [arg ...]]
+   With no file the program is read from standard input.
+   ========================================================================= */
+options levelb numeric_classic
+import rxfnsb
+import rxfloat
+import _rxsysb
+@@EXPOSE@@
+
+arg av = .string[]
+call init
+script = ""
+code = ""
+have_code = 0
+nfiles = 0
+ia = 1
+do while ia <= av.0
+  oa = av[ia]
+  if oa == "-c" & ia < av.0 & nfiles = 0 & have_code = 0 then do
+    ia = ia + 1
+    code = av[ia]
+    have_code = 1
+    nsargs = nsargs + 1
+    sargs[nsargs] = "-c"
+  end
+  else if (oa == "-h" | oa == "--help") & nfiles = 0 & have_code = 0 then do
+    say "usage: py [-c code | file.py] [arg ...]"
+    exit 0
+  end
+  else do
+    if nfiles = 0 & have_code = 0 then do
+      script = oa
+      nfiles = 1
+    end
+    nsargs = nsargs + 1
+    sargs[nsargs] = oa
+  end
+  ia = ia + 1
+end
+call boot
+if have_code = 1 then rc_exit = run_source(code, "<string>")
+else if nfiles = 1 then do
+  utxt = read_file(script)
+  if utxt == "" & file_exists(script) = 0 then do
+    call errs "py: can't open file '" || script || "': [Errno 2] No such file or directory" || '0a'x
+    rc_exit = 2
+  end
+  else rc_exit = run_source(utxt, script)
+end
+else do
+  utxt = ""
+  eofl = 0
+  line = ""
+  do forever
+    line = ""
+    assembler freadline line, h_in
+    assembler feof eofl, h_in
+    if eofl > 0 & length(line) = 0 then leave
+    utxt = utxt || line || '0a'x
+  end
+  rc_exit = run_source(utxt, "<stdin>")
+end
+call flush_out
+exit rc_exit
+
+/* ---------------------------------------------------------------------
+   Reading a whole file
+   --------------------------------------------------------------------- */
+read_file: procedure = .string
+  arg fn = .string
+  fid = .int
+  eof = .int
+  rcx = .int
+  line = .string
+  acc = .string
+  chunk = .string
+  nl = .int
+  rmode = .string
+  rmode = "r"
+  fid = 0
+  assembler fopen fid, fn, rmode
+  if fid = 0 then return ""
+  acc = ""
+  chunk = ""
+  nl = 0
+  eof = 0
+  do while eof = 0
+    line = ""
+    assembler freadline line, fid
+    assembler feof eof, fid
+    if eof > 0 & length(line) = 0 then leave
+    if right(line, 1) == '0d'x then line = left(line, length(line) - 1)
+    chunk = chunk || line || '0a'x
+    nl = nl + 1
+    if nl >= 100 then do
+      acc = acc || chunk
+      chunk = ""
+      nl = 0
+    end
+  end
+  assembler fclose rcx, fid
+  return acc || chunk
+
+file_exists: procedure = .int
+  arg fn = .string
+  fid = .int
+  rcx = .int
+  rmode = .string
+  rmode = "r"
+  fid = 0
+  assembler fopen fid, fn, rmode
+  if fid = 0 then return 0
+  assembler fclose rcx, fid
+  return 1
+
+/* ---------------------------------------------------------------------
+   Running a program text; returns the process exit code
+   --------------------------------------------------------------------- */
+run_source: procedure = .int
+  arg src = .string, name = .string
+  body = .int
+  sc = .int
+  rcode = .int
+  e = .int
+  c = .int
+  a = .int
+  s = .string
+  v = .int
+  ntk = 0
+  nnode = 0
+  nal = 0
+  psp = 0
+  pe = 0
+  pe_msg = ""
+  tpp = 1
+  cursc = 0
+  call lex_text src, 0
+  sc = scope_push(SK_MODULE)
+  sc_id[sc] = 0
+  body = p_file()
+  call scope_end sc
+  if pe = 1 then do
+    call errs "  File " || '"' || name || '"' || '0a'x || pe_msg || '0a'x
+    return 1
+  end
+  gfb = alloc_frame(sc_n[1] + 1)
+  unw = 0
+  exc_cur = 0
+  call ex body, gfb
+  if unw = 0 then return 0
+  rcode = 1
+  if unw = U_RAISE then do
+    e = unw_v
+    unw = 0
+    c = ob_c[e % 2]
+    if cls_issub(c, C_SYSTEMEXIT) = 1 then do
+      a = exc_args(e)
+      if ob_n[a % 2] = 0 then return 0
+      v = sl[ob_p[a % 2]]
+      if v = NONE_OOP then return 0
+      if numkind(v) = 1 then return ival(v) // 256
+      call errs str_of(v) || '0a'x
+      return 1
+    end
+    s = str_of(e)
+    unw = 0
+    call errs "Traceback (most recent call last):" || '0a'x
+    call errs '  File "' || name || '", line 1, in <module>' || '0a'x
+    if s == "" then call errs cl_name[c] || '0a'x
+    else call errs cl_name[c] || ": " || s || '0a'x
+    return 1
+  end
+  unw = 0
+  return 0
+
+/* ---------------------------------------------------------------------
+   init: declare and initialise all shared state
+   --------------------------------------------------------------------- */
+init: procedure = .void
+  rc_exit = 0
+  obuf = ""
+  h_out = _open("stdout", "w")
+  h_err = _open("stderr", "w")
+  h_in = _open("stdin", "r")
+  stdin_eof = 0
+  rnd_s = 12345
+  nsargs = 0
+  sargs = .string[]
+  wsch = '20090a0b0c0d'x
+  nameboot = "@@NAMES@@"
+  clsboot = "@@CLASSES@@"
+  bboot = "@@BUILTINS@@"
+  aliasboot = "@@ALIASES@@"
+  kwlist = " False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield "
+  ops2 = " == != <= >= ** // << >> += -= *= /= %= &= |= ^= @= -> := "
+  /* ---- lexer ---- */
+  tx = ""
+  tlen = 0
+  tp = 1
+  lx_brk = 0
+  lx_nind = 1
+  lnum = 1
+  ntk = 0
+  tk_t = .int[]
+  tk_s = .string[]
+  tk_i = .int[]
+  tk_l = .int[]
+  tk_f = .float[]
+  ind_s = .int[]
+  /* ---- parser ---- */
+  tpp = 1
+  pe = 0
+  pe_msg = ""
+  nnode = 0
+  n_t = .int[]
+  n_a = .int[]
+  n_b = .int[]
+  n_c = .int[]
+  n_d = .int[]
+  n_e = .int[]
+  n_y = .int[]
+  n_s = .string[]
+  n_ln = .int[]
+  n_ic = .int[]
+  n_ig = .int[]
+  n_iv = .int[]
+  nal = 0
+  al = .int[]
+  psp = 0
+  ps = .int[]
+  nsc = 0
+  cursc = 0
+  sc_kind = .int[]
+  sc_par = .int[]
+  sc_n = .int[]
+  sc_fl = .int[]
+  sc_id = .int[]
+  sc_rf0 = .int[]
+  sc_cd = .int[]
+  scm = .stem()
+  nrf = 0
+  rf_node = .int[]
+  rf_sc = .int[]
+  rf_dep = .int[]
+  ncv = 0
+  cv_name = .string[]
+  cv_slot = .int[]
+  cv_scope = .int[]
+  comp_result = 0
+  npq = 0
+  pq_name = .string[]
+  pq_def = .int[]
+  pq_kind = .int[]
+  nfd = 0
+  fd_np = .int[]
+  fd_nk = .int[]
+  fd_ps = .int[]
+  fd_vs = .int[]
+  fd_ks = .int[]
+  fd_nr = .int[]
+  fd_ns = .int[]
+  fd_fl = .int[]
+  fd_cd = .int[]
+  fd_body = .int[]
+  fd_cx = .int[]
+  fd_gd = .int[]
+  fd_name = .string[]
+  npr = 0
+  pr_name = .string[]
+  pr_def = .int[]
+  pr_kind = .int[]
+  pr_slot = .int[]
+  ncd = 0
+  cd_name = .string[]
+  cd_body = .int[]
+  cd_ns = .int[]
+  cd_cv0 = .int[]
+  cd_cv1 = .int[]
+  cd_obj = .int[]
+  cd_sc = .int[]
+  /* ---- objects ---- */
+  nob = 0
+  ob_k = .int[]
+  ob_c = .int[]
+  ob_n = .int[]
+  ob_p = .int[]
+  ob_x = .int[]
+  ob_y = .int[]
+  ob_s = .string[]
+  ob_f = .float[]
+  nsl = 0
+  sl = .int[]
+  sl_a = 0
+  sl_b = 0
+  sl_n = 0
+  chr_oop = .int[]
+  chr_oop[256] = 0
+  nnid = 0
+  nid_name = .string[]
+  nidm = .stem()
+  ncls = 0
+  cl_name = .string[]
+  cl_base = .int[]
+  cl_ns = .int[]
+  cl_flags = .int[]
+  cl_obj = .int[]
+  cl_dflt = .int[]
+  ca = .stem()
+  sm = .stem()
+  cgen = 1
+  kcls = .int[]
+  opd = .int[]
+  ropd = .int[]
+  iopd = .int[]
+  cmpd = .int[]
+  cmpr = .int[]
+  bimap = .stem()
+  modattr = .stem()
+  modo = .stem()
+  bi_name = .string[]
+  bi_oop = .int[]
+  range_oop = 0
+  identity_oop = 0
+  /* ---- dictionaries ---- */
+  ndd = 0
+  nde = 0
+  dd_head = .int[]
+  dd_tail = .int[]
+  dd_n = .int[]
+  de_key = .int[]
+  de_val = .int[]
+  de_next = .int[]
+  de_live = .int[]
+  de_hk = .string[]
+  dmap = .stem()
+  /* ---- frames, calls, unwinding ---- */
+  nvp = 0
+  vp = .int[]
+  fl_head = .int[]
+  gfb = 0
+  asp = 0
+  ast = .int[]
+  asn = .string[]
+  ast[20000] = 0
+  asn[20000] = ""
+  cdepth = 0
+  unw = 0
+  unw_v = 0
+  exc_cur = 0
+  ev_self = 0
+  ev_bm = 0
+  ea_np = 0
+  ea_nk = 0
+  depth_guard = 0
+  /* ---- generators ---- */
+  ngn = 0
+  ngs = 0
+  gn_fd = .int[]
+  gn_fb = .int[]
+  gn_st = .int[]
+  gn_sp = .int[]
+  gn_rb = .int[]
+  gn_val = .int[]
+  gs_n = .int[]
+  gs_s = .int[]
+  gs_a = .int[]
+  gs_b = .int[]
+  /* ---- files ---- */
+  nfl = 3
+  fl_h = .int[]
+  fl_mode = .string[]
+  fl_txt = .string[]
+  fl_pos = .int[]
+  /* ---- big numbers and floats ---- */
+  bq = ""
+  brm = ""
+  sg = 0
+  mg = ""
+  sq = ""
+  sr = ""
+  fx_d = ""
+  fx_q = 0
+  fx_e = 0
+  fneg_max = 0.0
+  fneg_max = fneg_max - 1.7976931348623157e308
+  return
+
+/* ---------------------------------------------------------------------
+   boot: special objects, classes, built-in functions, modules
+   --------------------------------------------------------------------- */
+fld: procedure = .string
+  arg spec = .string, k = .int
+  p = .int
+  q = .int
+  i = .int
+  p = 1
+  do i = 2 to k
+    p = pos("/", spec, p) + 1
+  end
+  q = pos("/", spec, p)
+  if q = 0 then return substr(spec, p)
+  return substr(spec, p, q - p)
+
+boot: procedure = .void
+  i = .int
+  c = .int
+  o = .int
+  nm = .string
+  spec = .string
+  w = .string
+  p = .int
+  l = .int
+  t = .int
+  /* None, True, False, Ellipsis, NotImplemented are objects 1 to 5 */
+  o = newobj(K_NONE)
+  o = newobj(K_BOOL)
+  o = newobj(K_BOOL)
+  o = newobj(K_ELLIPSIS)
+  o = newobj(K_NOTIMPL)
+  do i = 1 to words(nameboot)
+    o = nameid(word(nameboot, i))
+  end
+  do i = 1 to words(clsboot)
+    spec = word(clsboot, i)
+    c = define_class(fld(spec, 1), fld(spec, 2) as .int)
+    cl_flags[c] = fld(spec, 3) as .int
+    if fld(spec, 4) == "1" then bimap[fld(spec, 1)] = cl_obj[c] as .string
+  end
+  range_oop = cl_obj[C_RANGE]
+  do i = 1 to words(bboot)
+    nm = word(bboot, i)
+    p = lastpos(".", nm)
+    bi_name[i] = substr(nm, p + 1)
+    o = newobj(K_BUILTIN)
+    ob_x[o % 2] = i
+    bi_oop[i] = o
+    if p > 0 then modattr[nm] = o as .string
+    else if left(nm, 1) \== "_" then bimap[nm] = o as .string
+  end
+  do i = 1 to words(aliasboot)
+    spec = word(aliasboot, i)
+    p = pos("=", spec)
+    modattr[left(spec, p - 1)] = bi_oop[substr(spec, p + 1) as .int] as .string
+  end
+  identity_oop = bi_oop[BI__IDENTITY]
+  /* kind -> class */
+  kcls[K_NONE] = C_NONETYPE
+  kcls[K_BOOL] = C_BOOL
+  kcls[K_INT] = C_INT
+  kcls[K_BIG] = C_INT
+  kcls[K_FLOAT] = C_FLOAT
+  kcls[K_STR] = C_STR
+  kcls[K_LIST] = C_LIST
+  kcls[K_TUPLE] = C_TUPLE
+  kcls[K_DICT] = C_DICT
+  kcls[K_SET] = C_SET
+  kcls[K_RANGE] = C_RANGE
+  kcls[K_FUNC] = C_FUNCTION
+  kcls[K_BUILTIN] = C_BUILTINFN
+  kcls[K_BMETH] = C_METHOD
+  kcls[K_BMETHB] = C_BUILTINFN
+  kcls[K_CLASS] = C_TYPE
+  kcls[K_MODULE] = C_MODULE
+  kcls[K_GEN] = C_GENERATOR
+  kcls[K_ITER] = C_ITERATOR
+  kcls[K_SLICE] = C_SLICE
+  kcls[K_PROP] = C_PROPERTY
+  kcls[K_STATIC] = C_STATICMETHOD
+  kcls[K_CLSM] = C_CLASSMETHOD
+  kcls[K_SUPER] = C_SUPER
+  kcls[K_FILE] = C_TEXTIOWRAPPER
+  kcls[K_ELLIPSIS] = C_ELLIPSIS
+  kcls[K_NOTIMPL] = C_NOTIMPLEMENTEDTYPE
+  /* operator method names */
+  w = "add sub mul truediv floordiv mod pow lshift rshift and or xor matmul"
+  do i = 1 to 13
+    opd[i] = nameid("__" || word(w, i) || "__")
+    ropd[i] = nameid("__r" || word(w, i) || "__")
+    iopd[i] = nameid("__i" || word(w, i) || "__")
+  end
+  cmpd[CMP_LT] = nameid("__lt__")
+  cmpd[CMP_LE] = nameid("__le__")
+  cmpd[CMP_GT] = nameid("__gt__")
+  cmpd[CMP_GE] = nameid("__ge__")
+  cmpr[CMP_LT] = nameid("__gt__")
+  cmpr[CMP_LE] = nameid("__ge__")
+  cmpr[CMP_GT] = nameid("__lt__")
+  cmpr[CMP_GE] = nameid("__le__")
+  call cls_set C_BASEEXCEPTION, M___INIT__, bi_oop[BI__EXC_INIT]
+  call cls_set C_OBJECT, M___INIT__, bi_oop[BI__OBJ_INIT]
+  /* module constants */
+  modattr["math.pi"] = mkfloat(3.141592653589793) as .string
+  modattr["math.e"] = mkfloat(2.718281828459045) as .string
+  modattr["math.tau"] = mkfloat(6.283185307179586) as .string
+  modattr["math.inf"] = mkfloat(f_inf()) as .string
+  modattr["math.nan"] = mkfloat(f_nan()) as .string
+  modattr["sys.maxsize"] = mkbig("9223372036854775807") as .string
+  modattr["sys.version"] = mkstr("3.12.0 (crexx)") as .string
+  modattr["sys.platform"] = mkstr("linux") as .string
+  modattr["sys.stdout"] = mk_file(1, "<stdout>") as .string
+  modattr["sys.stderr"] = mk_file(2, "<stderr>") as .string
+  modattr["sys.stdin"] = mk_file(3, "<stdin>") as .string
+  l = mklist(nsargs + 1)
+  if nsargs = 0 then call list_append l, mkstr("")
+  do i = 1 to nsargs
+    if i = 1 & sargs[1] == "-c" then call list_append l, mkstr("-c")
+    else call list_append l, mkstr(sargs[i])
+  end
+  modattr["sys.argv"] = l as .string
+  modattr["string.ascii_lowercase"] = mkstr("abcdefghijklmnopqrstuvwxyz") as .string
+  modattr["string.ascii_uppercase"] = mkstr("ABCDEFGHIJKLMNOPQRSTUVWXYZ") as .string
+  modattr["string.ascii_letters"] = mkstr("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") as .string
+  modattr["string.digits"] = mkstr("0123456789") as .string
+  modattr["string.hexdigits"] = mkstr("0123456789abcdefABCDEF") as .string
+  modattr["string.octdigits"] = mkstr("01234567") as .string
+  modattr["string.punctuation"] = mkstr("!" || '"' || "#$%&'()*+,-./:;<=>?@[" || "\" || "]^_`{|}~") as .string
+  modattr["string.whitespace"] = mkstr(" " || '090a0d0b0c'x) as .string
+  modattr["os.sep"] = mkstr("/") as .string
+  modattr["os.linesep"] = mkstr('0a'x) as .string
+  modattr["os.name"] = mkstr("posix") as .string
+  bimap["__name__"] = mkstr("__main__") as .string
+  bimap["NotImplemented"] = NOTIMPL_OOP as .string
+  bimap["Ellipsis"] = ELLIPSIS_OOP as .string
+  bimap["frozenset"] = cl_obj[C_SET] as .string
+  return

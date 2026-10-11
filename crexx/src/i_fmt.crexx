@@ -1,0 +1,686 @@
+/* ---------------------------------------------------------------------
+   Formatting: format specs, % operator, str.format
+   --------------------------------------------------------------------- */
+group3: procedure = .string
+  arg d = .string, sep = .string
+  r = .string
+  n = .int
+  i = .int
+  n = length(d)
+  if n <= 3 then return d
+  r = ""
+  do i = n to 1 by -3
+    if i - 3 >= 1 then r = sep || substr(d, i - 2, 3) || r
+    else r = substr(d, 1, i) || r
+  end
+  return r
+
+radix_str: procedure = .string
+  arg s = .string, rdx = .int
+  digs = .string
+  neg = .int
+  r = .string
+  q = .string
+  d = .int
+  n = .int
+  v = .int
+  digs = "0123456789abcdef"
+  neg = 0
+  if left(s, 1) == "-" then do
+    neg = 1
+    s = substr(s, 2)
+  end
+  if s == "0" then return "0"
+  r = ""
+  if length(s) <= 18 then do
+    v = s as .int
+    do while v > 0
+      d = v // rdx
+      r = substr(digs, d + 1, 1) || r
+      v = v % rdx
+    end
+  end
+  else do
+    do while s \== "0"
+      call mag_divmod s, rdx as .string
+      d = brm as .int
+      r = substr(digs, d + 1, 1) || r
+      s = bq
+    end
+  end
+  if neg = 1 then return "-" || r
+  return r
+
+/* pad / align a field.  align: < > ^ = ; numeric parts: sign, prefix, body */
+fmt_pad: procedure = .string
+  arg sign = .string, body = .string, fill = .string, align = .string, width = .int
+  n = .int
+  pad = .int
+  lp = .int
+  s = .string
+  s = sign || body
+  n = length(s)
+  if n >= width then return s
+  pad = width - n
+  if fill == "" then fill = " "
+  if align == "<" then return s || copies(fill, pad)
+  if align == "^" then do
+    lp = pad % 2
+    return copies(fill, lp) || s || copies(fill, pad - lp)
+  end
+  if align == "=" then return sign || copies(fill, pad) || body
+  return copies(fill, pad) || s
+
+format_value: procedure = .string
+  arg v = .int, spec = .string
+  fill = .string
+  align = .string
+  sgn = .string
+  alt = .int
+  zero = .int
+  width = .int
+  grp = .string
+  prec = .int
+  ty = .string
+  i = .int
+  n = .int
+  c = .string
+  k = .int
+  s = .string
+  neg = .int
+  body = .string
+  f = .float
+  x = .float
+  sign = .string
+  m = .int
+  r = .int
+  pre = .string
+  hasprec = .int
+  if spec == "" then return str_of(v)
+  k = kind_of(v)
+  if k = K_INST then do
+    m = cls_find(ob_c[v % 2], M___FORMAT__)
+    if m > 0 then do
+      r = call2(m, v, mkstr(spec))
+      if r = 0 then return ""
+      return ob_s[r % 2]
+    end
+  end
+  fill = ""
+  align = ""
+  sgn = ""
+  alt = 0
+  zero = 0
+  width = 0
+  grp = ""
+  prec = -1
+  ty = ""
+  i = 1
+  n = length(spec)
+  if n >= 2 & pos(substr(spec, 2, 1), "<>^=") > 0 then do
+    fill = substr(spec, 1, 1)
+    align = substr(spec, 2, 1)
+    i = 3
+  end
+  else if n >= 1 & pos(substr(spec, 1, 1), "<>^=") > 0 then do
+    align = substr(spec, 1, 1)
+    i = 2
+  end
+  c = substr(spec, i, 1)
+  if c == "+" | c == "-" | c == " " then do
+    sgn = c
+    i = i + 1
+  end
+  if substr(spec, i, 1) == "#" then do
+    alt = 1
+    i = i + 1
+  end
+  if substr(spec, i, 1) == "0" then do
+    zero = 1
+    i = i + 1
+  end
+  do while i <= n & isdigit(substr(spec, i, 1)) = 1
+    width = width * 10 + (substr(spec, i, 1) as .int)
+    i = i + 1
+  end
+  c = substr(spec, i, 1)
+  if c == "," | c == "_" then do
+    grp = c
+    i = i + 1
+  end
+  if substr(spec, i, 1) == "." then do
+    i = i + 1
+    prec = 0
+    do while i <= n & isdigit(substr(spec, i, 1)) = 1
+      prec = prec * 10 + (substr(spec, i, 1) as .int)
+      i = i + 1
+    end
+  end
+  if i <= n then ty = substr(spec, i, 1)
+  if zero = 1 & align == "" then do
+    align = "="
+    if fill == "" then fill = "0"
+  end
+  /* strings */
+  if k = K_STR | (k \= K_FLOAT & numkind(v) = 0) then do
+    if k = K_STR then s = ob_s[v % 2]
+    else s = str_of(v)
+    if unw > 0 then return ""
+    if ty \== "" & ty \== "s" then do
+      call raise_exc C_VALUEERROR, "Unknown format code '" || ty || "' for object of type '" || type_name(v) || "'"
+      return ""
+    end
+    if prec >= 0 then s = left(s, prec)
+    if align == "" then align = "<"
+    return fmt_pad("", s, fill, align, width)
+  end
+  if align == "" then align = ">"
+  /* integers */
+  if k \= K_FLOAT & (ty == "" | ty == "d" | ty == "n" | ty == "b" | ty == "o" | ty == "x" | ty == "X" | ty == "c") then do
+    s = num_str(v)
+    if ty == "c" then return fmt_pad("", d2c(ival(v)), fill, align, width)
+    neg = 0
+    if left(s, 1) == "-" then do
+      neg = 1
+      s = substr(s, 2)
+    end
+    pre = ""
+    if ty == "b" then do
+      s = radix_str(s, 2)
+      if alt = 1 then pre = "0b"
+    end
+    else if ty == "o" then do
+      s = radix_str(s, 8)
+      if alt = 1 then pre = "0o"
+    end
+    else if ty == "x" then do
+      s = radix_str(s, 16)
+      if alt = 1 then pre = "0x"
+    end
+    else if ty == "X" then do
+      s = upper(radix_str(s, 16))
+      if alt = 1 then pre = "0X"
+    end
+    else if grp \== "" then s = group3(s, grp)
+    if neg = 1 then sign = "-"
+    else if sgn == "+" then sign = "+"
+    else if sgn == " " then sign = " "
+    else sign = ""
+    sign = sign || pre
+    return fmt_pad(sign, s, fill, align, width)
+  end
+  /* floats */
+  if numkind(v) = 0 then do
+    call raise_exc C_VALUEERROR, "Unknown format code '" || ty || "' for object of type '" || type_name(v) || "'"
+    return ""
+  end
+  f = tofloat(v)
+  hasprec = 1
+  if prec < 0 then do
+    prec = 6
+    hasprec = 0
+  end
+  x = f
+  neg = 0
+  if f < 0.0 then do
+    neg = 1
+    x = 0.0 - f
+  end
+  else if f = 0.0 then do
+    if fl_negzero(f) = 1 then neg = 1
+  end
+  if f \= f then body = "nan"
+  else if finf(x) = 1 then body = "inf"
+  else if ty == "f" | ty == "F" then do
+    body = float_fixed(x, prec)
+    if grp \== "" then body = group_float(body, grp)
+    if alt = 1 & prec = 0 then body = body || "."
+  end
+  else if ty == "e" | ty == "E" then do
+    body = float_sci(x, prec, 0)
+    if ty == "E" then body = upper(body)
+  end
+  else if ty == "%" then do
+    body = float_fixed(x * 100.0, prec) || "%"
+  end
+  else if ty == "g" | ty == "G" | ty == "n" | (ty == "" & hasprec = 1) then do
+    body = float_general(x, prec, alt)
+    if ty == "G" then body = upper(body)
+    if ty == "" & pos(".", body) = 0 & pos("e", body) = 0 & pos("n", body) = 0 then body = body || ".0"
+    if grp \== "" then body = group_float(body, grp)
+  end
+  else do
+    /* plain: repr */
+    body = float_repr(x)
+    if grp \== "" then body = group_float(body, grp)
+  end
+  if neg = 1 then sign = "-"
+  else if sgn == "+" then sign = "+"
+  else if sgn == " " then sign = " "
+  else sign = ""
+  return fmt_pad(sign, body, fill, align, width)
+
+group_float: procedure = .string
+  arg s = .string, sep = .string
+  p = .int
+  p = pos(".", s)
+  if p = 0 then return group3(s, sep)
+  return group3(left(s, p - 1), sep) || substr(s, p)
+
+/* %g style */
+float_general: procedure = .string
+  arg x = .float, prec = .int, alt = .int
+  d = .string
+  e = .int
+  l = .int
+  body = .string
+  es = .string
+  ee = .string
+  if prec = 0 then prec = 1
+  if x = 0.0 then do
+    if alt = 1 then return "0." || copies("0", prec - 1)
+    return "0"
+  end
+  d = float_digits(x, prec)
+  e = fx_e
+  if e < -4 | e >= prec then do
+    /* scientific */
+    l = length(d)
+    if alt = 0 then do
+      do while l > 1 & substr(d, l, 1) == "0"
+        l = l - 1
+      end
+      d = left(d, l)
+    end
+    body = left(d, 1)
+    if length(d) > 1 then body = body || "." || substr(d, 2)
+    if e < 0 then es = "-"
+    else es = "+"
+    ee = abs(e) as .string
+    if length(ee) < 2 then ee = "0" || ee
+    return body || "e" || es || ee
+  end
+  /* fixed with prec-1-e decimals */
+  body = float_fixed(x, prec - 1 - e)
+  if alt = 0 & pos(".", body) > 0 then do
+    l = length(body)
+    do while substr(body, l, 1) == "0"
+      l = l - 1
+    end
+    if substr(body, l, 1) == "." then l = l - 1
+    body = left(body, l)
+  end
+  return body
+
+/* the % operator on strings */
+fmt_percent: procedure = .int
+  arg fs = .string, args = .int
+  r = .string
+  i = .int
+  n = .int
+  c = .string
+  argi = .int
+  items = .int
+  nitems = .int
+  v = .int
+  flags = .string
+  width = .int
+  prec = .int
+  ty = .string
+  key = .string
+  p = .int
+  spec = .string
+  s = .string
+  istup = .int
+  vv = .int
+  left_ = .int
+  zero = .int
+  plus = .string
+  alt = .int
+  d = .int
+  neg = .int
+  body = .string
+  sign = .string
+  fill = .string
+  al_ = .string
+  x_ = .float
+  istup = 0
+  if kind_of(args) = K_TUPLE then do
+    istup = 1
+    items = args
+    nitems = ob_n[args % 2]
+  end
+  else do
+    items = 0
+    nitems = 1
+  end
+  argi = 0
+  r = ""
+  n = length(fs)
+  i = 1
+  do while i <= n
+    p = pos("%", fs, i)
+    if p = 0 then do
+      r = r || substr(fs, i)
+      leave
+    end
+    r = r || substr(fs, i, p - i)
+    i = p + 1
+    if i > n then do
+      call raise_exc C_VALUEERROR, "incomplete format"
+      return 0
+    end
+    key = ""
+    if substr(fs, i, 1) == "(" then do
+      p = pos(")", fs, i)
+      key = substr(fs, i + 1, p - i - 1)
+      i = p + 1
+    end
+    flags = ""
+    do while i <= n & pos(substr(fs, i, 1), "-+ #0") > 0
+      flags = flags || substr(fs, i, 1)
+      i = i + 1
+    end
+    width = 0
+    if substr(fs, i, 1) == "*" then do
+      width = ival(sl[ob_p[items % 2] + argi])
+      argi = argi + 1
+      i = i + 1
+    end
+    else do
+      do while i <= n & isdigit(substr(fs, i, 1)) = 1
+        width = width * 10 + (substr(fs, i, 1) as .int)
+        i = i + 1
+      end
+    end
+    prec = -1
+    if substr(fs, i, 1) == "." then do
+      i = i + 1
+      prec = 0
+      if substr(fs, i, 1) == "*" then do
+        prec = ival(sl[ob_p[items % 2] + argi])
+        argi = argi + 1
+        i = i + 1
+      end
+      else do
+        do while i <= n & isdigit(substr(fs, i, 1)) = 1
+          prec = prec * 10 + (substr(fs, i, 1) as .int)
+          i = i + 1
+        end
+      end
+    end
+    do while i <= n & pos(substr(fs, i, 1), "hlL") > 0
+      i = i + 1
+    end
+    ty = substr(fs, i, 1)
+    i = i + 1
+    if ty == "%" then do
+      r = r || "%"
+      iterate
+    end
+    /* fetch the argument */
+    if key \== "" then do
+      if kind_of(args) \= K_DICT then do
+        call raise_exc C_TYPEERROR, "format requires a mapping"
+        return 0
+      end
+      d = dict_find(ob_x[args % 2], hashkey(mkstr(key)))
+      if d = 0 then do
+        v = raise_key(mkstr(key))
+        return 0
+      end
+      v = de_val[d]
+    end
+    else if istup = 1 then do
+      if argi >= nitems then do
+        call raise_exc C_TYPEERROR, "not enough arguments for format string"
+        return 0
+      end
+      v = sl[ob_p[items % 2] + argi]
+      argi = argi + 1
+    end
+    else do
+      if argi >= 1 then do
+        call raise_exc C_TYPEERROR, "not enough arguments for format string"
+        return 0
+      end
+      v = args
+      argi = argi + 1
+    end
+    left_ = 0
+    if pos("-", flags) > 0 then left_ = 1
+    zero = 0
+    if pos("0", flags) > 0 & left_ = 0 then zero = 1
+    plus = ""
+    if pos("+", flags) > 0 then plus = "+"
+    else if pos(" ", flags) > 0 then plus = " "
+    alt = 0
+    if pos("#", flags) > 0 then alt = 1
+    fill = " "
+    if ty == "s" | ty == "r" | ty == "a" then do
+      if ty == "s" then s = str_of(v)
+      else s = repr_of(v)
+      if unw > 0 then return 0
+      if prec >= 0 then s = left(s, prec)
+      if left_ = 1 then al_ = "<"
+      else al_ = ">"
+      r = r || fmt_pad("", s, " ", al_, width)
+    end
+    else if ty == "c" then do
+      if kind_of(v) = K_STR then s = ob_s[v % 2]
+      else s = d2c(ival(v))
+      r = r || fmt_pad("", s, " ", ">", width)
+    end
+    else do
+      if numkind(v) = 0 then do
+        call raise_exc C_TYPEERROR, "%" || ty || " format: a real number is required, not " || type_name(v)
+        return 0
+      end
+      if ty == "d" | ty == "i" | ty == "u" then do
+        if kind_of(v) = K_FLOAT then v = float_to_int(ob_f[v % 2])
+        s = num_str(v)
+      end
+      else if ty == "x" | ty == "X" | ty == "o" then do
+        if kind_of(v) = K_FLOAT then do
+          call raise_exc C_TYPEERROR, "%" || ty || " format: an integer is required, not float"
+          return 0
+        end
+        s = num_str(v)
+      end
+      else s = ""
+      neg = 0
+      if ty == "d" | ty == "i" | ty == "u" | ty == "x" | ty == "X" | ty == "o" then do
+        if left(s, 1) == "-" then do
+          neg = 1
+          s = substr(s, 2)
+        end
+        if ty == "x" then do
+          s = radix_str(s, 16)
+          if alt = 1 then s = "0x" || s
+        end
+        else if ty == "X" then do
+          s = upper(radix_str(s, 16))
+          if alt = 1 then s = "0X" || s
+        end
+        else if ty == "o" then do
+          s = radix_str(s, 8)
+          if alt = 1 then s = "0o" || s
+        end
+        if prec >= 0 & length(s) < prec then s = copies("0", prec - length(s)) || s
+        body = s
+      end
+      else do
+        x_ = tofloat(v)
+        if x_ < 0.0 then do
+          neg = 1
+          x_ = 0.0 - x_
+        end
+        else if x_ = 0.0 & fl_negzero(x_) = 1 then neg = 1
+        if prec < 0 then prec = 6
+        if x_ \= x_ then body = "nan"
+        else if finf(x_) = 1 then body = "inf"
+        else if ty == "f" | ty == "F" then body = float_fixed(x_, prec)
+        else if ty == "e" then body = float_sci(x_, prec, 0)
+        else if ty == "E" then body = float_sci(x_, prec, 1)
+        else if ty == "g" then body = float_general(x_, prec, alt)
+        else if ty == "G" then body = upper(float_general(x_, prec, alt))
+        else do
+          call raise_exc C_VALUEERROR, "unsupported format character '" || ty || "'"
+          return 0
+        end
+      end
+      if neg = 1 then sign = "-"
+      else sign = plus
+      if zero = 1 then al_ = "="
+      else if left_ = 1 then al_ = "<"
+      else al_ = ">"
+      if zero = 1 then fill = "0"
+      r = r || fmt_pad(sign, body, fill, al_, width)
+    end
+  end
+  if istup = 1 & argi < nitems then do
+    call raise_exc C_TYPEERROR, "not all arguments converted during string formatting"
+    return 0
+  end
+  return mkstr(r)
+
+/* str.format(*args, **kwargs): arguments at ast[base+1 ..] */
+fmt_format: procedure = .int
+  arg fs = .string, base = .int, na = .int, nk = .int
+  r = .string
+  i = .int
+  n = .int
+  c = .string
+  p = .int
+  dep = .int
+  field = .string
+  conv = .string
+  spec = .string
+  name = .string
+  rest = .string
+  v = .int
+  auto = .int
+  q = .int
+  j = .int
+  ch = .string
+  idx = .int
+  a = .int
+  attr = .string
+  k = .int
+  nid = .int
+  e = .int
+  sp = .string
+  r = ""
+  n = length(fs)
+  i = 1
+  auto = 0
+  do while i <= n
+    c = substr(fs, i, 1)
+    if c == "{" then do
+      if substr(fs, i + 1, 1) == "{" then do
+        r = r || "{"
+        i = i + 2
+        iterate
+      end
+      /* find matching brace */
+      dep = 1
+      p = i + 1
+      do while p <= n & dep > 0
+        ch = substr(fs, p, 1)
+        if ch == "{" then dep = dep + 1
+        else if ch == "}" then dep = dep - 1
+        if dep > 0 then p = p + 1
+      end
+      if dep > 0 then do
+        call raise_exc C_VALUEERROR, "Single '{' encountered in format string"
+        return 0
+      end
+      field = substr(fs, i + 1, p - i - 1)
+      i = p + 1
+      conv = ""
+      spec = ""
+      q = pos(":", field)
+      if q > 0 then do
+        spec = substr(field, q + 1)
+        field = left(field, q - 1)
+      end
+      q = pos("!", field)
+      if q > 0 then do
+        conv = substr(field, q + 1, 1)
+        field = left(field, q - 1)
+      end
+      /* split name from attribute / index accessors */
+      name = field
+      rest = ""
+      q = verify(field, ".[", "M")
+      if q > 0 then do
+        name = left(field, q - 1)
+        rest = substr(field, q)
+      end
+      if name == "" then do
+        v = arg_at(base, na, nk, auto, "")
+        auto = auto + 1
+      end
+      else if isdigit(left(name, 1)) = 1 then v = arg_at(base, na, nk, name as .int, "")
+      else v = arg_at(base, na, nk, -1, name)
+      if v = 0 then return 0
+      do while rest \== ""
+        if left(rest, 1) == "." then do
+          q = verify(substr(rest, 2), ".[", "M")
+          if q = 0 then do
+            attr = substr(rest, 2)
+            rest = ""
+          end
+          else do
+            attr = substr(rest, 2, q - 1)
+            rest = substr(rest, q + 1)
+          end
+          v = getattr_obj(v, nameid(attr), 0)
+          if v = 0 then return 0
+        end
+        else do
+          q = pos("]", rest)
+          attr = substr(rest, 2, q - 2)
+          rest = substr(rest, q + 1)
+          if isdigit(left(attr, 1)) = 1 then v = getitem(v, mkint(attr as .int))
+          else v = getitem(v, mkstr(attr))
+          if v = 0 then return 0
+        end
+      end
+      if conv == "r" | conv == "a" then v = mkstr(repr_of(v))
+      else if conv == "s" then v = mkstr(str_of(v))
+      if pos("{", spec) > 0 then do
+        /* nested replacement fields in the spec */
+        sp = ob_s[fmt_format(spec, base, na, nk) % 2]
+        spec = sp
+      end
+      r = r || format_value(v, spec)
+      if unw > 0 then return 0
+      iterate
+    end
+    if c == "}" then do
+      if substr(fs, i + 1, 1) == "}" then i = i + 1
+      r = r || "}"
+      i = i + 1
+      iterate
+    end
+    r = r || c
+    i = i + 1
+  end
+  return mkstr(r)
+
+/* the idx-th positional argument (or the keyword name) of a format call */
+arg_at: procedure = .int
+  arg base = .int, na = .int, nk = .int, idx = .int, name = .string
+  j = .int
+  if idx >= 0 then do
+    if idx >= na then do
+      call raise_exc C_INDEXERROR, "Replacement index " || idx || " out of range for positional args tuple"
+      return 0
+    end
+    return ast[base + 1 + idx]
+  end
+  do j = 1 to nk
+    if asn[base + na + j] == name then return ast[base + na + j]
+  end
+  return raise_key(mkstr(name))

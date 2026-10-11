@@ -1,0 +1,474 @@
+/* ---------------------------------------------------------------------
+   Lexer: Python source -> token arrays (with NEWLINE / INDENT / DEDENT)
+   --------------------------------------------------------------------- */
+isletter: procedure = .int
+  arg c = .string
+  if c == "" then return 0
+  if c >>= "a" & c <<= "z" then return 1
+  if c >>= "A" & c <<= "Z" then return 1
+  if c == "_" then return 1
+  if c2d(c) >= 128 then return 1
+  return 0
+
+isdigit: procedure = .int
+  arg c = .string
+  if c == "" then return 0
+  if c >>= "0" & c <<= "9" then return 1
+  return 0
+
+addtok: procedure = .void
+  arg t = .int, s = .string, i = .int
+  ntk = ntk + 1
+  tk_t[ntk] = t
+  tk_s[ntk] = s
+  tk_i[ntk] = i
+  tk_l[ntk] = lnum
+  return
+
+/* process backslash escapes of a (non raw) string body */
+unescape: procedure = .string
+  arg raw = .string
+  r = .string
+  p = .int
+  q = .int
+  c = .string
+  v = .int
+  n = .int
+  if pos("\", raw) = 0 then return raw
+  r = ""
+  p = 1
+  n = length(raw)
+  do while p <= n
+    q = pos("\", raw, p)
+    if q = 0 then do
+      r = r || substr(raw, p)
+      leave
+    end
+    r = r || substr(raw, p, q - p)
+    c = substr(raw, q + 1, 1)
+    p = q + 2
+    select
+      when c == "n" then r = r || '0a'x
+      when c == "t" then r = r || '09'x
+      when c == "r" then r = r || '0d'x
+      when c == "0" then r = r || '00'x
+      when c == "a" then r = r || '07'x
+      when c == "b" then r = r || '08'x
+      when c == "f" then r = r || '0c'x
+      when c == "v" then r = r || '0b'x
+      when c == '0a'x then nop
+      when c == "x" then do
+        v = x2d(substr(raw, p, 2))
+        r = r || utf8_chr(v)
+        p = p + 2
+      end
+      when c == "u" then do
+        v = x2d(substr(raw, p, 4))
+        r = r || utf8_chr(v)
+        p = p + 4
+      end
+      when c == "U" then do
+        v = x2d(substr(raw, p, 8))
+        r = r || utf8_chr(v)
+        p = p + 8
+      end
+      when c == "" then r = r || "\"
+      when c == "\" | c == "'" | c == '"' then r = r || c
+      otherwise r = r || "\" || c
+    end
+  end
+  return r
+
+utf8_chr: procedure = .string
+  arg v = .int
+  if v < 128 then return d2c(v)
+  if v < 2048 then return d2c(192 + v % 64) || d2c(128 + v // 64)
+  if v < 65536 then return d2c(224 + v % 4096) || d2c(128 + (v % 64) // 64) || d2c(128 + v // 64)
+  return d2c(240 + v % 262144) || d2c(128 + (v % 4096) // 64) || d2c(128 + (v % 64) // 64) || d2c(128 + v // 64)
+
+/* lex the text src into tokens appended to the token arrays.
+   sub = 1: a fragment (no indentation processing) */
+lex_text: procedure = .void
+  arg src = .string, sub = .int
+  sv_tx = .string
+  sv_tlen = .int
+  sv_tp = .int
+  sv_brk = .int
+  sv_nind = .int
+  sv_line = .int
+  atbol = .int
+  col = .int
+  q = .int
+  q2 = .int
+  c = .string
+  d = .string
+  s = .string
+  id = .string
+  body = .string
+  isf = .int
+  isr = .int
+  isb = .int
+  trip = .int
+  p = .int
+  endp = .int
+  quote = .string
+  nflag = .int
+  v = .int
+  radix = .int
+  fr = .string
+  ex = .string
+  dg = .string
+  neg = .int
+  w = .int
+  ok = .int
+  op = .string
+  lastt = .int
+  sv_tx = tx
+  sv_tlen = tlen
+  sv_tp = tp
+  sv_brk = lx_brk
+  sv_nind = lx_nind
+  sv_line = lnum
+  tx = src
+  tlen = length(tx)
+  tp = 1
+  lx_brk = 0
+  lx_nind = 1
+  ind_s[1] = 0
+  if sub = 1 then atbol = 0
+  else atbol = 1
+  if sub = 0 then lnum = 1
+  do forever
+    if atbol = 1 & lx_brk = 0 then do
+      col = 0
+      q = tp
+      do while q <= tlen
+        c = substr(tx, q, 1)
+        if c == " " then col = col + 1
+        else if c == '09'x then col = col + 8 - (col // 8)
+        else if c == '0c'x then col = 0
+        else leave
+        q = q + 1
+      end
+      if q > tlen then do
+        tp = q
+        leave
+      end
+      c = substr(tx, q, 1)
+      if c == '0a'x then do
+        tp = q + 1
+        lnum = lnum + 1
+        iterate
+      end
+      if c == "#" then do
+        q2 = pos('0a'x, tx, q)
+        if q2 = 0 then do
+          tp = tlen + 1
+          leave
+        end
+        tp = q2 + 1
+        lnum = lnum + 1
+        iterate
+      end
+      tp = q
+      if col > ind_s[lx_nind] then do
+        lx_nind = lx_nind + 1
+        ind_s[lx_nind] = col
+        call addtok T_IND, "", 0
+      end
+      else if col < ind_s[lx_nind] then do
+        do while col < ind_s[lx_nind]
+          lx_nind = lx_nind - 1
+          call addtok T_DED, "", 0
+        end
+      end
+      atbol = 0
+    end
+    if tp > tlen then leave
+    c = substr(tx, tp, 1)
+    if c == " " | c == '09'x | c == '0c'x then do
+      tp = tp + 1
+      iterate
+    end
+    if c == '0a'x then do
+      tp = tp + 1
+      if lx_brk = 0 then do
+        if ntk > 0 then do
+          if tk_t[ntk] \= T_NL & sub = 0 then call addtok T_NL, "", 0
+        end
+        atbol = 1
+      end
+      lnum = lnum + 1
+      iterate
+    end
+    if c == "#" then do
+      q2 = pos('0a'x, tx, tp)
+      if q2 = 0 then tp = tlen + 1
+      else tp = q2
+      iterate
+    end
+    if c == "\" then do
+      if substr(tx, tp + 1, 1) == '0a'x then do
+        tp = tp + 2
+        lnum = lnum + 1
+        iterate
+      end
+      tp = tp + 1
+      iterate
+    end
+    d = substr(tx, tp + 1, 1)
+    /* ---- identifiers, keywords, string prefixes ---- */
+    if isletter(c) = 1 then do
+      q = tp
+      do while q <= tlen
+        d = substr(tx, q, 1)
+        if isletter(d) = 1 | isdigit(d) = 1 then q = q + 1
+        else leave
+      end
+      id = substr(tx, tp, q - tp)
+      d = substr(tx, q, 1)
+      if (d == '"' | d == "'") & length(id) <= 2 then do
+        s = lower(id)
+        if s == "r" | s == "b" | s == "f" | s == "u" | s == "rb" | s == "br" | s == "fr" | s == "rf" then do
+          isr = 0
+          isb = 0
+          isf = 0
+          if pos("r", s) > 0 then isr = 1
+          if pos("b", s) > 0 then isb = 1
+          if pos("f", s) > 0 then isf = 1
+          tp = q
+          call lex_string isr, isf, isb
+          iterate
+        end
+      end
+      tp = q
+      if pos(" " || id || " ", kwlist) > 0 then call addtok T_KW, id, 0
+      else call addtok T_NAME, id, 0
+      iterate
+    end
+    /* ---- numbers ---- */
+    if isdigit(c) = 1 | (c == "." & isdigit(d) = 1) then do
+      call lex_number
+      iterate
+    end
+    /* ---- strings ---- */
+    if c == '"' | c == "'" then do
+      call lex_string 0, 0, 0
+      iterate
+    end
+    /* ---- operators ---- */
+    op = substr(tx, tp, 3)
+    if op == "**=" | op == "//=" | op == ">>=" | op == "<<=" | op == "..." then do
+      call addtok T_OP, op, 0
+      tp = tp + 3
+      iterate
+    end
+    op = substr(tx, tp, 2)
+    if pos(" " || op || " ", ops2) > 0 then do
+      call addtok T_OP, op, 0
+      tp = tp + 2
+      iterate
+    end
+    if pos(c, "([{") > 0 then lx_brk = lx_brk + 1
+    if pos(c, ")]}") > 0 then do
+      if lx_brk > 0 then lx_brk = lx_brk - 1
+    end
+    call addtok T_OP, c, 0
+    tp = tp + 1
+  end
+  if sub = 0 then do
+    if ntk > 0 then do
+      if tk_t[ntk] \= T_NL & tk_t[ntk] \= T_DED & tk_t[ntk] \= T_IND then call addtok T_NL, "", 0
+    end
+    do while lx_nind > 1
+      lx_nind = lx_nind - 1
+      call addtok T_DED, "", 0
+    end
+  end
+  call addtok T_EOF, "", 0
+  tx = sv_tx
+  tlen = sv_tlen
+  tp = sv_tp
+  lx_brk = sv_brk
+  lx_nind = sv_nind
+  if sub = 1 then lnum = sv_line
+  return
+
+/* string literal at tx[tp] (the quote); prefix flags raw / f / bytes */
+lex_string: procedure = .void
+  arg isr = .int, isf = .int, isb = .int
+  quote = .string
+  trip = .int
+  q = .int
+  p = .int
+  body = .string
+  c = .string
+  n = .int
+  endp = .int
+  quote = substr(tx, tp, 1)
+  trip = 0
+  if substr(tx, tp + 1, 2) == quote || quote then do
+    trip = 1
+    q = tp + 3
+  end
+  else q = tp + 1
+  p = q
+  endp = 0
+  do while p <= tlen
+    c = substr(tx, p, 1)
+    if c == "\" then do
+      p = p + 2
+      iterate
+    end
+    if c == quote then do
+      if trip = 0 then do
+        endp = p
+        leave
+      end
+      if substr(tx, p + 1, 2) == quote || quote then do
+        endp = p
+        leave
+      end
+    end
+    if c == '0a'x & trip = 0 then leave
+    p = p + 1
+  end
+  if endp = 0 then do
+    call perr "EOL while scanning string literal"
+    tp = tlen + 1
+    return
+  end
+  body = substr(tx, q, endp - q)
+  n = 0
+  q = pos('0a'x, body)
+  do while q > 0
+    n = n + 1
+    q = pos('0a'x, body, q + 1)
+  end
+  if trip = 1 then tp = endp + 3
+  else tp = endp + 1
+  if isf = 1 then do
+    if isr = 1 then call addtok T_STR, body, 3
+    else call addtok T_STR, body, 1
+  end
+  else if isr = 1 then call addtok T_STR, body, 0
+  else call addtok T_STR, unescape(body), 0
+  lnum = lnum + n
+  return
+
+lex_number: procedure = .void
+  q = .int
+  p = .int
+  c = .string
+  d = .string
+  dg = .string
+  fr = .string
+  ex = .string
+  isf = .int
+  v = .int
+  radix = .int
+  neg = .int
+  nd = .int
+  s = .string
+  big = .string
+  q = tp
+  c = substr(tx, tp, 1)
+  d = lower(substr(tx, tp + 1, 1))
+  if c == "0" & (d == "x" | d == "o" | d == "b") then do
+    if d == "x" then radix = 16
+    else if d == "o" then radix = 8
+    else radix = 2
+    q = tp + 2
+    s = ""
+    do while q <= tlen
+      c = lower(substr(tx, q, 1))
+      if c == "_" then do
+        q = q + 1
+        iterate
+      end
+      if isdigit(c) = 1 then nd = c as .int
+      else if c >>= "a" & c <<= "f" then nd = c2d(c) - 87
+      else leave
+      if nd >= radix then leave
+      s = s || c
+      q = q + 1
+    end
+    tp = q
+    if s == "" then s = "0"
+    if length(s) <= 15 & radix = 16 then call addtok T_NUM, "", x2d(s)
+    else do
+      /* general: accumulate in a decimal string */
+      big = "0"
+      do p = 1 to length(s)
+        c = substr(s, p, 1)
+        if isdigit(c) = 1 then nd = c as .int
+        else nd = c2d(c) - 87
+        big = sadd(smul(big, radix as .string), nd as .string)
+      end
+      call tok_bigint big
+    end
+    return
+  end
+  dg = ""
+  do while q <= tlen
+    c = substr(tx, q, 1)
+    if isdigit(c) = 1 then dg = dg || c
+    else if c \== "_" then leave
+    q = q + 1
+  end
+  fr = ""
+  isf = 0
+  if substr(tx, q, 1) == "." then do
+    isf = 1
+    q = q + 1
+    do while q <= tlen
+      c = substr(tx, q, 1)
+      if isdigit(c) = 1 then fr = fr || c
+      else if c \== "_" then leave
+      q = q + 1
+    end
+  end
+  ex = ""
+  c = substr(tx, q, 1)
+  if c == "e" | c == "E" then do
+    p = q + 1
+    neg = 0
+    if substr(tx, p, 1) == "-" then do
+      neg = 1
+      p = p + 1
+    end
+    else if substr(tx, p, 1) == "+" then p = p + 1
+    if isdigit(substr(tx, p, 1)) = 1 then do
+      v = p
+      do while v <= tlen & isdigit(substr(tx, v, 1)) = 1
+        v = v + 1
+      end
+      ex = substr(tx, p, v - p)
+      if neg = 1 then ex = "-" || ex
+      isf = 1
+      q = v
+    end
+  end
+  tp = q
+  if isf = 1 then do
+    if dg == "" then dg = "0"
+    if fr == "" then fr = "0"
+    s = dg || "." || fr
+    if ex \== "" then s = s || "e" || ex
+    ntk = ntk + 1
+    tk_t[ntk] = T_FLT
+    tk_s[ntk] = s
+    tk_i[ntk] = 0
+    tk_l[ntk] = lnum
+    tk_f[ntk] = parse_flt(s)
+    return
+  end
+  if length(dg) > 18 then call tok_bigint dg
+  else call addtok T_NUM, "", dg as .int
+  return
+
+tok_bigint: procedure = .void
+  arg s = .string
+  if length(s) <= 18 then call addtok T_NUM, "", mag_clean(s) as .int
+  else call addtok T_BIG, mag_clean(s), 0
+  return

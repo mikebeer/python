@@ -1,0 +1,1170 @@
+/* ---------------------------------------------------------------------
+   Methods of the built-in types
+   --------------------------------------------------------------------- */
+/* a method called on a built-in value; arguments at ast[base+1 ..] */
+bmeth: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  k = .int
+  k = kind_of(o)
+  select
+    when k = K_STR then return meth_str(o, nid, base, na, nk)
+    when k = K_LIST then return meth_list(o, nid, base, na, nk)
+    when k = K_DICT then return meth_dict(o, nid, base, na, nk)
+    when k = K_SET then return meth_set(o, nid, base, na, nk)
+    when k = K_TUPLE then return meth_tuple(o, nid, base, na, nk)
+    when k = K_INT | k = K_BIG | k = K_BOOL | k = K_FLOAT then return meth_num(o, nid, base, na, nk)
+    when k = K_GEN | k = K_ITER then return meth_gen(o, nid, base, na, nk)
+    when k = K_FILE then return meth_file(o, nid, base, na, nk)
+    when k = K_PROP then do
+      if nid = M_SETTER | nid = M_GETTER then do
+        k = newobj(K_PROP)
+        ob_x[k % 2] = ob_x[o % 2]
+        ob_y[k % 2] = ob_y[o % 2]
+        if nid = M_SETTER then ob_y[k % 2] = ast[base + 1]
+        else ob_x[k % 2] = ast[base + 1]
+        return k
+      end
+    end
+    otherwise nop
+  end
+  return meth_common(o, nid, base, na, nk)
+
+/* unbound call  type.method(receiver, args...) */
+bmeth_unbound: procedure = .int
+  arg c = .int, nid = .int, base = .int, na = .int, nk = .int
+  if c = C_DICT & nid = M_FROMKEYS then return dict_fromkeys(base, na)
+  if na < 1 then return raise_exc(C_TYPEERROR, "descriptor '" || nid_name[nid] || "' of '" || cl_name[c] || "' object needs an argument")
+  return bmeth(ast[base + 1], nid, base + 1, na - 1, nk)
+
+meth_common: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  r = .int
+  select
+    when nid = M___LEN__ then return bi_len(o)
+    when nid = M___STR__ then do
+      r = str_of(o)
+      if unw > 0 then return 0
+      return mkstr(r)
+    end
+    when nid = M___REPR__ then do
+      r = repr_of(o)
+      if unw > 0 then return 0
+      return mkstr(r)
+    end
+    when nid = M___ITER__ then return iter_new(o)
+    when nid = M___NEXT__ then do
+      r = iter_next(o)
+      if r = 0 then do
+        if unw > 0 then return 0
+        unw = U_RAISE
+        unw_v = exc_new0(C_STOPITERATION)
+        return 0
+      end
+      return r
+    end
+    when nid = M___CONTAINS__ then do
+      r = py_contains(o, ast[base + 1])
+      if unw > 0 then return 0
+      return mkbool(r)
+    end
+    when nid = M___GETITEM__ then return getitem(o, ast[base + 1])
+    when nid = M___EQ__ then do
+      r = py_eq(o, ast[base + 1])
+      if unw > 0 then return 0
+      return mkbool(r)
+    end
+    when nid = M___HASH__ then return bi_hash(o)
+    when nid = M___BOOL__ then do
+      r = truthy(o)
+      if unw > 0 then return 0
+      return mkbool(r)
+    end
+    otherwise nop
+  end
+  return no_attr(o, nid)
+
+/* ---------------------------------------------------------------------
+   str
+   --------------------------------------------------------------------- */
+is_ws: procedure = .int
+  arg c = .string
+  if c == "" then return 0
+  if pos(c, wsch) > 0 then return 1
+  return 0
+
+/* mode: 1 left, 2 right, 3 both ; chars "" = white space */
+str_strip: procedure = .string
+  arg s = .string, chars = .string, mode = .int
+  i = .int
+  j = .int
+  n = .int
+  n = length(s)
+  i = 1
+  j = n
+  if mode // 2 = 1 then do
+    if chars == "" then do
+      do while i <= n & is_ws(substr(s, i, 1)) = 1
+        i = i + 1
+      end
+    end
+    else do
+      do while i <= n & pos(substr(s, i, 1), chars) > 0
+        i = i + 1
+      end
+    end
+  end
+  if mode >= 2 then do
+    if chars == "" then do
+      do while j >= i & is_ws(substr(s, j, 1)) = 1
+        j = j - 1
+      end
+    end
+    else do
+      do while j >= i & pos(substr(s, j, 1), chars) > 0
+        j = j - 1
+      end
+    end
+  end
+  if j < i then return ""
+  return substr(s, i, j - i + 1)
+
+split_ws: procedure = .int
+  arg s = .string, maxsplit = .int
+  l = .int
+  n = .int
+  i = .int
+  j = .int
+  l = mklist(8)
+  n = length(s)
+  i = 1
+  do forever
+    do while i <= n & is_ws(substr(s, i, 1)) = 1
+      i = i + 1
+    end
+    if i > n then leave
+    if maxsplit >= 0 & ob_n[l % 2] >= maxsplit then do
+      call list_append l, mkstr(substr(s, i))
+      leave
+    end
+    j = i
+    do while j <= n & is_ws(substr(s, j, 1)) = 0
+      j = j + 1
+    end
+    call list_append l, mkstr(substr(s, i, j - i))
+    i = j
+  end
+  return l
+
+rsplit_ws: procedure = .int
+  arg s = .string, maxsplit = .int
+  l = .int
+  n = .int
+  j = .int
+  i = .int
+  t = .int
+  a = .int
+  b = .int
+  l = mklist(8)
+  n = length(s)
+  j = n
+  do forever
+    do while j >= 1 & is_ws(substr(s, j, 1)) = 1
+      j = j - 1
+    end
+    if j < 1 then leave
+    if maxsplit >= 0 & ob_n[l % 2] >= maxsplit then do
+      call list_append l, mkstr(left(s, j))
+      leave
+    end
+    i = j
+    do while i >= 1 & is_ws(substr(s, i, 1)) = 0
+      i = i - 1
+    end
+    call list_append l, mkstr(substr(s, i + 1, j - i))
+    j = i
+  end
+  /* reverse */
+  a = 0
+  b = ob_n[l % 2] - 1
+  do while a < b
+    t = sl[ob_p[l % 2] + a]
+    sl[ob_p[l % 2] + a] = sl[ob_p[l % 2] + b]
+    sl[ob_p[l % 2] + b] = t
+    a = a + 1
+    b = b - 1
+  end
+  return l
+
+split_sep: procedure = .int
+  arg s = .string, sep = .string, maxsplit = .int
+  l = .int
+  p = .int
+  i = .int
+  ls = .int
+  l = mklist(8)
+  ls = length(sep)
+  i = 1
+  do forever
+    if maxsplit >= 0 & ob_n[l % 2] >= maxsplit then leave
+    p = pos(sep, s, i)
+    if p = 0 then leave
+    call list_append l, mkstr(substr(s, i, p - i))
+    i = p + ls
+  end
+  call list_append l, mkstr(substr(s, i))
+  return l
+
+rsplit_sep: procedure = .int
+  arg s = .string, sep = .string, maxsplit = .int
+  l = .int
+  p = .int
+  e = .int
+  ls = .int
+  a = .int
+  b = .int
+  t = .int
+  l = mklist(8)
+  ls = length(sep)
+  e = length(s)
+  do forever
+    if maxsplit >= 0 & ob_n[l % 2] >= maxsplit then leave
+    p = 0
+    if e >= ls then p = lastpos(sep, s, e)
+    if p = 0 then leave
+    call list_append l, mkstr(substr(s, p + ls, e - p - ls + 1))
+    e = p - 1
+  end
+  call list_append l, mkstr(left(s, e))
+  a = 0
+  b = ob_n[l % 2] - 1
+  do while a < b
+    t = sl[ob_p[l % 2] + a]
+    sl[ob_p[l % 2] + a] = sl[ob_p[l % 2] + b]
+    sl[ob_p[l % 2] + b] = t
+    a = a + 1
+    b = b - 1
+  end
+  return l
+
+str_replace: procedure = .string
+  arg s = .string, old = .string, new = .string, cnt = .int
+  r = .string
+  p = .int
+  i = .int
+  n = .int
+  lo = .int
+  c = .int
+  if old == "" then do
+    n = length(s)
+    r = ""
+    c = 0
+    do i = 1 to n
+      if cnt < 0 | c < cnt then do
+        r = r || new
+        c = c + 1
+      end
+      r = r || substr(s, i, 1)
+    end
+    if cnt < 0 | c < cnt then r = r || new
+    return r
+  end
+  lo = length(old)
+  r = ""
+  i = 1
+  c = 0
+  do forever
+    if cnt >= 0 & c >= cnt then leave
+    p = pos(old, s, i)
+    if p = 0 then leave
+    r = r || substr(s, i, p - i) || new
+    i = p + lo
+    c = c + 1
+  end
+  return r || substr(s, i)
+
+/* normalise optional [start, end] arguments (from ast[base+first ..]) to 0-based start and end */
+slice_args: procedure = .int
+  arg n = .int, base = .int, na = .int, first = .int
+  st = .int
+  en = .int
+  st = 0
+  en = n
+  if na >= first then do
+    if ast[base + first] \= NONE_OOP then do
+      if chk_int(ast[base + first]) = 0 then return 0
+      st = ival(ast[base + first])
+      if st < 0 then st = st + n
+      if st < 0 then st = 0
+    end
+  end
+  if na >= first + 1 then do
+    if ast[base + first + 1] \= NONE_OOP then do
+      if chk_int(ast[base + first + 1]) = 0 then return 0
+      en = ival(ast[base + first + 1])
+      if en < 0 then en = en + n
+      if en < 0 then en = 0
+      if en > n then en = n
+    end
+  end
+  sl_a = st
+  sl_n = en
+  return 1
+
+str_title: procedure = .string
+  arg s = .string
+  r = .string
+  i = .int
+  n = .int
+  c = .string
+  prev = .int
+  r = ""
+  prev = 0
+  n = length(s)
+  do i = 1 to n
+    c = substr(s, i, 1)
+    if isletter(c) = 1 & c \== "_" then do
+      if prev = 1 then r = r || lower(c)
+      else r = r || upper(c)
+      prev = 1
+    end
+    else do
+      r = r || c
+      prev = 0
+    end
+  end
+  return r
+
+str_swapcase: procedure = .string
+  arg s = .string
+  r = .string
+  i = .int
+  n = .int
+  c = .string
+  r = ""
+  n = length(s)
+  do i = 1 to n
+    c = substr(s, i, 1)
+    if c >>= "a" & c <<= "z" then r = r || upper(c)
+    else if c >>= "A" & c <<= "Z" then r = r || lower(c)
+    else r = r || c
+  end
+  return r
+
+/* character class test: 1 alpha, 2 digit, 3 alnum, 4 space, 5 identifier */
+str_isclass: procedure = .int
+  arg s = .string, cls = .int
+  i = .int
+  n = .int
+  c = .string
+  a = .int
+  d = .int
+  n = length(s)
+  if n = 0 then return 0
+  do i = 1 to n
+    c = substr(s, i, 1)
+    a = 0
+    if c >>= "a" & c <<= "z" then a = 1
+    else if c >>= "A" & c <<= "Z" then a = 1
+    else if c2d(c) >= 128 then a = 1
+    d = isdigit(c)
+    if cls = 1 & a = 0 then return 0
+    if cls = 2 & d = 0 then return 0
+    if cls = 3 & a = 0 & d = 0 then return 0
+    if cls = 4 & is_ws(c) = 0 then return 0
+    if cls = 5 then do
+      if a = 0 & c \== "_" then do
+        if d = 0 | i = 1 then return 0
+      end
+    end
+  end
+  return 1
+
+str_pad_arg: procedure = .string
+  arg base = .int, na = .int, idx = .int
+  v = .int
+  if na < idx then return " "
+  v = ast[base + idx]
+  if kind_of(v) \= K_STR | length(ob_s[v % 2]) \= 1 then do
+    call raise_exc C_TYPEERROR, "The fill character must be exactly one character long"
+    return " "
+  end
+  return ob_s[v % 2]
+
+meth_str: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  s = .string
+  a = .string
+  b = .string
+  n = .int
+  i = .int
+  j = .int
+  p = .int
+  r = .int
+  v = .int
+  l = .int
+  c = .int
+  t = .string
+  w = .int
+  m = .int
+  f = .string
+  st = .int
+  en = .int
+  x = .string
+  s = ob_s[o % 2]
+  select
+    when nid = M_JOIN then do
+      if na \= 1 then return nargs_err("join", na, 1, 1)
+      l = iter_list(ast[base + 1])
+      if l = 0 then return 0
+      n = ob_n[l % 2]
+      t = ""
+      do i = 0 to n - 1
+        v = sl[ob_p[l % 2] + i]
+        if kind_of(v) \= K_STR then return raise_exc(C_TYPEERROR, "sequence item " || i || ": expected str instance, " || type_name(v) || " found")
+        if i > 0 then t = t || s
+        t = t || ob_s[v % 2]
+      end
+      return mkstr(t)
+    end
+    when nid = M_UPPER then return mkstr(upper(s))
+    when nid = M_LOWER | nid = M_CASEFOLD then return mkstr(lower(s))
+    when nid = M_STRIP | nid = M_LSTRIP | nid = M_RSTRIP then do
+      a = ""
+      if na >= 1 then do
+        if ast[base + 1] \= NONE_OOP then a = ob_s[ast[base + 1] % 2]
+      end
+      m = 3
+      if nid = M_LSTRIP then m = 1
+      if nid = M_RSTRIP then m = 2
+      return mkstr(str_strip(s, a, m))
+    end
+    when nid = M_SPLIT | nid = M_RSPLIT then do
+      a = ""
+      w = 0
+      m = -1
+      if na >= 1 then do
+        if ast[base + 1] \= NONE_OOP then do
+          if kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "must be str or None, not " || type_name(ast[base + 1]))
+          a = ob_s[ast[base + 1] % 2]
+          w = 1
+          if a == "" then return raise_exc(C_VALUEERROR, "empty separator")
+        end
+      end
+      if na >= 2 then m = ival(ast[base + 2])
+      if kwarg(base, na, nk, "maxsplit") \= 0 then m = ival(kwarg(base, na, nk, "maxsplit"))
+      if kwarg(base, na, nk, "sep") \= 0 then do
+        if kwarg(base, na, nk, "sep") \= NONE_OOP then do
+          a = ob_s[kwarg(base, na, nk, "sep") % 2]
+          w = 1
+        end
+      end
+      if nid = M_SPLIT then do
+        if w = 0 then return split_ws(s, m)
+        return split_sep(s, a, m)
+      end
+      if w = 0 then return rsplit_ws(s, m)
+      return rsplit_sep(s, a, m)
+    end
+    when nid = M_REPLACE then do
+      if na < 2 then return nargs_err("replace", na, 2, 3)
+      if kind_of(ast[base + 1]) \= K_STR | kind_of(ast[base + 2]) \= K_STR then return raise_exc(C_TYPEERROR, "replace() argument must be str")
+      m = -1
+      if na >= 3 then m = ival(ast[base + 3])
+      return mkstr(str_replace(s, ob_s[ast[base + 1] % 2], ob_s[ast[base + 2] % 2], m))
+    end
+    when nid = M_FIND | nid = M_RFIND | nid = M_INDEX | nid = M_RINDEX | nid = M_COUNT then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
+      if kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "must be str, not " || type_name(ast[base + 1]))
+      a = ob_s[ast[base + 1] % 2]
+      if slice_args(length(s), base, na, 2) = 0 then return 0
+      st = sl_a
+      en = sl_n
+      if st > en | st > length(s) then do
+        if nid = M_COUNT then return mkint(0)
+        if nid = M_FIND | nid = M_RFIND then return mkint(-1)
+        return raise_exc(C_VALUEERROR, "substring not found")
+      end
+      t = substr(s, st + 1, en - st)
+      if nid = M_COUNT then do
+        if a == "" then return mkint(length(t) + 1)
+        return mkint(countstr(a, t))
+      end
+      if a == "" then do
+        if nid = M_RFIND | nid = M_RINDEX then return mkint(en)
+        return mkint(st)
+      end
+      if nid = M_FIND | nid = M_INDEX then p = pos(a, t)
+      else p = lastpos(a, t)
+      if p = 0 then do
+        if nid = M_FIND | nid = M_RFIND then return mkint(-1)
+        return raise_exc(C_VALUEERROR, "substring not found")
+      end
+      return mkint(p - 1 + st)
+    end
+    when nid = M_STARTSWITH | nid = M_ENDSWITH then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
+      if slice_args(length(s), base, na, 2) = 0 then return 0
+      st = sl_a
+      en = sl_n
+      if st > en then return FALSE_OOP
+      t = substr(s, st + 1, en - st)
+      v = ast[base + 1]
+      if kind_of(v) = K_STR then do
+        l = 1
+        i = 0
+        j = 0
+      end
+      else if kind_of(v) = K_TUPLE then do
+        l = ob_n[v % 2]
+        i = 0
+      end
+      else return raise_exc(C_TYPEERROR, nid_name[nid] || " first arg must be str or a tuple of str, not " || type_name(v))
+      do j = 0 to l - 1
+        if kind_of(v) = K_STR then a = ob_s[v % 2]
+        else a = ob_s[sl[ob_p[v % 2] + j] % 2]
+        n = length(a)
+        if n <= length(t) then do
+          if nid = M_STARTSWITH then do
+            if left(t, n) == a then return TRUE_OOP
+          end
+          else do
+            if n = 0 then return TRUE_OOP
+            if right(t, n) == a then return TRUE_OOP
+          end
+        end
+      end
+      return FALSE_OOP
+    end
+    when nid = M_ISALPHA then return mkbool(str_isclass(s, 1))
+    when nid = M_ISDIGIT | nid = M_ISDECIMAL | nid = M_ISNUMERIC then return mkbool(str_isclass(s, 2))
+    when nid = M_ISALNUM then return mkbool(str_isclass(s, 3))
+    when nid = M_ISSPACE then return mkbool(str_isclass(s, 4))
+    when nid = M_ISIDENTIFIER then return mkbool(str_isclass(s, 5))
+    when nid = M_ISUPPER then do
+      if upper(s) == s & lower(s) \== s then return TRUE_OOP
+      return FALSE_OOP
+    end
+    when nid = M_ISLOWER then do
+      if lower(s) == s & upper(s) \== s then return TRUE_OOP
+      return FALSE_OOP
+    end
+    when nid = M_ISTITLE then do
+      if str_title(s) == s & upper(s) \== lower(s) then return TRUE_OOP
+      return FALSE_OOP
+    end
+    when nid = M_ISASCII then do
+      do i = 1 to length(s)
+        if c2d(substr(s, i, 1)) >= 128 then return FALSE_OOP
+      end
+      return TRUE_OOP
+    end
+    when nid = M_CAPITALIZE then return mkstr(upper(left(s, 1)) || lower(substr(s, 2)))
+    when nid = M_TITLE then return mkstr(str_title(s))
+    when nid = M_SWAPCASE then return mkstr(str_swapcase(s))
+    when nid = M_CENTER | nid = M_LJUST | nid = M_RJUST then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 2)
+      if chk_int(ast[base + 1]) = 0 then return 0
+      w = ival(ast[base + 1])
+      f = str_pad_arg(base, na, 2)
+      if unw > 0 then return 0
+      n = length(s)
+      if w <= n then return o
+      m = w - n
+      if nid = M_LJUST then return mkstr(s || copies(f, m))
+      if nid = M_RJUST then return mkstr(copies(f, m) || s)
+      i = m % 2 + (m // 2) * (w // 2)
+      return mkstr(copies(f, i) || s || copies(f, m - i))
+    end
+    when nid = M_ZFILL then do
+      if chk_int(ast[base + 1]) = 0 then return 0
+      w = ival(ast[base + 1])
+      n = length(s)
+      if w <= n then return o
+      if left(s, 1) == "-" | left(s, 1) == "+" then return mkstr(left(s, 1) || copies("0", w - n) || substr(s, 2))
+      return mkstr(copies("0", w - n) || s)
+    end
+    when nid = M_PARTITION | nid = M_RPARTITION then do
+      if na \= 1 then return nargs_err(nid_name[nid], na, 1, 1)
+      if kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "must be str, not " || type_name(ast[base + 1]))
+      a = ob_s[ast[base + 1] % 2]
+      if a == "" then return raise_exc(C_VALUEERROR, "empty separator")
+      if nid = M_PARTITION then p = pos(a, s)
+      else p = lastpos(a, s)
+      v = mktuple(3)
+      if p = 0 then do
+        if nid = M_PARTITION then do
+          sl[ob_p[v % 2]] = o
+          sl[ob_p[v % 2] + 1] = mkstr("")
+          sl[ob_p[v % 2] + 2] = mkstr("")
+        end
+        else do
+          sl[ob_p[v % 2]] = mkstr("")
+          sl[ob_p[v % 2] + 1] = mkstr("")
+          sl[ob_p[v % 2] + 2] = o
+        end
+        return v
+      end
+      sl[ob_p[v % 2]] = mkstr(left(s, p - 1))
+      sl[ob_p[v % 2] + 1] = ast[base + 1]
+      sl[ob_p[v % 2] + 2] = mkstr(substr(s, p + length(a)))
+      return v
+    end
+    when nid = M_FORMAT then return fmt_format(s, base, na, nk)
+    when nid = M_SPLITLINES then do
+      l = mklist(8)
+      m = 0
+      if na >= 1 then m = truthy(ast[base + 1])
+      if kwarg(base, na, nk, "keepends") \= 0 then m = truthy(kwarg(base, na, nk, "keepends"))
+      n = length(s)
+      i = 1
+      do while i <= n
+        j = i
+        do while j <= n & substr(s, j, 1) \== '0a'x & substr(s, j, 1) \== '0d'x
+          j = j + 1
+        end
+        p = j
+        if j <= n then do
+          if substr(s, j, 1) == '0d'x & substr(s, j + 1, 1) == '0a'x then j = j + 2
+          else j = j + 1
+        end
+        if m = 1 then call list_append l, mkstr(substr(s, i, j - i))
+        else call list_append l, mkstr(substr(s, i, p - i))
+        i = j
+      end
+      return l
+    end
+    when nid = M_ENCODE | nid = M_DECODE then return o
+    when nid = M_REMOVEPREFIX then do
+      a = ob_s[ast[base + 1] % 2]
+      if length(a) <= length(s) then do
+        if left(s, length(a)) == a then return mkstr(substr(s, length(a) + 1))
+      end
+      return o
+    end
+    when nid = M_REMOVESUFFIX then do
+      a = ob_s[ast[base + 1] % 2]
+      if length(a) <= length(s) & length(a) > 0 then do
+        if right(s, length(a)) == a then return mkstr(left(s, length(s) - length(a)))
+      end
+      return o
+    end
+    when nid = M_EXPANDTABS then do
+      w = 8
+      if na >= 1 then w = ival(ast[base + 1])
+      t = ""
+      c = 0
+      do i = 1 to length(s)
+        a = substr(s, i, 1)
+        if a == '09'x then do
+          m = w - (c // w)
+          t = t || copies(" ", m)
+          c = c + m
+        end
+        else if a == '0a'x then do
+          t = t || a
+          c = 0
+        end
+        else do
+          t = t || a
+          c = c + 1
+        end
+      end
+      return mkstr(t)
+    end
+    when nid = M_TRANSLATE then return o
+    otherwise nop
+  end
+  return meth_common(o, nid, base, na, nk)
+
+/* ---------------------------------------------------------------------
+   list
+   --------------------------------------------------------------------- */
+meth_list: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  ix = .int
+  n = .int
+  p = .int
+  i = .int
+  j = .int
+  v = .int
+  l = .int
+  r = .int
+  keyf = .int
+  rev = .int
+  st = .int
+  en = .int
+  t = .int
+  ix = o % 2
+  select
+    when nid = M_APPEND then do
+      if na \= 1 then return nargs_err("append", na, 1, 1)
+      call list_append o, ast[base + 1]
+      return NONE_OOP
+    end
+    when nid = M_POP then do
+      n = ob_n[ix]
+      if n = 0 then return raise_exc(C_INDEXERROR, "pop from empty list")
+      i = n - 1
+      if na >= 1 then do
+        if chk_int(ast[base + 1]) = 0 then return 0
+        i = ival(ast[base + 1])
+        if i < 0 then i = i + n
+        if i < 0 | i >= n then return raise_exc(C_INDEXERROR, "pop index out of range")
+      end
+      p = ob_p[ix]
+      v = sl[p + i]
+      do j = i to n - 2
+        sl[p + j] = sl[p + j + 1]
+      end
+      ob_n[ix] = n - 1
+      return v
+    end
+    when nid = M_EXTEND then do
+      if na \= 1 then return nargs_err("extend", na, 1, 1)
+      l = iter_list(ast[base + 1])
+      if l = 0 then return 0
+      call list_extend_from o, l
+      return NONE_OOP
+    end
+    when nid = M_INSERT then do
+      if na \= 2 then return nargs_err("insert", na, 2, 2)
+      if chk_int(ast[base + 1]) = 0 then return 0
+      n = ob_n[ix]
+      i = ival(ast[base + 1])
+      if i < 0 then i = i + n
+      if i < 0 then i = 0
+      if i > n then i = n
+      call list_reserve o, n + 1
+      p = ob_p[ix]
+      do j = n - 1 to i by -1
+        sl[p + j + 1] = sl[p + j]
+      end
+      sl[p + i] = ast[base + 2]
+      ob_n[ix] = n + 1
+      return NONE_OOP
+    end
+    when nid = M_REMOVE then do
+      if na \= 1 then return nargs_err("remove", na, 1, 1)
+      n = ob_n[ix]
+      p = ob_p[ix]
+      do i = 0 to n - 1
+        r = py_eq(sl[p + i], ast[base + 1])
+        if unw > 0 then return 0
+        if r = 1 then do
+          do j = i to n - 2
+            sl[p + j] = sl[p + j + 1]
+          end
+          ob_n[ix] = n - 1
+          return NONE_OOP
+        end
+      end
+      return raise_exc(C_VALUEERROR, "list.remove(x): x not in list")
+    end
+    when nid = M_INDEX | nid = M_COUNT then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
+      n = ob_n[ix]
+      p = ob_p[ix]
+      st = 0
+      en = n
+      if nid = M_INDEX then do
+        if slice_args(n, base, na, 2) = 0 then return 0
+        st = sl_a
+        en = sl_n
+      end
+      j = 0
+      do i = st to en - 1
+        r = py_eq(sl[p + i], ast[base + 1])
+        if unw > 0 then return 0
+        if r = 1 then do
+          if nid = M_INDEX then return mkint(i)
+          j = j + 1
+        end
+      end
+      if nid = M_COUNT then return mkint(j)
+      return raise_exc(C_VALUEERROR, repr_of(ast[base + 1]) || " is not in list")
+    end
+    when nid = M_SORT then do
+      keyf = kwarg(base, na, nk, "key")
+      if keyf = NONE_OOP then keyf = 0
+      rev = 0
+      r = kwarg(base, na, nk, "reverse")
+      if r \= 0 then rev = truthy(r)
+      if sort_list(o, keyf, rev) = 0 then return 0
+      return NONE_OOP
+    end
+    when nid = M_REVERSE then do
+      n = ob_n[ix]
+      p = ob_p[ix]
+      i = 0
+      j = n - 1
+      do while i < j
+        t = sl[p + i]
+        sl[p + i] = sl[p + j]
+        sl[p + j] = t
+        i = i + 1
+        j = j - 1
+      end
+      return NONE_OOP
+    end
+    when nid = M_COPY then return iter_list(o)
+    when nid = M_CLEAR then do
+      ob_n[ix] = 0
+      return NONE_OOP
+    end
+    when nid = M_POPLEFT then do
+      n = ob_n[ix]
+      if n = 0 then return raise_exc(C_INDEXERROR, "pop from an empty deque")
+      p = ob_p[ix]
+      v = sl[p]
+      do j = 0 to n - 2
+        sl[p + j] = sl[p + j + 1]
+      end
+      ob_n[ix] = n - 1
+      return v
+    end
+    when nid = M_APPENDLEFT then do
+      n = ob_n[ix]
+      call list_reserve o, n + 1
+      p = ob_p[ix]
+      do j = n - 1 to 0 by -1
+        sl[p + j + 1] = sl[p + j]
+      end
+      sl[p] = ast[base + 1]
+      ob_n[ix] = n + 1
+      return NONE_OOP
+    end
+    otherwise nop
+  end
+  return meth_common(o, nid, base, na, nk)
+
+meth_tuple: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  n = .int
+  p = .int
+  i = .int
+  j = .int
+  r = .int
+  n = ob_n[o % 2]
+  p = ob_p[o % 2]
+  if nid = M_INDEX | nid = M_COUNT then do
+    if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
+    j = 0
+    do i = 0 to n - 1
+      r = py_eq(sl[p + i], ast[base + 1])
+      if unw > 0 then return 0
+      if r = 1 then do
+        if nid = M_INDEX then return mkint(i)
+        j = j + 1
+      end
+    end
+    if nid = M_COUNT then return mkint(j)
+    return raise_exc(C_VALUEERROR, "tuple.index(x): x not in tuple")
+  end
+  return meth_common(o, nid, base, na, nk)
+
+/* ---------------------------------------------------------------------
+   dict
+   --------------------------------------------------------------------- */
+dict_fill: procedure = .int
+  arg o = .int, x = .int
+  it = .int
+  v = .int
+  l = .int
+  if kind_of(x) = K_DICT then do
+    call dict_update o, x
+    return 1
+  end
+  it = iter_new(x)
+  if it = 0 then return 0
+  do forever
+    v = iter_next(it)
+    if v = 0 then leave
+    l = iter_list(v)
+    if l = 0 then return 0
+    if ob_n[l % 2] \= 2 then do
+      call raise_exc C_VALUEERROR, "dictionary update sequence element has length " || ob_n[l % 2] || "; 2 is required"
+      return 0
+    end
+    call dset o, sl[ob_p[l % 2]], sl[ob_p[l % 2] + 1]
+  end
+  if unw > 0 then return 0
+  return 1
+
+dict_fromkeys: procedure = .int
+  arg base = .int, na = .int
+  o = .int
+  l = .int
+  i = .int
+  v = .int
+  if na < 1 | na > 2 then return nargs_err("fromkeys", na, 1, 2)
+  o = dict_new(K_DICT)
+  v = NONE_OOP
+  if na = 2 then v = ast[base + 2]
+  l = iter_list(ast[base + 1])
+  if l = 0 then return 0
+  do i = 0 to ob_n[l % 2] - 1
+    call dset o, sl[ob_p[l % 2] + i], v
+  end
+  return o
+
+meth_dict: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  d = .int
+  e = .int
+  l = .int
+  t = .int
+  v = .int
+  j = .int
+  last = .int
+  r = .int
+  it = .int
+  a = .int
+  d = ob_x[o % 2]
+  select
+    when nid = M_GET then do
+      if na < 1 | na > 2 then return nargs_err("get", na, 1, 2)
+      e = dict_find(d, hashkey(ast[base + 1]))
+      if e > 0 then return de_val[e]
+      if na = 2 then return ast[base + 2]
+      return NONE_OOP
+    end
+    when nid = M_ITEMS then do
+      l = mklist(dd_n[d])
+      e = dd_head[d]
+      do while e > 0
+        if de_live[e] = 1 then do
+          t = mktuple(2)
+          sl[ob_p[t % 2]] = de_key[e]
+          sl[ob_p[t % 2] + 1] = de_val[e]
+          call list_append l, t
+        end
+        e = de_next[e]
+      end
+      return l
+    end
+    when nid = M_KEYS | nid = M_VALUES then do
+      l = mklist(dd_n[d])
+      e = dd_head[d]
+      do while e > 0
+        if de_live[e] = 1 then do
+          if nid = M_KEYS then call list_append l, de_key[e]
+          else call list_append l, de_val[e]
+        end
+        e = de_next[e]
+      end
+      return l
+    end
+    when nid = M_SETDEFAULT then do
+      if na < 1 | na > 2 then return nargs_err("setdefault", na, 1, 2)
+      e = dict_find(d, hashkey(ast[base + 1]))
+      if e > 0 then return de_val[e]
+      v = NONE_OOP
+      if na = 2 then v = ast[base + 2]
+      call dset o, ast[base + 1], v
+      return v
+    end
+    when nid = M_POP then do
+      if na < 1 | na > 2 then return nargs_err("pop", na, 1, 2)
+      e = dict_find(d, hashkey(ast[base + 1]))
+      if e = 0 then do
+        if na = 2 then return ast[base + 2]
+        return raise_key(ast[base + 1])
+      end
+      v = de_val[e]
+      r = dict_del(d, de_hk[e])
+      return v
+    end
+    when nid = M_POPITEM then do
+      last = 0
+      e = dd_head[d]
+      do while e > 0
+        if de_live[e] = 1 then last = e
+        e = de_next[e]
+      end
+      if last = 0 then return raise_exc(C_KEYERROR, "popitem(): dictionary is empty")
+      t = mktuple(2)
+      sl[ob_p[t % 2]] = de_key[last]
+      sl[ob_p[t % 2] + 1] = de_val[last]
+      r = dict_del(d, de_hk[last])
+      return t
+    end
+    when nid = M_UPDATE then do
+      if na >= 1 then do
+        if dict_fill(o, ast[base + 1]) = 0 then return 0
+      end
+      do j = 1 to nk
+        call dset o, mkstr(asn[base + na + j]), ast[base + na + j]
+      end
+      return NONE_OOP
+    end
+    when nid = M_COPY then do
+      t = dict_copy(o)
+      ob_y[t % 2] = ob_y[o % 2]
+      return t
+    end
+    when nid = M_CLEAR then do
+      call dict_clear d
+      return NONE_OOP
+    end
+    when nid = M_MOST_COMMON then do
+      l = meth_dict(o, M_ITEMS, base, 0, 0)
+      /* stable sort by count, descending */
+      a = newobj(K_BUILTIN)
+      ob_x[a % 2] = BI__SECOND
+      if sort_list(l, a, 1) = 0 then return 0
+      if na >= 1 then do
+        t = mklist(4)
+        do j = 0 to ival(ast[base + 1]) - 1
+          if j < ob_n[l % 2] then call list_append t, sl[ob_p[l % 2] + j]
+        end
+        return t
+      end
+      return l
+    end
+    otherwise nop
+  end
+  return meth_common(o, nid, base, na, nk)
+
+/* ---------------------------------------------------------------------
+   set
+   --------------------------------------------------------------------- */
+meth_set: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  d = .int
+  e = .int
+  l = .int
+  t = .int
+  v = .int
+  i = .int
+  j = .int
+  r = .int
+  x = .int
+  ok = .int
+  d = ob_x[o % 2]
+  select
+    when nid = M_ADD then do
+      if na \= 1 then return nargs_err("add", na, 1, 1)
+      call dset o, ast[base + 1], TRUE_OOP
+      return NONE_OOP
+    end
+    when nid = M_DISCARD then do
+      r = dict_del(d, hashkey(ast[base + 1]))
+      return NONE_OOP
+    end
+    when nid = M_REMOVE then do
+      r = dict_del(d, hashkey(ast[base + 1]))
+      if r = 0 then return raise_key(ast[base + 1])
+      return NONE_OOP
+    end
+    when nid = M_POP then do
+      e = de_live_from(dd_head[d])
+      if e = 0 then return raise_exc(C_KEYERROR, "pop from an empty set")
+      v = de_key[e]
+      r = dict_del(d, de_hk[e])
+      return v
+    end
+    when nid = M_COPY then do
+      return dict_copy(o)
+    end
+    when nid = M_CLEAR then do
+      call dict_clear d
+      return NONE_OOP
+    end
+    when nid = M_UNION | nid = M_INTERSECTION | nid = M_DIFFERENCE | nid = M_SYMMETRIC_DIFFERENCE then do
+      t = dict_copy(o)
+      do i = 1 to na
+        x = ast[base + i]
+        if kind_of(x) \= K_SET then do
+          l = iter_list(x)
+          if l = 0 then return 0
+          x = dict_new(K_SET)
+          do j = 0 to ob_n[l % 2] - 1
+            call dset x, sl[ob_p[l % 2] + j], TRUE_OOP
+          end
+        end
+        if nid = M_UNION then t = set_op(O_BITOR, t, x)
+        else if nid = M_INTERSECTION then t = set_op(O_BITAND, t, x)
+        else if nid = M_DIFFERENCE then t = set_op(O_SUB, t, x)
+        else t = set_op(O_BITXOR, t, x)
+      end
+      return t
+    end
+    when nid = M_UPDATE | nid = M_INTERSECTION_UPDATE | nid = M_DIFFERENCE_UPDATE then do
+      do i = 1 to na
+        x = ast[base + i]
+        if kind_of(x) \= K_SET then do
+          l = iter_list(x)
+          if l = 0 then return 0
+          x = dict_new(K_SET)
+          do j = 0 to ob_n[l % 2] - 1
+            call dset x, sl[ob_p[l % 2] + j], TRUE_OOP
+          end
+        end
+        if nid = M_UPDATE then t = set_op(O_BITOR, o, x)
+        else if nid = M_INTERSECTION_UPDATE then t = set_op(O_BITAND, o, x)
+        else t = set_op(O_SUB, o, x)
+        ob_x[o % 2] = ob_x[t % 2]
+      end
+      return NONE_OOP
+    end
+    when nid = M_ISSUBSET | nid = M_ISSUPERSET | nid = M_ISDISJOINT then do
+      x = ast[base + 1]
+      if kind_of(x) \= K_SET then do
+        l = iter_list(x)
+        if l = 0 then return 0
+        x = dict_new(K_SET)
+        do j = 0 to ob_n[l % 2] - 1
+          call dset x, sl[ob_p[l % 2] + j], TRUE_OOP
+        end
+      end
+      if nid = M_ISSUBSET then return set_cmp(CMP_LE, o, x)
+      if nid = M_ISSUPERSET then return set_cmp(CMP_GE, o, x)
+      t = set_op(O_BITAND, o, x)
+      if dd_n[ob_x[t % 2]] = 0 then return TRUE_OOP
+      return FALSE_OOP
+    end
+    otherwise nop
+  end
+  return meth_common(o, nid, base, na, nk)
+
+/* ---------------------------------------------------------------------
+   numbers, generators, files
+   --------------------------------------------------------------------- */
+meth_num: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  s = .string
+  f = .float
+  if nid = M_BIT_LENGTH then do
+    s = num_str(o)
+    if left(s, 1) == "-" then s = substr(s, 2)
+    if s == "0" then return mkint(0)
+    return mkint(length(radix_str(s, 2)))
+  end
+  if nid = M_IS_INTEGER then do
+    if kind_of(o) \= K_FLOAT then return TRUE_OOP
+    f = ob_f[o % 2]
+    if f = rxfloat..floor(f) & rxfloat..fabs(f) < 1.0e300 then return TRUE_OOP
+    return FALSE_OOP
+  end
+  if nid = M_CONJUGATE then return o
+  return meth_common(o, nid, base, na, nk)
+
+meth_gen: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  v = .int
+  if nid = M_SEND then do
+    if kind_of(o) \= K_GEN then return no_attr(o, nid)
+    v = gen_resume(ob_x[o % 2], ast[base + 1])
+    if v = 0 then do
+      if unw > 0 then return 0
+      unw = U_RAISE
+      unw_v = exc_new0(C_STOPITERATION)
+      return 0
+    end
+    return v
+  end
+  if nid = M_CLOSE then do
+    if kind_of(o) = K_GEN then gn_st[ob_x[o % 2]] = 3
+    return NONE_OOP
+  end
+  return meth_common(o, nid, base, na, nk)

@@ -1,0 +1,531 @@
+/* ---------------------------------------------------------------------
+   Objects.  An oop is 2*index for heap objects, 2*n+1 for small integers.
+   --------------------------------------------------------------------- */
+newobj: procedure = .int
+  arg kind = .int
+  nob = nob + 1
+  ob_k[nob] = kind
+  return nob * 2
+
+mkint: procedure = .int
+  arg n = .int
+  if n > SMALLMAX | n < 0 - SMALLMAX then return big_norm(n as .string)
+  return n * 2 + 1
+
+ival: procedure = .int
+  arg x = .int
+  if x // 2 \= 0 then return (x - 1) % 2
+  if x = TRUE_OOP then return 1
+  return 0
+
+mkstr: procedure = .int
+  arg s = .string
+  o = .int
+  nob = nob + 1
+  ob_k[nob] = K_STR
+  ob_s[nob] = s
+  return nob * 2
+
+mkfloat: procedure = .int
+  arg f = .float
+  nob = nob + 1
+  ob_k[nob] = K_FLOAT
+  ob_f[nob] = f
+  return nob * 2
+
+mkbool: procedure = .int
+  arg b = .int
+  if b = 1 then return TRUE_OOP
+  return FALSE_OOP
+
+/* big integer from a decimal string (may need normalising) */
+mkbig: procedure = .int
+  arg s = .string
+  nob = nob + 1
+  ob_k[nob] = K_BIG
+  ob_s[nob] = s
+  return nob * 2
+
+alloc_slots: procedure = .int
+  arg n = .int
+  st = .int
+  st = nsl + 1
+  nsl = nsl + n
+  if n > 0 then sl[nsl] = 0
+  return st
+
+mklist: procedure = .int
+  arg cap = .int
+  o = .int
+  o = newobj(K_LIST)
+  if cap < 4 then cap = 4
+  ob_p[o % 2] = alloc_slots(cap)
+  ob_x[o % 2] = cap
+  return o
+
+mktuple: procedure = .int
+  arg n = .int
+  o = .int
+  o = newobj(K_TUPLE)
+  ob_p[o % 2] = alloc_slots(n)
+  ob_n[o % 2] = n
+  ob_x[o % 2] = n
+  return o
+
+list_append: procedure = .void
+  arg o = .int, v = .int
+  i = .int
+  ix = .int
+  n = .int
+  cap = .int
+  st = .int
+  nst = .int
+  ix = o % 2
+  n = ob_n[ix]
+  cap = ob_x[ix]
+  if n >= cap then do
+    cap = cap * 2
+    if cap < 4 then cap = 4
+    st = ob_p[ix]
+    nst = alloc_slots(cap)
+    do i = 0 to n - 1
+      sl[nst + i] = sl[st + i]
+    end
+    ob_p[ix] = nst
+    ob_x[ix] = cap
+  end
+  sl[ob_p[ix] + n] = v
+  ob_n[ix] = n + 1
+  return
+
+/* make room for at least n elements */
+list_reserve: procedure = .void
+  arg o = .int, need = .int
+  i = .int
+  ix = .int
+  n = .int
+  st = .int
+  nst = .int
+  ix = o % 2
+  if need <= ob_x[ix] then return
+  n = ob_n[ix]
+  st = ob_p[ix]
+  nst = alloc_slots(need)
+  do i = 0 to n - 1
+    sl[nst + i] = sl[st + i]
+  end
+  ob_p[ix] = nst
+  ob_x[ix] = need
+  return
+
+tup_of_list: procedure = .int
+  arg l = .int
+  t = .int
+  i = .int
+  n = .int
+  n = ob_n[l % 2]
+  t = mktuple(n)
+  do i = 0 to n - 1
+    sl[ob_p[t % 2] + i] = sl[ob_p[l % 2] + i]
+  end
+  return t
+
+/* a tuple holding ast[base+from .. base+to] */
+tup_from_ast: procedure = .int
+  arg from = .int, upto = .int
+  t = .int
+  i = .int
+  n = .int
+  n = upto - from + 1
+  if n < 0 then n = 0
+  t = mktuple(n)
+  do i = 0 to n - 1
+    sl[ob_p[t % 2] + i] = ast[from + i]
+  end
+  return t
+
+list_get: procedure = .int
+  arg o = .int, i = .int
+  return sl[ob_p[o % 2] + i]
+
+/* ---- names, classes ---- */
+nameid: procedure = .int
+  arg name = .string
+  v = .string
+  v = nidm[name]
+  if v \== "" then return v as .int
+  nnid = nnid + 1
+  nid_name[nnid] = name
+  nidm[name] = nnid as .string
+  return nnid
+
+define_class: procedure = .int
+  arg name = .string, base = .int
+  c = .int
+  o = .int
+  ncls = ncls + 1
+  c = ncls
+  cl_name[c] = name
+  cl_base[c] = base
+  cl_ns[c] = 0
+  cl_flags[c] = 0
+  o = newobj(K_CLASS)
+  ob_x[o % 2] = c
+  cl_obj[c] = o
+  if base > 0 then cl_flags[c] = cl_flags[base]
+  return c
+
+/* look a name id up through the class chain: oop or 0 */
+cls_find: procedure = .int
+  arg c = .int, nid = .int
+  v = .string
+  do while c > 0
+    v = ca[c || "." || nid]
+    if v \== "" then return v as .int
+    c = cl_base[c]
+  end
+  return 0
+
+/* the class in whose own table the name is found (0 when absent) */
+cls_owner: procedure = .int
+  arg c = .int, nid = .int
+  v = .string
+  do while c > 0
+    v = ca[c || "." || nid]
+    if v \== "" then return c
+    c = cl_base[c]
+  end
+  return 0
+
+cls_set: procedure = .void
+  arg c = .int, nid = .int, v = .int
+  ca[c || "." || nid] = v as .string
+  cgen = cgen + 1
+  return
+
+cls_issub: procedure = .int
+  arg c = .int, base = .int
+  do while c > 0
+    if c = base then return 1
+    c = cl_base[c]
+  end
+  return 0
+
+cls_of: procedure = .int
+  arg x = .int
+  k = .int
+  if x // 2 \= 0 then return C_INT
+  k = ob_k[x % 2]
+  if k = K_INST then return ob_c[x % 2]
+  return kcls[k]
+
+kind_of: procedure = .int
+  arg x = .int
+  if x // 2 \= 0 then return K_INT
+  return ob_k[x % 2]
+
+/* instance attributes: slot map per class */
+inst_new: procedure = .int
+  arg c = .int
+  o = .int
+  o = newobj(K_INST)
+  ob_c[o % 2] = c
+  ob_n[o % 2] = cl_ns[c] + 2
+  ob_p[o % 2] = alloc_slots(cl_ns[c] + 2)
+  return o
+
+inst_get: procedure = .int
+  arg o = .int, nid = .int
+  v = .string
+  v = sm[ob_c[o % 2] || "." || nid]
+  if v == "" then return 0
+  return sl[ob_p[o % 2] + (v as .int) - 1]
+
+inst_set: procedure = .void
+  arg o = .int, nid = .int, val = .int
+  ix = .int
+  c = .int
+  v = .string
+  slot = .int
+  nn = .int
+  st = .int
+  nst = .int
+  i = .int
+  ix = o % 2
+  c = ob_c[ix]
+  v = sm[c || "." || nid]
+  if v == "" then do
+    cl_ns[c] = cl_ns[c] + 1
+    slot = cl_ns[c]
+    sm[c || "." || nid] = slot as .string
+    cgen = cgen + 1
+  end
+  else slot = v as .int
+  if slot > ob_n[ix] then do
+    nn = cl_ns[c] + 2
+    if nn <= slot then nn = slot + 2
+    st = ob_p[ix]
+    nst = alloc_slots(nn)
+    do i = 0 to ob_n[ix] - 1
+      sl[nst + i] = sl[st + i]
+    end
+    ob_p[ix] = nst
+    ob_n[ix] = nn
+  end
+  sl[ob_p[ix] + slot - 1] = val
+  return
+
+inst_del: procedure = .int
+  arg o = .int, nid = .int
+  v = .string
+  slot = .int
+  v = sm[ob_c[o % 2] || "." || nid]
+  if v == "" then return 0
+  slot = v as .int
+  if sl[ob_p[o % 2] + slot - 1] = 0 then return 0
+  sl[ob_p[o % 2] + slot - 1] = 0
+  return 1
+
+/* ---- exceptions ---- */
+exc_new: procedure = .int
+  arg c = .int, msg = .string
+  o = .int
+  t = .int
+  o = inst_new(c)
+  t = mktuple(1)
+  sl[ob_p[t % 2]] = mkstr(msg)
+  call inst_set o, M_ARGS, t
+  return o
+
+exc_new0: procedure = .int
+  arg c = .int
+  o = .int
+  o = inst_new(c)
+  call inst_set o, M_ARGS, mktuple(0)
+  return o
+
+/* raise a built-in exception: sets the unwind state and returns 0 */
+raise_exc: procedure = .int
+  arg c = .int, msg = .string
+  unw = U_RAISE
+  unw_v = exc_new(c, msg)
+  return 0
+
+raise_obj: procedure = .int
+  arg e = .int
+  unw = U_RAISE
+  unw_v = e
+  return 0
+
+type_name: procedure = .string
+  arg x = .int
+  return cl_name[cls_of(x)]
+
+/* ---- truth ---- */
+truthy: procedure = .int
+  arg x = .int
+  k = .int
+  m = .int
+  r = .int
+  if x // 2 \= 0 then do
+    if x = 1 then return 0
+    return 1
+  end
+  if x = TRUE_OOP then return 1
+  if x = FALSE_OOP | x = NONE_OOP then return 0
+  k = ob_k[x % 2]
+  select
+    when k = K_STR then do
+      if length(ob_s[x % 2]) > 0 then return 1
+      return 0
+    end
+    when k = K_LIST | k = K_TUPLE then do
+      if ob_n[x % 2] > 0 then return 1
+      return 0
+    end
+    when k = K_DICT | k = K_SET then do
+      if dd_n[ob_x[x % 2]] > 0 then return 1
+      return 0
+    end
+    when k = K_FLOAT then do
+      if ob_f[x % 2] = 0.0 then return 0
+      return 1
+    end
+    when k = K_BIG then return 1
+    when k = K_RANGE then do
+      if range_len(x) > 0 then return 1
+      return 0
+    end
+    when k = K_INST then do
+      m = cls_find(ob_c[x % 2], M___BOOL__)
+      if m > 0 then do
+        r = call0(m, x)
+        if r = 0 then return 0
+        return truthy(r)
+      end
+      m = cls_find(ob_c[x % 2], M___LEN__)
+      if m > 0 then do
+        r = call0(m, x)
+        if r = 0 then return 0
+        return truthy(r)
+      end
+      return 1
+    end
+    otherwise return 1
+  end
+  return 1
+
+/* ---- dictionaries and sets ---- */
+dict_new: procedure = .int
+  arg kind = .int
+  o = .int
+  o = newobj(kind)
+  ndd = ndd + 1
+  dd_head[ndd] = 0
+  dd_tail[ndd] = 0
+  dd_n[ndd] = 0
+  ob_x[o % 2] = ndd
+  return o
+
+dict_find: procedure = .int
+  arg d = .int, key = .string
+  v = .string
+  v = dmap[d || "|" || key]
+  if v == "" then return 0
+  return v as .int
+
+dict_put: procedure = .void
+  arg d = .int, key = .string, k = .int, v = .int
+  e = .int
+  e = dict_find(d, key)
+  if e > 0 then do
+    de_val[e] = v
+    return
+  end
+  nde = nde + 1
+  e = nde
+  de_key[e] = k
+  de_val[e] = v
+  de_next[e] = 0
+  de_live[e] = 1
+  de_hk[e] = key
+  if dd_tail[d] > 0 then de_next[dd_tail[d]] = e
+  else dd_head[d] = e
+  dd_tail[d] = e
+  dd_n[d] = dd_n[d] + 1
+  dmap[d || "|" || key] = e as .string
+  return
+
+dict_del: procedure = .int
+  arg d = .int, key = .string
+  e = .int
+  e = dict_find(d, key)
+  if e = 0 then return 0
+  de_live[e] = 0
+  dd_n[d] = dd_n[d] - 1
+  dmap[d || "|" || key] = ""
+  return e
+
+dict_clear: procedure = .void
+  arg d = .int
+  e = .int
+  e = dd_head[d]
+  do while e > 0
+    if de_live[e] = 1 then do
+      de_live[e] = 0
+      dmap[d || "|" || de_hk[e]] = ""
+    end
+    e = de_next[e]
+  end
+  dd_head[d] = 0
+  dd_tail[d] = 0
+  dd_n[d] = 0
+  return
+
+/* first live entry at or after e */
+de_live_from: procedure = .int
+  arg e = .int
+  do while e > 0
+    if de_live[e] = 1 then return e
+    e = de_next[e]
+  end
+  return 0
+
+/* a dict key string for hashing: ints and equal floats agree */
+hashkey: procedure = .string
+  arg x = .int
+  k = .int
+  f = .float
+  s = .string
+  m = .int
+  r = .int
+  i = .int
+  n = .int
+  if x // 2 \= 0 then return "i" || ((x - 1) % 2)
+  k = ob_k[x % 2]
+  select
+    when k = K_STR then return "s" || ob_s[x % 2]
+    when k = K_BOOL then do
+      if x = TRUE_OOP then return "i1"
+      return "i0"
+    end
+    when k = K_NONE then return "N"
+    when k = K_BIG then return "i" || ob_s[x % 2]
+    when k = K_FLOAT then do
+      f = ob_f[x % 2]
+      if f = rxfloat..floor(f) & f > -900000000000000000.0 & f < 900000000000000000.0 then return "i" || (rxfloat..trunc(f) as .int)
+      return "f" || float_repr(f)
+    end
+    when k = K_TUPLE then do
+      s = "t("
+      n = ob_n[x % 2]
+      do i = 0 to n - 1
+        s = s || length(hashkey(sl[ob_p[x % 2] + i])) || ":" || hashkey(sl[ob_p[x % 2] + i]) || ","
+      end
+      return s || ")"
+    end
+    when k = K_INST then do
+      m = cls_find(ob_c[x % 2], M___HASH__)
+      if m > 0 then do
+        r = call0(m, x)
+        if r = 0 then return "?"
+        return "h" || ival(r)
+      end
+      return "o" || x
+    end
+    otherwise return "o" || x
+  end
+  return "o" || x
+
+dget: procedure = .int
+  arg d = .int, key = .int
+  return dict_find(ob_x[d % 2], hashkey(key))
+
+dset: procedure = .void
+  arg d = .int, key = .int, v = .int
+  call dict_put ob_x[d % 2], hashkey(key), key, v
+  return
+
+mkrange: procedure = .int
+  arg a = .int, b = .int, c = .int
+  o = .int
+  o = newobj(K_RANGE)
+  ob_n[o % 2] = a
+  ob_x[o % 2] = b
+  ob_y[o % 2] = c
+  return o
+
+range_len: procedure = .int
+  arg r = .int
+  a = .int
+  b = .int
+  c = .int
+  a = ob_n[r % 2]
+  b = ob_x[r % 2]
+  c = ob_y[r % 2]
+  if c > 0 then do
+    if b <= a then return 0
+    return (b - a + c - 1) % c
+  end
+  if a <= b then return 0
+  return (a - b - c - 1) % (0 - c)

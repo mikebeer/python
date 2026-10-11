@@ -1,0 +1,928 @@
+/* ---------------------------------------------------------------------
+   Files, modules (math random sys time itertools functools collections copy)
+   --------------------------------------------------------------------- */
+mk_file: procedure = .int
+  arg id = .int, name = .string
+  o = .int
+  o = newobj(K_FILE)
+  ob_x[o % 2] = id
+  ob_s[o % 2] = name
+  ob_c[o % 2] = 0
+  return o
+
+bi_open: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  fn = .string
+  mode = .string
+  md = .string
+  fid = .int
+  rcx = .int
+  eof = .int
+  line = .string
+  acc = .string
+  chunk = .string
+  nl = .int
+  id = .int
+  v = .int
+  if na < 1 then return nargs_err("open", na, 1, 2)
+  if kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "expected str, bytes or os.PathLike object, not " || type_name(ast[base + 1]))
+  fn = ob_s[ast[base + 1] % 2]
+  mode = "r"
+  if na >= 2 then mode = ob_s[ast[base + 2] % 2]
+  v = kwarg(base, na, nk, "mode")
+  if v \= 0 then mode = ob_s[v % 2]
+  md = left(mode, 1)
+  if md \== "r" & md \== "w" & md \== "a" & md \== "x" then return raise_exc(C_VALUEERROR, "invalid mode: " || repr_str(mode))
+  nfl = nfl + 1
+  id = nfl
+  fl_mode[id] = md
+  fl_pos[id] = 1
+  fl_txt[id] = ""
+  fid = 0
+  if md == "r" then do
+    md = "r"
+    assembler fopen fid, fn, md
+    if fid = 0 then do
+      nfl = nfl - 1
+      return raise_exc(C_FILENOTFOUNDERROR, "[Errno 2] No such file or directory: " || repr_str(fn))
+    end
+    acc = ""
+    chunk = ""
+    nl = 0
+    eof = 0
+    do while eof = 0
+      line = ""
+      assembler freadline line, fid
+      assembler feof eof, fid
+      if eof > 0 & length(line) = 0 then leave
+      chunk = chunk || line || '0a'x
+      nl = nl + 1
+      if nl >= 100 then do
+        acc = acc || chunk
+        chunk = ""
+        nl = 0
+      end
+    end
+    assembler fclose rcx, fid
+    fl_txt[id] = acc || chunk
+    fl_h[id] = 0
+  end
+  else do
+    if md == "x" then md = "w"
+    assembler fopen fid, fn, md
+    if fid = 0 then do
+      nfl = nfl - 1
+      return raise_exc(C_OSERROR, "[Errno 13] Permission denied: " || repr_str(fn))
+    end
+    fl_h[id] = fid
+  end
+  return mk_file(id, fn)
+
+file_write: procedure = .void
+  arg fo = .int, txt = .string
+  id = .int
+  r = .int
+  fid = .int
+  id = ob_x[fo % 2]
+  if ob_c[fo % 2] = 1 then do
+    r = raise_exc(C_VALUEERROR, "I/O operation on closed file.")
+    return
+  end
+  if id = 1 then call outs txt
+  else if id = 2 then call errs txt
+  else if id = 3 | fl_mode[id] == "r" then r = raise_exc(C_OSERROR, "not writable")
+  else do
+    fid = fl_h[id]
+    assembler fwrite fid, txt
+  end
+  return
+
+file_close: procedure = .void
+  arg fo = .int
+  id = .int
+  rcx = .int
+  fid = .int
+  id = ob_x[fo % 2]
+  if ob_c[fo % 2] = 1 | id <= 3 then return
+  ob_c[fo % 2] = 1
+  if fl_mode[id] \== "r" then do
+    fid = fl_h[id]
+    assembler fclose rcx, fid
+  end
+  return
+
+/* next line including its newline; 0 at the end of the file in iteration mode, "" otherwise */
+file_readline: procedure = .int
+  arg fo = .int, itermode = .int
+  id = .int
+  line = .string
+  e = .int
+  p = .int
+  t = .string
+  id = ob_x[fo % 2]
+  if ob_c[fo % 2] = 1 then return raise_exc(C_VALUEERROR, "I/O operation on closed file.")
+  if id = 3 then do
+    if stdin_eof = 1 then do
+      if itermode = 1 then return 0
+      return mkstr("")
+    end
+    line = ""
+    assembler freadline line, h_in
+    assembler feof e, h_in
+    if e > 0 & length(line) = 0 then do
+      stdin_eof = 1
+      if itermode = 1 then return 0
+      return mkstr("")
+    end
+    if right(line, 1) == '0d'x then line = left(line, length(line) - 1)
+    return mkstr(line || '0a'x)
+  end
+  if fl_mode[id] \== "r" then return raise_exc(C_OSERROR, "not readable")
+  t = fl_txt[id]
+  if fl_pos[id] > length(t) then do
+    if itermode = 1 then return 0
+    return mkstr("")
+  end
+  p = pos('0a'x, t, fl_pos[id])
+  if p = 0 then p = length(t)
+  line = substr(t, fl_pos[id], p - fl_pos[id] + 1)
+  fl_pos[id] = p + 1
+  return mkstr(line)
+
+meth_file: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  id = .int
+  l = .int
+  v = .int
+  s = .string
+  it = .int
+  n = .int
+  line = .string
+  e = .int
+  id = ob_x[o % 2]
+  select
+    when nid = M_WRITE then do
+      if na \= 1 then return nargs_err("write", na, 1, 1)
+      if kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "write() argument must be str, not " || type_name(ast[base + 1]))
+      call file_write o, ob_s[ast[base + 1] % 2]
+      if unw > 0 then return 0
+      return mkint(length(ob_s[ast[base + 1] % 2]))
+    end
+    when nid = M_READLINE then return file_readline(o, 0)
+    when nid = M_READ then do
+      if ob_c[o % 2] = 1 then return raise_exc(C_VALUEERROR, "I/O operation on closed file.")
+      s = ""
+      if id = 3 then do
+        do while stdin_eof = 0
+          line = ""
+          assembler freadline line, h_in
+          assembler feof e, h_in
+          if e > 0 & length(line) = 0 then do
+            stdin_eof = 1
+            leave
+          end
+          s = s || line || '0a'x
+        end
+        return mkstr(s)
+      end
+      if fl_mode[id] \== "r" then return raise_exc(C_OSERROR, "not readable")
+      s = substr(fl_txt[id], fl_pos[id])
+      if na >= 1 then do
+        if ast[base + 1] \= NONE_OOP then do
+          n = ival(ast[base + 1])
+          if n >= 0 then s = left(s, n)
+        end
+      end
+      fl_pos[id] = fl_pos[id] + length(s)
+      return mkstr(s)
+    end
+    when nid = M_READLINES then do
+      l = mklist(8)
+      do forever
+        v = file_readline(o, 1)
+        if v = 0 then leave
+        call list_append l, v
+      end
+      if unw > 0 then return 0
+      return l
+    end
+    when nid = M_WRITELINES then do
+      it = iter_new(ast[base + 1])
+      if it = 0 then return 0
+      do forever
+        v = iter_next(it)
+        if v = 0 then leave
+        call file_write o, str_of(v)
+        if unw > 0 then return 0
+      end
+      return NONE_OOP
+    end
+    when nid = M_CLOSE then do
+      call file_close o
+      return NONE_OOP
+    end
+    when nid = M_FLUSH then do
+      if id = 1 then call flush_out
+      return NONE_OOP
+    end
+    when nid = M___ENTER__ then return o
+    when nid = M___EXIT__ then do
+      call file_close o
+      return FALSE_OOP
+    end
+    otherwise nop
+  end
+  return meth_common(o, nid, base, na, nk)
+
+/* ---------------------------------------------------------------------
+   modules
+   --------------------------------------------------------------------- */
+mod_get: procedure = .int
+  arg name = .string
+  v = .string
+  o = .int
+  v = modo[name]
+  if v \== "" then return v as .int
+  if pos(" " || name || " ", " math random sys time itertools functools collections string copy typing __future__ os ") = 0 then return 0
+  o = newobj(K_MODULE)
+  ob_s[o % 2] = name
+  modo[name] = o as .string
+  return o
+
+/* float value of a numeric argument; raises TypeError otherwise */
+mf: procedure = .float
+  arg v = .int
+  if numkind(v) = 0 then do
+    call raise_exc C_TYPEERROR, "must be real number, not " || type_name(v)
+    return 0.0
+  end
+  return tofloat(v)
+
+domain_err: procedure = .int
+  return raise_exc(C_VALUEERROR, "math domain error")
+
+rnd_next: procedure = .int
+  rnd_s = (rnd_s * 48271) // 2147483647
+  return rnd_s
+
+rnd_below: procedure = .int
+  arg n = .int
+  r = .int
+  r = rnd_next()
+  if n > 2000000000 then r = r * 2147483647 + rnd_next()
+  return r // n
+
+rnd_float: procedure = .float
+  a = .int
+  b = .int
+  a = rnd_next()
+  b = rnd_next()
+  return ((a * 2147483647 + b) as .float) / 4611686014132420609.0
+
+gcd2: procedure = .int
+  arg a = .int, b = .int
+  t = .int
+  do while b \= 1
+    if b = 0 then leave
+    t = arith(O_MOD, a, b)
+    a = b
+    b = t
+  end
+  if numkind(a) = 3 then return a
+  return bi_abs(a)
+
+seq_items: procedure = .int
+  arg x = .int
+  return iter_list(x)
+
+/* itertools.product / permutations / combinations: eager, result is an iterator over a list */
+it_combin: procedure = .int
+  arg kind = .int, pool = .int, r = .int
+  n = .int
+  res = .int
+  idx = .int[]
+  i = .int
+  j = .int
+  t = .int
+  used = .int[]
+  k = .int
+  n = ob_n[pool % 2]
+  res = mklist(16)
+  if r > n | r < 0 then return mkiter(IT_SEQ, res, 0)
+  if kind = 1 then do
+    /* combinations: idx[1..r] hold 0-based positions */
+    do i = 1 to r
+      idx[i] = i - 1
+    end
+    do forever
+      t = mktuple(r)
+      do i = 1 to r
+        sl[ob_p[t % 2] + i - 1] = sl[ob_p[pool % 2] + idx[i]]
+      end
+      call list_append res, t
+      i = r
+      do while i >= 1 & idx[i] = i - 1 + n - r
+        i = i - 1
+      end
+      if i < 1 then leave
+      idx[i] = idx[i] + 1
+      do j = i + 1 to r
+        idx[j] = idx[j - 1] + 1
+      end
+    end
+    return mkiter(IT_SEQ, res, 0)
+  end
+  /* permutations: odometer over positions without repetition (lexicographic by index) */
+  if r = 0 then do
+    call list_append res, mktuple(0)
+    return mkiter(IT_SEQ, res, 0)
+  end
+  do i = 1 to n
+    used[i] = 0
+  end
+  k = 1
+  idx[1] = 0
+  do while k >= 1
+    /* idx[k] is the last index tried at position k (0 = none yet); advance to the next unused one */
+    if idx[k] >= 1 then used[idx[k]] = 0
+    j = idx[k] + 1
+    do while j <= n & used[j] = 1
+      j = j + 1
+    end
+    if j > n then do
+      idx[k] = 0
+      k = k - 1
+      iterate
+    end
+    idx[k] = j
+    used[j] = 1
+    if k = r then do
+      t = mktuple(r)
+      do i = 1 to r
+        sl[ob_p[t % 2] + i - 1] = sl[ob_p[pool % 2] + idx[i] - 1]
+      end
+      call list_append res, t
+    end
+    else do
+      k = k + 1
+      idx[k] = 0
+    end
+  end
+  return mkiter(IT_SEQ, res, 0)
+
+it_product: procedure = .int
+  arg base = .int, na = .int
+  pools = .int
+  i = .int
+  j = .int
+  l = .int
+  res = .int
+  t = .int
+  idx = .int[]
+  sz = .int[]
+  p = .int
+  pools = mklist(na + 1)
+  do i = 1 to na
+    l = iter_list(ast[base + i])
+    if l = 0 then return 0
+    call list_append pools, l
+    sz[i] = ob_n[l % 2]
+    idx[i] = 0
+    if sz[i] = 0 then return mkiter(IT_SEQ, mklist(4), 0)
+  end
+  res = mklist(16)
+  do forever
+    t = mktuple(na)
+    do i = 1 to na
+      sl[ob_p[t % 2] + i - 1] = sl[ob_p[sl[ob_p[pools % 2] + i - 1] % 2] + idx[i]]
+    end
+    call list_append res, t
+    p = na
+    do while p >= 1
+      idx[p] = idx[p] + 1
+      if idx[p] < sz[p] then leave
+      idx[p] = 0
+      p = p - 1
+    end
+    if p < 1 then leave
+  end
+  return mkiter(IT_SEQ, res, 0)
+
+deep_copy: procedure = .int
+  arg x = .int
+  k = .int
+  o = .int
+  i = .int
+  e = .int
+  v = .int
+  c = .int
+  k = kind_of(x)
+  if k = K_LIST | k = K_TUPLE then do
+    if k = K_LIST then o = mklist(ob_n[x % 2])
+    else o = mktuple(ob_n[x % 2])
+    do i = 0 to ob_n[x % 2] - 1
+      v = deep_copy(sl[ob_p[x % 2] + i])
+      if v = 0 then return 0
+      if k = K_LIST then call list_append o, v
+      else sl[ob_p[o % 2] + i] = v
+    end
+    return o
+  end
+  if k = K_DICT | k = K_SET then do
+    o = dict_new(k)
+    ob_y[o % 2] = ob_y[x % 2]
+    e = dd_head[ob_x[x % 2]]
+    do while e > 0
+      if de_live[e] = 1 then do
+        v = deep_copy(de_val[e])
+        call dict_put ob_x[o % 2], de_hk[e], deep_copy(de_key[e]), v
+      end
+      e = de_next[e]
+    end
+    return o
+  end
+  if k = K_INST then do
+    c = ob_c[x % 2]
+    o = inst_new(c)
+    ob_n[o % 2] = ob_n[x % 2]
+    ob_p[o % 2] = alloc_slots(ob_n[x % 2])
+    do i = 0 to ob_n[x % 2] - 1
+      v = sl[ob_p[x % 2] + i]
+      if v \= 0 then v = deep_copy(v)
+      sl[ob_p[o % 2] + i] = v
+    end
+    return o
+  end
+  return x
+
+/* built-in functions of the library modules */
+bcall_mod: procedure = .int
+  arg bid = .int, base = .int, na = .int, nk = .int
+  x = .float
+  y = .float
+  z = .float
+  v = .int
+  w = .int
+  r = .int
+  l = .int
+  i = .int
+  n = .int
+  o = .int
+  it = .int
+  acc = .int
+  f = .int
+  s = .string
+  a = .int
+  b = .int
+  st = .int
+  if bid <= BI_MATH_PERM & na >= 1 then do
+    /* functions of one or two floats */
+    if bid <= BI_MATH_TANH | bid = BI_MATH_HYPOT then do
+      x = mf(ast[base + 1])
+      if unw > 0 then return 0
+      if na >= 2 then do
+        y = mf(ast[base + 2])
+        if unw > 0 then return 0
+      end
+    end
+  end
+  select
+    when bid = BI_MATH_SQRT then do
+      if x < 0.0 then return domain_err()
+      return mkfloat(rxfloat..sqrt(x))
+    end
+    when bid = BI_MATH_FLOOR | bid = BI_MATH_CEIL | bid = BI_MATH_TRUNC then do
+      v = ast[base + 1]
+      if numkind(v) = 1 | numkind(v) = 2 then return mkint(ival(v))
+      if numkind(v) \= 3 then do
+        if kind_of(v) = K_INST then do
+          w = cls_find(ob_c[v % 2], nameid("__floor__"))
+          if w > 0 then return call1(w, v)
+        end
+        return raise_exc(C_TYPEERROR, "must be real number, not " || type_name(v))
+      end
+      if x \= x then return raise_exc(C_VALUEERROR, "cannot convert float NaN to integer")
+      if finf(x) \= 0 then return raise_exc(C_OVERFLOWERROR, "cannot convert float infinity to integer")
+      if bid = BI_MATH_FLOOR then return float_to_int(rxfloat..floor(x))
+      if bid = BI_MATH_CEIL then return float_to_int(rxfloat..ceil(x))
+      return float_to_int(rxfloat..trunc(x))
+    end
+    when bid = BI_MATH_FABS then return mkfloat(rxfloat..fabs(x))
+    when bid = BI_MATH_POW then do
+      if x = 0.0 & y < 0.0 then return domain_err()
+      if x < 0.0 & y \= rxfloat..floor(y) then return domain_err()
+      return mkfloat(rxfloat..pow(x, y))
+    end
+    when bid = BI_MATH_SIN then return mkfloat(rxfloat..sin(x))
+    when bid = BI_MATH_COS then return mkfloat(rxfloat..cos(x))
+    when bid = BI_MATH_TAN then return mkfloat(rxfloat..tan(x))
+    when bid = BI_MATH_ASIN then do
+      if x > 1.0 | x < -1.0 then return domain_err()
+      return mkfloat(rxfloat..asin(x))
+    end
+    when bid = BI_MATH_ACOS then do
+      if x > 1.0 | x < -1.0 then return domain_err()
+      return mkfloat(rxfloat..acos(x))
+    end
+    when bid = BI_MATH_ATAN then return mkfloat(rxfloat..atan(x))
+    when bid = BI_MATH_ATAN2 then return mkfloat(rxfloat..atan2(x, y))
+    when bid = BI_MATH_SINH then return mkfloat(rxfloat..sinh(x))
+    when bid = BI_MATH_COSH then return mkfloat(rxfloat..cosh(x))
+    when bid = BI_MATH_TANH then return mkfloat(rxfloat..tanh(x))
+    when bid = BI_MATH_EXP then do
+      z = rxfloat..exp(x)
+      if finf(z) = 1 & x < 1000000.0 then return raise_exc(C_OVERFLOWERROR, "math range error")
+      return mkfloat(z)
+    end
+    when bid = BI_MATH_LOG | bid = BI_MATH_LOG10 | bid = BI_MATH_LOG2 then do
+      if numkind(ast[base + 1]) = 2 then do
+        /* huge integers: use the digit count */
+        s = ob_s[ast[base + 1] % 2]
+        if left(s, 1) == "-" then return domain_err()
+        z = rxfloat..log10(parse_flt("0." || s)) + (length(s) as .float)
+        if bid = BI_MATH_LOG10 then return mkfloat(z)
+        if bid = BI_MATH_LOG2 then return mkfloat(z / rxfloat..log10(2.0))
+        z = z * 2.302585092994046
+      end
+      else do
+        if x <= 0.0 then return domain_err()
+        if bid = BI_MATH_LOG10 then return mkfloat(rxfloat..log10(x))
+        if bid = BI_MATH_LOG2 then return mkfloat(rxfloat..log2(x))
+        z = rxfloat..log(x)
+      end
+      if na >= 2 then do
+        if y <= 0.0 then return domain_err()
+        z = z / rxfloat..log(y)
+      end
+      return mkfloat(z)
+    end
+    when bid = BI_MATH_HYPOT then return mkfloat(rxfloat..hypot(x, y))
+    when bid = BI_MATH_ISNAN then do
+      x = mf(ast[base + 1])
+      if x \= x then return TRUE_OOP
+      return FALSE_OOP
+    end
+    when bid = BI_MATH_ISINF then do
+      x = mf(ast[base + 1])
+      if finf(x) \= 0 then return TRUE_OOP
+      return FALSE_OOP
+    end
+    when bid = BI_MATH_ISFINITE then do
+      x = mf(ast[base + 1])
+      if x \= x then return FALSE_OOP
+      if finf(x) \= 0 then return FALSE_OOP
+      return TRUE_OOP
+    end
+    when bid = BI_MATH_DEGREES then do
+      x = mf(ast[base + 1])
+      return mkfloat(x * 180.0 / 3.141592653589793)
+    end
+    when bid = BI_MATH_RADIANS then do
+      x = mf(ast[base + 1])
+      return mkfloat(x * 3.141592653589793 / 180.0)
+    end
+    when bid = BI_MATH_COPYSIGN then do
+      x = mf(ast[base + 1])
+      y = mf(ast[base + 2])
+      x = rxfloat..fabs(x)
+      if y < 0.0 | fl_negzero(y) = 1 then x = 0.0 - x
+      return mkfloat(x)
+    end
+    when bid = BI_MATH_FMOD then do
+      x = mf(ast[base + 1])
+      y = mf(ast[base + 2])
+      if y = 0.0 then return domain_err()
+      return mkfloat(rxfloat..fmod(x, y))
+    end
+    when bid = BI_MATH_CBRT then do
+      x = mf(ast[base + 1])
+      return mkfloat(rxfloat..cbrt(x))
+    end
+    when bid = BI_MATH_FSUM then do
+      it = iter_new(ast[base + 1])
+      if it = 0 then return 0
+      z = 0.0
+      do forever
+        v = iter_next(it)
+        if v = 0 then leave
+        z = z + mf(v)
+      end
+      if unw > 0 then return 0
+      return mkfloat(z)
+    end
+    when bid = BI_MATH_PROD then do
+      it = iter_new(ast[base + 1])
+      if it = 0 then return 0
+      acc = mkint(1)
+      if na >= 2 then acc = ast[base + 2]
+      do forever
+        v = iter_next(it)
+        if v = 0 then leave
+        acc = arith(O_MUL, acc, v)
+        if acc = 0 then return 0
+      end
+      if unw > 0 then return 0
+      return acc
+    end
+    when bid = BI_MATH_GCD | bid = BI_MATH_LCM then do
+      acc = mkint(0)
+      if bid = BI_MATH_LCM then acc = mkint(1)
+      do i = 1 to na
+        v = ast[base + i]
+        if numkind(v) \= 1 & numkind(v) \= 2 then return raise_exc(C_TYPEERROR, "'" || type_name(v) || "' object cannot be interpreted as an integer")
+        if bid = BI_MATH_GCD then acc = gcd2(acc, v)
+        else do
+          if num_str(acc) == "0" | num_str(v) == "0" then acc = mkint(0)
+          else do
+            w = gcd2(acc, v)
+            acc = bi_abs(arith(O_FLOORDIV, arith(O_MUL, acc, v), w))
+          end
+        end
+      end
+      return acc
+    end
+    when bid = BI_MATH_FACTORIAL then do
+      v = ast[base + 1]
+      if numkind(v) \= 1 then return raise_exc(C_TYPEERROR, "'" || type_name(v) || "' object cannot be interpreted as an integer")
+      n = ival(v)
+      if n < 0 then return raise_exc(C_VALUEERROR, "factorial() not defined for negative values")
+      acc = mkint(1)
+      do i = 2 to n
+        acc = arith(O_MUL, acc, mkint(i))
+      end
+      return acc
+    end
+    when bid = BI_MATH_ISQRT then do
+      v = ast[base + 1]
+      if numkind(v) \= 1 & numkind(v) \= 2 then return raise_exc(C_TYPEERROR, "'" || type_name(v) || "' object cannot be interpreted as an integer")
+      if left(num_str(v), 1) == "-" then return raise_exc(C_VALUEERROR, "isqrt() argument must be nonnegative")
+      if numkind(v) = 1 then do
+        n = rxfloat..floor(rxfloat..sqrt(ival(v) as .float)) as .int
+        do while n * n > ival(v)
+          n = n - 1
+        end
+        do while (n + 1) * (n + 1) <= ival(v)
+          n = n + 1
+        end
+        return mkint(n)
+      end
+      /* Newton iteration on big integers */
+      a = v
+      b = arith(O_FLOORDIV, arith(O_ADD, a, mkint(1)), mkint(2))
+      do while py_lt(b, a) = 1
+        a = b
+        b = arith(O_FLOORDIV, arith(O_ADD, a, arith(O_FLOORDIV, v, a)), mkint(2))
+      end
+      return a
+    end
+    when bid = BI_MATH_COMB | bid = BI_MATH_PERM then do
+      if numkind(ast[base + 1]) \= 1 | numkind(ast[base + 2]) \= 1 then return raise_exc(C_TYPEERROR, "comb() arguments must be integers")
+      n = ival(ast[base + 1])
+      i = ival(ast[base + 2])
+      if n < 0 | i < 0 then return raise_exc(C_VALUEERROR, "n must be a non-negative integer")
+      if i > n then return mkint(0)
+      if bid = BI_MATH_COMB & i > n - i then i = n - i
+      acc = mkint(1)
+      do w = 0 to i - 1
+        acc = arith(O_MUL, acc, mkint(n - w))
+        if bid = BI_MATH_COMB then acc = arith(O_FLOORDIV, acc, mkint(w + 1))
+      end
+      return acc
+    end
+    when bid = BI_RANDOM_SEED then do
+      if na >= 1 & numkind(ast[base + 1]) = 1 then rnd_s = (abs(ival(ast[base + 1])) // 2147483646) + 1
+      else if na >= 1 then rnd_s = (strhash(str_of(ast[base + 1])) // 2147483646) + 1
+      else rnd_s = (time("US") as .int) // 2147483646 + 1
+      return NONE_OOP
+    end
+    when bid = BI_RANDOM_RANDOM then return mkfloat(rnd_float())
+    when bid = BI_RANDOM_RANDINT then do
+      if chk_int(ast[base + 1]) = 0 | chk_int(ast[base + 2]) = 0 then return 0
+      a = ival(ast[base + 1])
+      b = ival(ast[base + 2])
+      if b < a then return raise_exc(C_VALUEERROR, "empty range for randrange() (" || a || ", " || (b + 1) || ", " || (b + 1 - a) || ")")
+      return mkint(a + rnd_below(b - a + 1))
+    end
+    when bid = BI_RANDOM_RANDRANGE then do
+      if chk_int(ast[base + 1]) = 0 then return 0
+      a = 0
+      st = 1
+      if na = 1 then b = ival(ast[base + 1])
+      else do
+        a = ival(ast[base + 1])
+        b = ival(ast[base + 2])
+        if na >= 3 then st = ival(ast[base + 3])
+      end
+      if st = 0 then return raise_exc(C_VALUEERROR, "zero step for randrange()")
+      if st > 0 then n = (b - a + st - 1) % st
+      else n = (a - b - st - 1) % (0 - st)
+      if n <= 0 then return raise_exc(C_VALUEERROR, "empty range in randrange(" || a || ", " || b || ")")
+      return mkint(a + st * rnd_below(n))
+    end
+    when bid = BI_RANDOM_UNIFORM then do
+      x = mf(ast[base + 1])
+      y = mf(ast[base + 2])
+      return mkfloat(x + (y - x) * rnd_float())
+    end
+    when bid = BI_RANDOM_CHOICE then do
+      l = iter_list(ast[base + 1])
+      if l = 0 then return 0
+      n = ob_n[l % 2]
+      if n = 0 then return raise_exc(C_INDEXERROR, "Cannot choose from an empty sequence")
+      return sl[ob_p[l % 2] + rnd_below(n)]
+    end
+    when bid = BI_RANDOM_SHUFFLE then do
+      l = ast[base + 1]
+      if kind_of(l) \= K_LIST then return raise_exc(C_TYPEERROR, "shuffle() requires a list")
+      n = ob_n[l % 2]
+      do i = n - 1 to 1 by -1
+        w = rnd_below(i + 1)
+        v = sl[ob_p[l % 2] + i]
+        sl[ob_p[l % 2] + i] = sl[ob_p[l % 2] + w]
+        sl[ob_p[l % 2] + w] = v
+      end
+      return NONE_OOP
+    end
+    when bid = BI_RANDOM_SAMPLE then do
+      l = iter_list(ast[base + 1])
+      if l = 0 then return 0
+      if chk_int(ast[base + 2]) = 0 then return 0
+      n = ob_n[l % 2]
+      b = ival(ast[base + 2])
+      if b > n | b < 0 then return raise_exc(C_VALUEERROR, "Sample larger than population or is negative")
+      do i = 0 to b - 1
+        w = i + rnd_below(n - i)
+        v = sl[ob_p[l % 2] + i]
+        sl[ob_p[l % 2] + i] = sl[ob_p[l % 2] + w]
+        sl[ob_p[l % 2] + w] = v
+      end
+      o = mklist(b)
+      do i = 0 to b - 1
+        call list_append o, sl[ob_p[l % 2] + i]
+      end
+      return o
+    end
+    when bid = BI_TIME_TIME then do
+      z = ((date("UN") as .int) * 86400) as .float
+      z = z + ((time("US") as .int) as .float) / 1000000.0
+      return mkfloat(z)
+    end
+    when bid = BI_TIME_PERF_COUNTER | bid = BI_TIME_MONOTONIC | bid = BI_TIME_PROCESS_TIME then do
+      z = ((time("US") as .int) as .float) / 1000000.0
+      return mkfloat(z)
+    end
+    when bid = BI_TIME_SLEEP then return NONE_OOP
+    when bid = BI_ITERTOOLS_CHAIN then do
+      o = mkiter(IT_CHAIN, 0, 0)
+      ob_c[o % 2] = tup_from_ast(base + 1, base + na)
+      return o
+    end
+    when bid = BI_ITERTOOLS_COUNT then do
+      a = 0
+      b = 1
+      if na >= 1 then a = ival(ast[base + 1])
+      if na >= 2 then b = ival(ast[base + 2])
+      return mkiter(IT_COUNT, a, b)
+    end
+    when bid = BI_ITERTOOLS_ISLICE then do
+      it = iter_new(ast[base + 1])
+      if it = 0 then return 0
+      a = 0
+      b = -1
+      st = 1
+      if na = 2 then do
+        if ast[base + 2] \= NONE_OOP then b = ival(ast[base + 2])
+      end
+      else do
+        if ast[base + 2] \= NONE_OOP then a = ival(ast[base + 2])
+        if ast[base + 3] \= NONE_OOP then b = ival(ast[base + 3])
+        if na >= 4 then st = ival(ast[base + 4])
+      end
+      o = mkiter(IT_ISLICE, it, a)
+      ob_p[o % 2] = alloc_slots(3)
+      sl[ob_p[o % 2]] = b
+      sl[ob_p[o % 2] + 1] = st
+      sl[ob_p[o % 2] + 2] = 0
+      return o
+    end
+    when bid = BI_ITERTOOLS_TAKEWHILE then do
+      it = iter_new(ast[base + 2])
+      if it = 0 then return 0
+      o = mkiter(IT_TAKEWHILE, ast[base + 1], it)
+      ob_c[o % 2] = 0
+      return o
+    end
+    when bid = BI_ITERTOOLS_PRODUCT then do
+      v = kwarg(base, na, nk, "repeat")
+      if v \= 0 then do
+        l = iter_list(ast[base + 1])
+        if l = 0 then return 0
+        n = ival(v)
+        do i = 2 to n
+          ast[base + i] = l
+        end
+        na = n
+        ast[base + 1] = l
+      end
+      return it_product(base, na)
+    end
+    when bid = BI_ITERTOOLS_COMBINATIONS | bid = BI_ITERTOOLS_PERMUTATIONS then do
+      l = iter_list(ast[base + 1])
+      if l = 0 then return 0
+      n = ob_n[l % 2]
+      b = n
+      if na >= 2 then b = ival(ast[base + 2])
+      if bid = BI_ITERTOOLS_COMBINATIONS then return it_combin(1, l, b)
+      return it_combin(2, l, b)
+    end
+    when bid = BI_ITERTOOLS_ACCUMULATE then do
+      it = iter_new(ast[base + 1])
+      if it = 0 then return 0
+      o = mklist(8)
+      acc = 0
+      do forever
+        v = iter_next(it)
+        if v = 0 then leave
+        if acc = 0 then acc = v
+        else if na >= 2 then do
+          acc = call2(ast[base + 2], acc, v)
+          if acc = 0 then return 0
+        end
+        else do
+          acc = arith(O_ADD, acc, v)
+          if acc = 0 then return 0
+        end
+        call list_append o, acc
+      end
+      if unw > 0 then return 0
+      return mkiter(IT_SEQ, o, 0)
+    end
+    when bid = BI_FUNCTOOLS_REDUCE then do
+      if na < 2 then return nargs_err("reduce", na, 2, 3)
+      it = iter_new(ast[base + 2])
+      if it = 0 then return 0
+      if na >= 3 then acc = ast[base + 3]
+      else do
+        acc = iter_next(it)
+        if acc = 0 then do
+          if unw > 0 then return 0
+          return raise_exc(C_TYPEERROR, "reduce() of empty iterable with no initial value")
+        end
+      end
+      f = ast[base + 1]
+      do forever
+        v = iter_next(it)
+        if v = 0 then leave
+        acc = call2(f, acc, v)
+        if acc = 0 then return 0
+      end
+      if unw > 0 then return 0
+      return acc
+    end
+    when bid = BI_FUNCTOOLS_PARTIAL then do
+      if na \= 2 then return raise_exc(C_TYPEERROR, "partial() supports one bound argument")
+      return mkbmeth(ast[base + 1], ast[base + 2])
+    end
+    when bid = BI_COLLECTIONS_DEFAULTDICT then do
+      o = dict_new(K_DICT)
+      if na >= 1 then do
+        if ast[base + 1] \= NONE_OOP then ob_y[o % 2] = ast[base + 1]
+      end
+      return o
+    end
+    when bid = BI_COLLECTIONS_COUNTER then do
+      o = dict_new(K_DICT)
+      if na >= 1 then do
+        it = iter_new(ast[base + 1])
+        if it = 0 then return 0
+        do forever
+          v = iter_next(it)
+          if v = 0 then leave
+          a = dict_find(ob_x[o % 2], hashkey(v))
+          if a > 0 then de_val[a] = de_val[a] + 2
+          else call dset o, v, 3
+        end
+        if unw > 0 then return 0
+      end
+      return o
+    end
+    when bid = BI_COLLECTIONS_ORDEREDDICT then return ctor_dict(base, na, nk)
+    when bid = BI_COLLECTIONS_DEQUE then do
+      if na = 0 then return mklist(4)
+      return iter_list(ast[base + 1])
+    end
+    when bid = BI_COPY_COPY then do
+      v = ast[base + 1]
+      if kind_of(v) = K_LIST then return iter_list(v)
+      if kind_of(v) = K_DICT then return dict_copy(v)
+      if kind_of(v) = K_SET then return dict_copy(v)
+      if kind_of(v) = K_INST then do
+        o = deep_copy(v)
+        return o
+      end
+      return v
+    end
+    when bid = BI_COPY_DEEPCOPY then return deep_copy(ast[base + 1])
+    otherwise nop
+  end
+  return raise_exc(C_TYPEERROR, "unsupported library function")

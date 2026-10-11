@@ -1,0 +1,1285 @@
+/* ---------------------------------------------------------------------
+   Built-in functions, type constructors, exceptions
+   --------------------------------------------------------------------- */
+kwarg: procedure = .int
+  arg base = .int, na = .int, nk = .int, name = .string
+  j = .int
+  do j = 1 to nk
+    if asn[base + na + j] == name then return ast[base + na + j]
+  end
+  return 0
+
+nargs_err: procedure = .int
+  arg fname = .string, na = .int, lo = .int, hi = .int
+  if lo = hi then do
+    if lo = 1 then return raise_exc(C_TYPEERROR, fname || "() takes exactly one argument (" || na || " given)")
+    return raise_exc(C_TYPEERROR, fname || "() takes exactly " || lo || " arguments (" || na || " given)")
+  end
+  if na < lo then return raise_exc(C_TYPEERROR, fname || "() takes at least " || lo || " argument" || plural(lo) || " (" || na || " given)")
+  return raise_exc(C_TYPEERROR, fname || "() takes at most " || hi || " argument" || plural(hi) || " (" || na || " given)")
+
+/* integer argument check: 1 when v is an int-like small integer, else raises */
+chk_int: procedure = .int
+  arg v = .int
+  if numkind(v) = 1 then return 1
+  if numkind(v) = 2 then do
+    call raise_exc C_OVERFLOWERROR, "Python int too large to convert to C long"
+    return 0
+  end
+  call raise_exc C_TYPEERROR, "'" || type_name(v) || "' object cannot be interpreted as an integer"
+  return 0
+
+py_lt: procedure = .int
+  arg a = .int, b = .int
+  r = .int
+  if a // 2 \= 0 & b // 2 \= 0 then do
+    if a < b then return 1
+    return 0
+  end
+  r = py_cmp(CMP_LT, a, b)
+  if r = 0 then return 0
+  if r = TRUE_OOP then return 1
+  if r = FALSE_OOP then return 0
+  return truthy(r)
+
+/* ---- output ---- */
+outs: procedure = .void
+  arg s = .string
+  obuf = obuf || s
+  if length(obuf) > 3000 then call flush_out
+  return
+
+flush_out: procedure = .void
+  rcx = .int
+  if length(obuf) > 0 then do
+    assembler fwrite h_out, obuf
+    obuf = ""
+  end
+  assembler fflush rcx, h_out
+  return
+
+errs: procedure = .void
+  arg s = .string
+  rcx = .int
+  call flush_out
+  assembler fwrite h_err, s
+  assembler fflush rcx, h_err
+  return
+
+bi_print: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  sep = .string
+  endv = .string
+  out = .string
+  i = .int
+  j = .int
+  v = .int
+  fo = .int
+  s = .string
+  nm = .string
+  sep = " "
+  endv = '0a'x
+  fo = 0
+  do j = 1 to nk
+    nm = asn[base + na + j]
+    v = ast[base + na + j]
+    if nm == "sep" then do
+      if v \= NONE_OOP then do
+        if kind_of(v) \= K_STR then return raise_exc(C_TYPEERROR, "sep must be None or a string, not " || type_name(v))
+        sep = ob_s[v % 2]
+      end
+    end
+    else if nm == "end" then do
+      if v \= NONE_OOP then do
+        if kind_of(v) \= K_STR then return raise_exc(C_TYPEERROR, "end must be None or a string, not " || type_name(v))
+        endv = ob_s[v % 2]
+      end
+    end
+    else if nm == "file" then fo = v
+    else if nm == "flush" then nop
+    else return raise_exc(C_TYPEERROR, "'" || nm || "' is an invalid keyword argument for print()")
+  end
+  out = ""
+  do i = 1 to na
+    if i > 1 then out = out || sep
+    v = ast[base + i]
+    if v // 2 = 0 then do
+      if ob_k[v % 2] = K_STR then do
+        out = out || ob_s[v % 2]
+        iterate
+      end
+    end
+    s = str_of(v)
+    if unw > 0 then return 0
+    out = out || s
+  end
+  out = out || endv
+  if fo > 0 & fo \= NONE_OOP then do
+    if kind_of(fo) \= K_FILE then return raise_exc(C_ATTRIBUTEERROR, "'" || type_name(fo) || "' object has no attribute 'write'")
+    call file_write fo, out
+    if unw > 0 then return 0
+  end
+  else call outs out
+  return NONE_OOP
+
+bi_len: procedure = .int
+  arg x = .int
+  k = .int
+  m = .int
+  k = kind_of(x)
+  select
+    when k = K_STR then return mkint(length(ob_s[x % 2]))
+    when k = K_LIST | k = K_TUPLE then return mkint(ob_n[x % 2])
+    when k = K_DICT | k = K_SET then return mkint(dd_n[ob_x[x % 2]])
+    when k = K_RANGE then return mkint(range_len(x))
+    when k = K_INST then do
+      m = cls_find(ob_c[x % 2], M___LEN__)
+      if m > 0 then do
+        m = call1(m, x)
+        if m = 0 then return 0
+        return m
+      end
+    end
+    otherwise nop
+  end
+  return raise_exc(C_TYPEERROR, "object of type '" || type_name(x) || "' has no len()")
+
+bi_abs: procedure = .int
+  arg x = .int
+  s = .string
+  if x // 2 \= 0 then do
+    if x < 1 then return mkint(0 - ival(x))
+    return x
+  end
+  select
+    when ob_k[x % 2] = K_FLOAT then return mkfloat(rxfloat..fabs(ob_f[x % 2]))
+    when ob_k[x % 2] = K_BIG then do
+      s = ob_s[x % 2]
+      if left(s, 1) == "-" then return mkbig(substr(s, 2))
+      return x
+    end
+    when ob_k[x % 2] = K_BOOL then return mkint(ival(x))
+    otherwise nop
+  end
+  return raise_exc(C_TYPEERROR, "bad operand type for abs(): '" || type_name(x) || "'")
+
+bi_minmax: procedure = .int
+  arg base = .int, na = .int, nk = .int, ismax = .int
+  keyf = .int
+  dflt = .int
+  l = .int
+  i = .int
+  best = .int
+  bestk = .int
+  v = .int
+  kv = .int
+  c = .int
+  n = .int
+  fname = .string
+  fname = "min"
+  if ismax = 1 then fname = "max"
+  keyf = kwarg(base, na, nk, "key")
+  if keyf = NONE_OOP then keyf = 0
+  dflt = kwarg(base, na, nk, "default")
+  if na = 0 then return raise_exc(C_TYPEERROR, fname || " expected at least 1 argument, got 0")
+  if na = 1 then do
+    l = iter_list(ast[base + 1])
+    if l = 0 then return 0
+  end
+  else l = tup_from_ast(base + 1, base + na)
+  n = ob_n[l % 2]
+  if n = 0 then do
+    if dflt \= 0 then return dflt
+    return raise_exc(C_VALUEERROR, fname || "() arg is an empty sequence")
+  end
+  best = sl[ob_p[l % 2]]
+  bestk = best
+  if keyf \= 0 then do
+    bestk = call1(keyf, best)
+    if bestk = 0 then return 0
+  end
+  do i = 1 to n - 1
+    v = sl[ob_p[l % 2] + i]
+    kv = v
+    if keyf \= 0 then do
+      kv = call1(keyf, v)
+      if kv = 0 then return 0
+    end
+    if ismax = 1 then c = py_lt(bestk, kv)
+    else c = py_lt(kv, bestk)
+    if unw > 0 then return 0
+    if c = 1 then do
+      best = v
+      bestk = kv
+    end
+  end
+  return best
+
+bi_sum: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  acc = .int
+  it = .int
+  v = .int
+  st = .int
+  if na < 1 then return nargs_err("sum", na, 1, 2)
+  acc = mkint(0)
+  if na >= 2 then acc = ast[base + 2]
+  st = kwarg(base, na, nk, "start")
+  if st \= 0 then acc = st
+  it = iter_new(ast[base + 1])
+  if it = 0 then return 0
+  do forever
+    v = iter_next(it)
+    if v = 0 then leave
+    if acc // 2 \= 0 & v // 2 \= 0 then do
+      acc = acc + v - 1
+      if acc >= BIGOOP | acc <= 0 - BIGOOP then acc = arith(O_ADD, acc - v + 1, v)
+    end
+    else acc = arith(O_ADD, acc, v)
+    if acc = 0 then return 0
+  end
+  if unw > 0 then return 0
+  return acc
+
+/* in-place stable merge sort of list o by key function keyf (0 = none) */
+sort_list: procedure = .int
+  arg o = .int, keyf = .int, rev = .int
+  n = .int
+  i = .int
+  w = .int
+  lo = .int
+  mid = .int
+  hi = .int
+  a = .int
+  b = .int
+  d = .int
+  p = .int
+  x = .int
+  y = .int
+  t = .int
+  kv = .int
+  vals = .int[]
+  keys = .int[]
+  src = .int[]
+  dst = .int[]
+  n = ob_n[o % 2]
+  if n < 2 then return 1
+  p = ob_p[o % 2]
+  do i = 1 to n
+    vals[i] = sl[p + i - 1]
+    keys[i] = vals[i]
+    if keyf \= 0 then do
+      kv = call1(keyf, vals[i])
+      if kv = 0 then return 0
+      keys[i] = kv
+    end
+    src[i] = i
+  end
+  w = 1
+  do while w < n
+    lo = 1
+    do while lo <= n
+      mid = lo + w
+      hi = lo + 2 * w
+      if mid > n + 1 then mid = n + 1
+      if hi > n + 1 then hi = n + 1
+      a = lo
+      b = mid
+      d = lo
+      do while a < mid & b < hi
+        x = keys[src[b]]
+        y = keys[src[a]]
+        if rev = 1 then do
+          t = x
+          x = y
+          y = t
+        end
+        if x // 2 \= 0 & y // 2 \= 0 then do
+          if x < y then t = 1
+          else t = 0
+        end
+        else do
+          t = py_lt(x, y)
+          if unw > 0 then return 0
+        end
+        if t = 1 then do
+          dst[d] = src[b]
+          b = b + 1
+        end
+        else do
+          dst[d] = src[a]
+          a = a + 1
+        end
+        d = d + 1
+      end
+      do while a < mid
+        dst[d] = src[a]
+        a = a + 1
+        d = d + 1
+      end
+      do while b < hi
+        dst[d] = src[b]
+        b = b + 1
+        d = d + 1
+      end
+      lo = lo + 2 * w
+    end
+    do i = 1 to n
+      src[i] = dst[i]
+    end
+    w = w * 2
+  end
+  p = ob_p[o % 2]
+  do i = 1 to n
+    sl[p + i - 1] = vals[src[i]]
+  end
+  return 1
+
+bi_sorted: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  l = .int
+  keyf = .int
+  rev = .int
+  r = .int
+  if na \= 1 then return nargs_err("sorted", na, 1, 1)
+  l = iter_list(ast[base + 1])
+  if l = 0 then return 0
+  keyf = kwarg(base, na, nk, "key")
+  if keyf = NONE_OOP then keyf = 0
+  rev = 0
+  r = kwarg(base, na, nk, "reverse")
+  if r \= 0 then do
+    rev = truthy(r)
+    if unw > 0 then return 0
+  end
+  if sort_list(l, keyf, rev) = 0 then return 0
+  return l
+
+bi_round: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  x = .int
+  nd = .int
+  hasnd = .int
+  f = .float
+  fl = .float
+  df = .float
+  p = .int
+  q = .int
+  r = .int
+  s = .string
+  if na < 1 | na > 2 then return nargs_err("round", na, 1, 2)
+  x = ast[base + 1]
+  hasnd = 0
+  if na = 2 then do
+    if ast[base + 2] \= NONE_OOP then do
+      if chk_int(ast[base + 2]) = 0 then return 0
+      hasnd = 1
+      nd = ival(ast[base + 2])
+    end
+  end
+  if numkind(x) = 1 | numkind(x) = 2 then do
+    if hasnd = 0 | nd >= 0 then return mkint(ival(x))
+    if numkind(x) = 2 then return x
+    p = 10 ** (0 - nd)
+    if nd < -17 then return mkint(0)
+    q = ival(x) % p
+    r = ival(x) // p
+    if r < 0 then do
+      q = q - 1
+      r = r + p
+    end
+    if r * 2 > p then q = q + 1
+    else if r * 2 = p then do
+      if q // 2 \= 0 then q = q + 1
+    end
+    return mkint(q * p)
+  end
+  if numkind(x) = 3 then do
+    f = ob_f[x % 2]
+    if hasnd = 0 then do
+      if f \= f then return raise_exc(C_VALUEERROR, "cannot convert float NaN to integer")
+      if finf(f) \= 0 then return raise_exc(C_OVERFLOWERROR, "cannot convert float infinity to integer")
+      fl = rxfloat..floor(f)
+      df = f - fl
+      if df < 0.5 then return float_to_int(fl)
+      if df > 0.5 then return float_to_int(fl + 1.0)
+      if rxfloat..floor(fl / 2.0) * 2.0 = fl then return float_to_int(fl)
+      return float_to_int(fl + 1.0)
+    end
+    if f \= f | finf(f) \= 0 then return x
+    if nd > 300 then return x
+    if nd < 0 then do
+      p = 0 - nd
+      fl = rxfloat..pow10(p as .float)
+      return mkfloat(ob_f[bi_round_f(f / fl) % 2] * fl)
+    end
+    s = float_fixed(f, nd)
+    return mkfloat(parse_flt(s))
+  end
+  return raise_exc(C_TYPEERROR, "type " || type_name(x) || " doesn't define __round__ method")
+
+/* round a float half-even to an integral float */
+bi_round_f: procedure = .int
+  arg f = .float
+  fl = .float
+  df = .float
+  fl = rxfloat..floor(f)
+  df = f - fl
+  if df < 0.5 then return mkfloat(fl)
+  if df > 0.5 then return mkfloat(fl + 1.0)
+  if rxfloat..floor(fl / 2.0) * 2.0 = fl then return mkfloat(fl)
+  return mkfloat(fl + 1.0)
+
+bi_divmod: procedure = .int
+  arg a = .int, b = .int
+  q = .int
+  r = .int
+  t = .int
+  q = arith(O_FLOORDIV, a, b)
+  if q = 0 then return 0
+  r = arith(O_MOD, a, b)
+  if r = 0 then return 0
+  t = mktuple(2)
+  sl[ob_p[t % 2]] = q
+  sl[ob_p[t % 2] + 1] = r
+  return t
+
+bi_pow: procedure = .int
+  arg base = .int, na = .int
+  r = .int
+  e = .int
+  m = .int
+  b = .int
+  one = .int
+  if na < 2 | na > 3 then return nargs_err("pow", na, 2, 3)
+  if na = 2 then return arith(O_POW, ast[base + 1], ast[base + 2])
+  b = ast[base + 1]
+  e = ast[base + 2]
+  m = ast[base + 3]
+  if numkind(b) \= 1 & numkind(b) \= 2 then return raise_exc(C_TYPEERROR, "pow() 3rd argument not allowed unless all arguments are integers")
+  if numkind(e) \= 1 | numkind(m) = 0 then return raise_exc(C_TYPEERROR, "pow() 3rd argument not allowed unless all arguments are integers")
+  if ival(e) < 0 & numkind(e) = 1 then return raise_exc(C_VALUEERROR, "pow() 2nd argument cannot be negative when 3rd argument specified")
+  if num_str(m) == "0" then return raise_exc(C_VALUEERROR, "pow() 3rd argument cannot be 0")
+  one = mkint(1)
+  r = arith(O_MOD, one, m)
+  b = arith(O_MOD, b, m)
+  e = ival(e)
+  do while e > 0
+    if e // 2 = 1 then do
+      r = arith(O_MOD, arith(O_MUL, r, b), m)
+    end
+    e = e % 2
+    if e > 0 then b = arith(O_MOD, arith(O_MUL, b, b), m)
+  end
+  return r
+
+bi_chr: procedure = .int
+  arg x = .int
+  v = .int
+  if chk_int(x) = 0 then return 0
+  v = ival(x)
+  if v < 0 | v > 1114111 then return raise_exc(C_VALUEERROR, "chr() arg not in range(0x110000)")
+  return mkchr(utf8_chr(v))
+
+bi_ord: procedure = .int
+  arg x = .int
+  s = .string
+  n = .int
+  c = .int
+  if kind_of(x) \= K_STR then return raise_exc(C_TYPEERROR, "ord() expected string of length 1, but " || type_name(x) || " found")
+  s = ob_s[x % 2]
+  n = length(s)
+  if n \= 1 then return raise_exc(C_TYPEERROR, "ord() expected a character, but string of length " || n || " found")
+  c = c2d(s)
+  return mkint(c)
+
+bi_radix: procedure = .int
+  arg x = .int, rdx = .int
+  s = .string
+  neg = .string
+  pre = .string
+  if numkind(x) = 0 | numkind(x) = 3 then return raise_exc(C_TYPEERROR, "'" || type_name(x) || "' object cannot be interpreted as an integer")
+  s = num_str(x)
+  neg = ""
+  if left(s, 1) == "-" then do
+    neg = "-"
+    s = substr(s, 2)
+  end
+  if rdx = 16 then pre = "0x"
+  else if rdx = 8 then pre = "0o"
+  else pre = "0b"
+  return mkstr(neg || pre || radix_str(s, rdx))
+
+/* is class c (or any class of the tuple t) a base of class d */
+bi_isinstance: procedure = .int
+  arg x = .int, ty = .int, sub = .int
+  k = .int
+  i = .int
+  r = .int
+  c = .int
+  k = kind_of(ty)
+  if k = K_CLASS then do
+    if sub = 1 then c = x
+    else c = cls_of(x)
+    return mkbool(cls_issub(c, ob_x[ty % 2]))
+  end
+  if k = K_TUPLE then do
+    do i = 0 to ob_n[ty % 2] - 1
+      r = bi_isinstance(x, sl[ob_p[ty % 2] + i], sub)
+      if r = 0 then return 0
+      if r = TRUE_OOP then return r
+    end
+    return FALSE_OOP
+  end
+  if sub = 1 then return raise_exc(C_TYPEERROR, "issubclass() arg 2 must be a class, a tuple of classes, or a union")
+  return raise_exc(C_TYPEERROR, "isinstance() arg 2 must be a type, a tuple of types, or a union")
+
+/* clear a pending AttributeError; 1 if there was one */
+swallow_attr: procedure = .int
+  if unw = U_RAISE then do
+    if cls_issub(ob_c[unw_v % 2], C_ATTRIBUTEERROR) = 1 then do
+      unw = 0
+      return 1
+    end
+  end
+  return 0
+
+bi_getattr: procedure = .int
+  arg base = .int, na = .int
+  r = .int
+  o = .int
+  if na < 2 | na > 3 then return nargs_err("getattr", na, 2, 3)
+  o = ast[base + 1]
+  if kind_of(ast[base + 2]) \= K_STR then return raise_exc(C_TYPEERROR, "getattr(): attribute name must be string")
+  r = getattr_obj(o, nameid(ob_s[ast[base + 2] % 2]), 0)
+  if r = 0 & na = 3 then do
+    if swallow_attr() = 1 then return ast[base + 3]
+  end
+  return r
+
+bi_hasattr: procedure = .int
+  arg o = .int, nm = .int
+  r = .int
+  if kind_of(nm) \= K_STR then return raise_exc(C_TYPEERROR, "hasattr(): attribute name must be string")
+  r = getattr_obj(o, nameid(ob_s[nm % 2]), 0)
+  if r = 0 then do
+    if swallow_attr() = 1 then return FALSE_OOP
+    return 0
+  end
+  return TRUE_OOP
+
+bi_setattr: procedure = .int
+  arg o = .int, nm = .int, v = .int
+  if kind_of(nm) \= K_STR then return raise_exc(C_TYPEERROR, "setattr(): attribute name must be string")
+  call setattr_obj o, nameid(ob_s[nm % 2]), v
+  if unw > 0 then return 0
+  return NONE_OOP
+
+bi_delattr: procedure = .int
+  arg o = .int, nm = .int
+  if kind_of(nm) \= K_STR then return raise_exc(C_TYPEERROR, "delattr(): attribute name must be string")
+  if kind_of(o) = K_INST then do
+    if inst_del(o, nameid(ob_s[nm % 2])) = 1 then return NONE_OOP
+  end
+  return raise_exc(C_ATTRIBUTEERROR, ob_s[nm % 2])
+
+bi_callable: procedure = .int
+  arg x = .int
+  k = .int
+  k = kind_of(x)
+  if k = K_FUNC | k = K_BUILTIN | k = K_BMETH | k = K_BMETHB | k = K_CLASS then return TRUE_OOP
+  if k = K_INST then do
+    if cls_find(ob_c[x % 2], M___CALL__) > 0 then return TRUE_OOP
+  end
+  return FALSE_OOP
+
+bi_next: procedure = .int
+  arg base = .int, na = .int
+  it = .int
+  v = .int
+  m = .int
+  if na < 1 | na > 2 then return nargs_err("next", na, 1, 2)
+  it = ast[base + 1]
+  if kind_of(it) = K_INST then do
+    m = cls_find(ob_c[it % 2], M___NEXT__)
+    if m = 0 then return raise_exc(C_TYPEERROR, "'" || type_name(it) || "' object is not an iterator")
+    v = call1(m, it)
+    if v = 0 & na = 2 then do
+      if unw = U_RAISE then do
+        if cls_issub(ob_c[unw_v % 2], C_STOPITERATION) = 1 then do
+          unw = 0
+          return ast[base + 2]
+        end
+      end
+    end
+    return v
+  end
+  if kind_of(it) \= K_GEN & kind_of(it) \= K_ITER then return raise_exc(C_TYPEERROR, "'" || type_name(it) || "' object is not an iterator")
+  v = iter_next(it)
+  if v = 0 then do
+    if unw > 0 then return 0
+    if na = 2 then return ast[base + 2]
+    unw = U_RAISE
+    unw_v = exc_new0(C_STOPITERATION)
+    return 0
+  end
+  return v
+
+bi_iter: procedure = .int
+  arg x = .int
+  return iter_new(x)
+
+bi_anyall: procedure = .int
+  arg x = .int, isany = .int
+  it = .int
+  v = .int
+  t = .int
+  it = iter_new(x)
+  if it = 0 then return 0
+  do forever
+    v = iter_next(it)
+    if v = 0 then leave
+    t = truthy(v)
+    if unw > 0 then return 0
+    if isany = 1 & t = 1 then return TRUE_OOP
+    if isany = 0 & t = 0 then return FALSE_OOP
+  end
+  if unw > 0 then return 0
+  if isany = 1 then return FALSE_OOP
+  return TRUE_OOP
+
+strhash: procedure = .int
+  arg s = .string
+  h = .int
+  i = .int
+  n = .int
+  h = 5381
+  n = length(s)
+  do i = 1 to n
+    h = (h * 33 + c2d(substr(s, i, 1))) // 1000000007
+  end
+  return h
+
+bi_hash: procedure = .int
+  arg x = .int
+  k = .int
+  m = .int
+  r = .int
+  h = .int
+  i = .int
+  if x // 2 \= 0 then return x
+  k = ob_k[x % 2]
+  select
+    when k = K_STR then return mkint(strhash(ob_s[x % 2]))
+    when k = K_BOOL then return mkint(ival(x))
+    when k = K_FLOAT then do
+      if ob_f[x % 2] = rxfloat..floor(ob_f[x % 2]) & rxfloat..fabs(ob_f[x % 2]) < 900000000000000000.0 then return float_to_int(ob_f[x % 2])
+      return mkint(strhash(float_repr(ob_f[x % 2])))
+    end
+    when k = K_BIG then return mkint(strhash(ob_s[x % 2]))
+    when k = K_TUPLE then do
+      h = 3430008
+      do i = 0 to ob_n[x % 2] - 1
+        r = bi_hash(sl[ob_p[x % 2] + i])
+        if r = 0 then return 0
+        h = (h * 1000003 + ival(r)) // 1000000007
+      end
+      return mkint(h)
+    end
+    when k = K_NONE then return mkint(1)
+    when k = K_LIST | k = K_DICT | k = K_SET then return raise_exc(C_TYPEERROR, "unhashable type: '" || type_name(x) || "'")
+    when k = K_INST then do
+      m = cls_find(ob_c[x % 2], M___HASH__)
+      if m > 0 then return call1(m, x)
+      return mkint(x)
+    end
+    otherwise return mkint(x)
+  end
+  return mkint(x)
+
+bi_input: procedure = .int
+  arg base = .int, na = .int
+  line = .string
+  e = .int
+  if na >= 1 then call outs str_of(ast[base + 1])
+  call flush_out
+  if stdin_eof = 1 then return raise_exc(C_EOFERROR, "EOF when reading a line")
+  line = ""
+  assembler freadline line, h_in
+  assembler feof e, h_in
+  if e > 0 & length(line) = 0 then do
+    stdin_eof = 1
+    return raise_exc(C_EOFERROR, "EOF when reading a line")
+  end
+  if right(line, 1) == '0d'x then line = left(line, length(line) - 1)
+  return mkstr(line)
+
+bi_reversed: procedure = .int
+  arg x = .int
+  k = .int
+  l = .int
+  k = kind_of(x)
+  if k = K_LIST | k = K_TUPLE then return mkiter(IT_REV, x, ob_n[x % 2] - 1)
+  if k = K_STR then return mkiter(IT_REV, x, length(ob_s[x % 2]) - 1)
+  l = iter_list(x)
+  if l = 0 then return 0
+  return mkiter(IT_REV, l, ob_n[l % 2] - 1)
+
+bi_enumerate: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  it = .int
+  st = .int
+  if na < 1 | na > 2 then return nargs_err("enumerate", na, 1, 2)
+  it = iter_new(ast[base + 1])
+  if it = 0 then return 0
+  st = 0
+  if na = 2 then st = ast[base + 2]
+  if kwarg(base, na, nk, "start") \= 0 then st = kwarg(base, na, nk, "start")
+  if st = 0 then st = mkint(0)
+  if chk_int(st) = 0 then return 0
+  return mkiter(IT_ENUM, it, ival(st))
+
+bi_zip: procedure = .int
+  arg base = .int, na = .int
+  o = .int
+  j = .int
+  it = .int
+  if na = 0 then return mkiter(IT_SEQ, mktuple(0), 0)
+  o = mkiter(IT_ZIP, 0, 0)
+  ob_p[o % 2] = alloc_slots(na)
+  ob_c[o % 2] = na
+  do j = 0 to na - 1
+    it = iter_new(ast[base + 1 + j])
+    if it = 0 then return 0
+    sl[ob_p[o % 2] + j] = it
+  end
+  return o
+
+bi_map: procedure = .int
+  arg base = .int, na = .int
+  o = .int
+  j = .int
+  it = .int
+  if na < 2 then return nargs_err("map", na, 2, 2)
+  o = mkiter(IT_MAP, ast[base + 1], 0)
+  ob_p[o % 2] = alloc_slots(na - 1)
+  ob_c[o % 2] = na - 1
+  do j = 1 to na - 1
+    it = iter_new(ast[base + 1 + j])
+    if it = 0 then return 0
+    sl[ob_p[o % 2] + j - 1] = it
+  end
+  return o
+
+bi_filter: procedure = .int
+  arg f = .int, x = .int
+  it = .int
+  o = .int
+  it = iter_new(x)
+  if it = 0 then return 0
+  if f = NONE_OOP then f = 0
+  return mkiter(IT_FILTER, f, it)
+
+bi_format: procedure = .int
+  arg base = .int, na = .int
+  sp = .string
+  s = .string
+  if na < 1 | na > 2 then return nargs_err("format", na, 1, 2)
+  sp = ""
+  if na = 2 then do
+    if kind_of(ast[base + 2]) \= K_STR then return raise_exc(C_TYPEERROR, "format() argument 2 must be str, not " || type_name(ast[base + 2]))
+    sp = ob_s[ast[base + 2] % 2]
+  end
+  s = format_value(ast[base + 1], sp)
+  if unw > 0 then return 0
+  return mkstr(s)
+
+/* exception __init__(slf, *args) */
+bi_exc_init: procedure = .int
+  arg base = .int, na = .int
+  call inst_set ast[base + 1], M_ARGS, tup_from_ast(base + 2, base + na)
+  return NONE_OOP
+
+bi_super: procedure = .int
+  arg base = .int, na = .int
+  o = .int
+  if na \= 2 then return raise_exc(C_TYPEERROR, "super() argument 1 must be type, not nothing")
+  o = newobj(K_SUPER)
+  ob_x[o % 2] = ast[base + 2]
+  ob_y[o % 2] = ast[base + 1]
+  return o
+
+bi_exit: procedure = .int
+  arg base = .int, na = .int
+  e = .int
+  e = inst_new(C_SYSTEMEXIT)
+  if na >= 1 then call inst_set e, M_ARGS, tup_from_ast(base + 1, base + 1)
+  else call inst_set e, M_ARGS, mktuple(0)
+  return raise_obj(e)
+
+/* integer value of a decimal / radix string; 0 with ValueError when invalid */
+parse_int: procedure = .int
+  arg s0 = .string, bs = .int
+  s = .string
+  neg = .int
+  i = .int
+  n = .int
+  c = .string
+  d = .int
+  v = .int
+  acc = .string
+  digs = .string
+  ok = .int
+  ch2 = .string
+  s = strip(s0)
+  neg = 0
+  if left(s, 1) == "-" then do
+    neg = 1
+    s = substr(s, 2)
+  end
+  else if left(s, 1) == "+" then s = substr(s, 2)
+  ch2 = lower(left(s, 2))
+  if (bs = 16 | bs = 0) & ch2 == "0x" then do
+    s = substr(s, 3)
+    bs = 16
+  end
+  else if (bs = 8 | bs = 0) & ch2 == "0o" then do
+    s = substr(s, 3)
+    bs = 8
+  end
+  else if (bs = 2 | bs = 0) & ch2 == "0b" then do
+    s = substr(s, 3)
+    bs = 2
+  end
+  if bs = 0 then bs = 10
+  ok = 1
+  if s == "" then ok = 0
+  if left(s, 1) == "_" | right(s, 1) == "_" | pos("__", s) > 0 then ok = 0
+  if ok = 1 then do
+    if pos("_", s) > 0 then s = changestr("_", s, "")
+    n = length(s)
+    digs = ""
+    do i = 1 to n
+      c = lower(substr(s, i, 1))
+      if isdigit(c) = 1 then d = c as .int
+      else if c >>= "a" & c <<= "z" then d = c2d(c) - 87
+      else d = 99
+      if d >= bs then do
+        ok = 0
+        leave
+      end
+    end
+  end
+  if ok = 0 then return raise_exc(C_VALUEERROR, "invalid literal for int() with base " || bs || ": " || repr_str(s0))
+  if bs = 10 then do
+    if neg = 1 then return big_norm("-" || s)
+    return big_norm(s)
+  end
+  if n <= 12 then do
+    v = 0
+    do i = 1 to n
+      c = lower(substr(s, i, 1))
+      if isdigit(c) = 1 then d = c as .int
+      else d = c2d(c) - 87
+      v = v * bs + d
+    end
+    if neg = 1 then v = 0 - v
+    return mkint(v)
+  end
+  acc = "0"
+  do i = 1 to n
+    c = lower(substr(s, i, 1))
+    if isdigit(c) = 1 then d = c as .int
+    else d = c2d(c) - 87
+    acc = sadd(smul(acc, bs as .string), d as .string)
+  end
+  if neg = 1 then acc = sneg(acc)
+  return big_norm(acc)
+
+parse_float_str: procedure = .int
+  arg s0 = .string
+  s = .string
+  neg = .int
+  i = .int
+  n = .int
+  c = .string
+  seen_dot = .int
+  seen_e = .int
+  nd = .int
+  ok = .int
+  mant = .string
+  ex = .string
+  p = .int
+  l = .string
+  f = .float
+  s = strip(s0)
+  neg = 0
+  if left(s, 1) == "-" then do
+    neg = 1
+    s = substr(s, 2)
+  end
+  else if left(s, 1) == "+" then s = substr(s, 2)
+  l = lower(s)
+  if l == "inf" | l == "infinity" then do
+    f = f_inf()
+    if neg = 1 then f = 0.0 - f
+    return mkfloat(f)
+  end
+  if l == "nan" then return mkfloat(f_nan())
+  if pos("_", s) > 0 then s = changestr("_", s, "")
+  n = length(s)
+  ok = 1
+  seen_dot = 0
+  seen_e = 0
+  nd = 0
+  i = 1
+  do while i <= n
+    c = substr(s, i, 1)
+    if isdigit(c) = 1 then nd = nd + 1
+    else if c == "." & seen_dot = 0 & seen_e = 0 then seen_dot = 1
+    else if (c == "e" | c == "E") & seen_e = 0 & nd > 0 then do
+      seen_e = 1
+      if substr(s, i + 1, 1) == "+" | substr(s, i + 1, 1) == "-" then i = i + 1
+      if isdigit(substr(s, i + 1, 1)) = 0 then ok = 0
+    end
+    else do
+      ok = 0
+      leave
+    end
+    i = i + 1
+  end
+  if nd = 0 | n = 0 then ok = 0
+  if ok = 0 then return raise_exc(C_VALUEERROR, "could not convert string to float: " || repr_str(s0))
+  l = lower(s)
+  p = pos("e", l)
+  ex = ""
+  mant = l
+  if p > 0 then do
+    mant = left(l, p - 1)
+    ex = substr(l, p)
+  end
+  if left(mant, 1) == "." then mant = "0" || mant
+  if right(mant, 1) == "." then mant = mant || "0"
+  if pos(".", mant) = 0 then mant = mant || ".0"
+  f = parse_flt(mant || ex)
+  if neg = 1 then f = 0.0 - f
+  return mkfloat(f)
+
+/* int(...) */
+ctor_int: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  x = .int
+  bs = .int
+  f = .float
+  m = .int
+  if na = 0 then return mkint(0)
+  x = ast[base + 1]
+  bs = 10
+  if na >= 2 then do
+    if chk_int(ast[base + 2]) = 0 then return 0
+    bs = ival(ast[base + 2])
+  end
+  else if kwarg(base, na, nk, "base") \= 0 then bs = ival(kwarg(base, na, nk, "base"))
+  else bs = -1
+  if kind_of(x) = K_STR then do
+    if bs = -1 then bs = 10
+    return parse_int(ob_s[x % 2], bs)
+  end
+  if bs \= -1 then return raise_exc(C_TYPEERROR, "int() can't convert non-string with explicit base")
+  select
+    when numkind(x) = 1 then return mkint(ival(x))
+    when numkind(x) = 2 then return x
+    when numkind(x) = 3 then do
+      f = ob_f[x % 2]
+      if f \= f then return raise_exc(C_VALUEERROR, "cannot convert float NaN to integer")
+      if finf(f) \= 0 then return raise_exc(C_OVERFLOWERROR, "cannot convert float infinity to integer")
+      return float_to_int(f)
+    end
+    when kind_of(x) = K_INST then do
+      m = cls_find(ob_c[x % 2], M___INT__)
+      if m = 0 then m = cls_find(ob_c[x % 2], M___INDEX__)
+      if m > 0 then return call1(m, x)
+    end
+    otherwise nop
+  end
+  return raise_exc(C_TYPEERROR, "int() argument must be a string, a bytes-like object or a real number, not '" || type_name(x) || "'")
+
+ctor_float: procedure = .int
+  arg base = .int, na = .int
+  x = .int
+  m = .int
+  if na = 0 then return mkfloat(0.0)
+  x = ast[base + 1]
+  if kind_of(x) = K_STR then return parse_float_str(ob_s[x % 2])
+  if numkind(x) > 0 then return mkfloat(tofloat(x))
+  if kind_of(x) = K_INST then do
+    m = cls_find(ob_c[x % 2], M___FLOAT__)
+    if m > 0 then return call1(m, x)
+  end
+  return raise_exc(C_TYPEERROR, "float() argument must be a string or a real number, not '" || type_name(x) || "'")
+
+ctor_dict: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  o = .int
+  x = .int
+  j = .int
+  it = .int
+  v = .int
+  p = .int
+  l = .int
+  o = dict_new(K_DICT)
+  if na > 1 then return raise_exc(C_TYPEERROR, "dict expected at most 1 argument, got " || na)
+  if na = 1 then do
+    x = ast[base + 1]
+    if kind_of(x) = K_DICT then call dict_update o, x
+    else do
+      it = iter_new(x)
+      if it = 0 then return 0
+      do forever
+        v = iter_next(it)
+        if v = 0 then leave
+        l = iter_list(v)
+        if l = 0 then return 0
+        if ob_n[l % 2] \= 2 then return raise_exc(C_VALUEERROR, "dictionary update sequence element has length " || ob_n[l % 2] || "; 2 is required")
+        call dset o, sl[ob_p[l % 2]], sl[ob_p[l % 2] + 1]
+      end
+      if unw > 0 then return 0
+    end
+  end
+  do j = 1 to nk
+    call dset o, mkstr(asn[base + na + j]), ast[base + na + j]
+  end
+  return o
+
+ctor_set: procedure = .int
+  arg base = .int, na = .int
+  o = .int
+  l = .int
+  i = .int
+  o = dict_new(K_SET)
+  if na = 0 then return o
+  l = iter_list(ast[base + 1])
+  if l = 0 then return 0
+  do i = 0 to ob_n[l % 2] - 1
+    call dset o, sl[ob_p[l % 2] + i], TRUE_OOP
+  end
+  return o
+
+ctor_range: procedure = .int
+  arg base = .int, na = .int
+  a = .int
+  b = .int
+  c = .int
+  i = .int
+  if na < 1 | na > 3 then return nargs_err("range", na, 1, 3)
+  do i = 1 to na
+    if chk_int(ast[base + i]) = 0 then return 0
+  end
+  a = 0
+  c = 1
+  if na = 1 then b = ival(ast[base + 1])
+  else do
+    a = ival(ast[base + 1])
+    b = ival(ast[base + 2])
+    if na = 3 then c = ival(ast[base + 3])
+  end
+  if c = 0 then return raise_exc(C_VALUEERROR, "range() arg 3 must not be zero")
+  return mkrange(a, b, c)
+
+/* constructor call of a built-in type class c */
+bcall_type: procedure = .int
+  arg c = .int, base = .int, na = .int, nk = .int
+  x = .int
+  l = .int
+  o = .int
+  select
+    when c = C_RANGE then return ctor_range(base, na)
+    when c = C_INT then return ctor_int(base, na, nk)
+    when c = C_STR then do
+      if na = 0 then return mkstr("")
+      if kind_of(ast[base + 1]) = K_STR then return ast[base + 1]
+      return mkstr(str_of(ast[base + 1]))
+    end
+    when c = C_FLOAT then return ctor_float(base, na)
+    when c = C_BOOL then do
+      if na = 0 then return FALSE_OOP
+      return mkbool(truthy(ast[base + 1]))
+    end
+    when c = C_LIST then do
+      if na = 0 then return mklist(4)
+      return iter_list(ast[base + 1])
+    end
+    when c = C_TUPLE then do
+      if na = 0 then return mktuple(0)
+      if kind_of(ast[base + 1]) = K_TUPLE then return ast[base + 1]
+      l = iter_list(ast[base + 1])
+      if l = 0 then return 0
+      return tup_of_list(l)
+    end
+    when c = C_DICT then return ctor_dict(base, na, nk)
+    when c = C_SET then return ctor_set(base, na)
+    when c = C_OBJECT then return inst_new(C_OBJECT)
+    when c = C_TYPE then do
+      if na = 1 then return cl_obj[cls_of(ast[base + 1])]
+      return raise_exc(C_TYPEERROR, "type() takes 1 or 3 arguments")
+    end
+    when c = C_PROPERTY then do
+      o = newobj(K_PROP)
+      ob_x[o % 2] = ast[base + 1]
+      ob_y[o % 2] = 0
+      if na >= 2 then ob_y[o % 2] = ast[base + 2]
+      return o
+    end
+    when c = C_STATICMETHOD then do
+      o = newobj(K_STATIC)
+      ob_x[o % 2] = ast[base + 1]
+      return o
+    end
+    when c = C_CLASSMETHOD then do
+      o = newobj(K_CLSM)
+      ob_x[o % 2] = ast[base + 1]
+      return o
+    end
+    otherwise nop
+  end
+  return raise_exc(C_TYPEERROR, "cannot create '" || cl_name[c] || "' instances")
+
+/* call of a built-in function */
+bcall: procedure = .int
+  arg bid = .int, base = .int, na = .int, nk = .int
+  r = .int
+  x = .int
+  rs = .string
+  select
+    when bid = BI_PRINT then return bi_print(base, na, nk)
+    when bid = BI_LEN then do
+      if na \= 1 then return nargs_err("len", na, 1, 1)
+      return bi_len(ast[base + 1])
+    end
+    when bid = BI_ISINSTANCE then do
+      if na \= 2 then return nargs_err("isinstance", na, 2, 2)
+      return bi_isinstance(ast[base + 1], ast[base + 2], 0)
+    end
+    when bid = BI_MIN then return bi_minmax(base, na, nk, 0)
+    when bid = BI_MAX then return bi_minmax(base, na, nk, 1)
+    when bid = BI_ABS then do
+      if na \= 1 then return nargs_err("abs", na, 1, 1)
+      return bi_abs(ast[base + 1])
+    end
+    when bid = BI_SUM then return bi_sum(base, na, nk)
+    when bid = BI_SORTED then return bi_sorted(base, na, nk)
+    when bid = BI_ENUMERATE then return bi_enumerate(base, na, nk)
+    when bid = BI_ZIP then return bi_zip(base, na)
+    when bid = BI_MAP then return bi_map(base, na)
+    when bid = BI_FILTER then do
+      if na \= 2 then return nargs_err("filter", na, 2, 2)
+      return bi_filter(ast[base + 1], ast[base + 2])
+    end
+    when bid = BI_REPR then do
+      if na \= 1 then return nargs_err("repr", na, 1, 1)
+      rs = repr_of(ast[base + 1])
+      if unw > 0 then return 0
+      return mkstr(rs)
+    end
+    when bid = BI_ASCII then do
+      if na \= 1 then return nargs_err("ascii", na, 1, 1)
+      rs = repr_of(ast[base + 1])
+      if unw > 0 then return 0
+      return mkstr(rs)
+    end
+    when bid = BI_ANY then do
+      if na \= 1 then return nargs_err("any", na, 1, 1)
+      return bi_anyall(ast[base + 1], 1)
+    end
+    when bid = BI_ALL then do
+      if na \= 1 then return nargs_err("all", na, 1, 1)
+      return bi_anyall(ast[base + 1], 0)
+    end
+    when bid = BI_ROUND then return bi_round(base, na, nk)
+    when bid = BI_DIVMOD then do
+      if na \= 2 then return nargs_err("divmod", na, 2, 2)
+      return bi_divmod(ast[base + 1], ast[base + 2])
+    end
+    when bid = BI_POW then return bi_pow(base, na)
+    when bid = BI_CHR then do
+      if na \= 1 then return nargs_err("chr", na, 1, 1)
+      return bi_chr(ast[base + 1])
+    end
+    when bid = BI_ORD then do
+      if na \= 1 then return nargs_err("ord", na, 1, 1)
+      return bi_ord(ast[base + 1])
+    end
+    when bid = BI_HEX then do
+      if na \= 1 then return nargs_err("hex", na, 1, 1)
+      return bi_radix(ast[base + 1], 16)
+    end
+    when bid = BI_OCT then do
+      if na \= 1 then return nargs_err("oct", na, 1, 1)
+      return bi_radix(ast[base + 1], 8)
+    end
+    when bid = BI_BIN then do
+      if na \= 1 then return nargs_err("bin", na, 1, 1)
+      return bi_radix(ast[base + 1], 2)
+    end
+    when bid = BI_ISSUBCLASS then do
+      if na \= 2 then return nargs_err("issubclass", na, 2, 2)
+      if kind_of(ast[base + 1]) \= K_CLASS then return raise_exc(C_TYPEERROR, "issubclass() arg 1 must be a class")
+      return bi_isinstance(ob_x[ast[base + 1] % 2], ast[base + 2], 1)
+    end
+    when bid = BI_GETATTR then return bi_getattr(base, na)
+    when bid = BI_HASATTR then do
+      if na \= 2 then return nargs_err("hasattr", na, 2, 2)
+      return bi_hasattr(ast[base + 1], ast[base + 2])
+    end
+    when bid = BI_SETATTR then do
+      if na \= 3 then return nargs_err("setattr", na, 3, 3)
+      return bi_setattr(ast[base + 1], ast[base + 2], ast[base + 3])
+    end
+    when bid = BI_DELATTR then do
+      if na \= 2 then return nargs_err("delattr", na, 2, 2)
+      return bi_delattr(ast[base + 1], ast[base + 2])
+    end
+    when bid = BI_CALLABLE then do
+      if na \= 1 then return nargs_err("callable", na, 1, 1)
+      return bi_callable(ast[base + 1])
+    end
+    when bid = BI_NEXT then return bi_next(base, na)
+    when bid = BI_ITER then do
+      if na \= 1 then return nargs_err("iter", na, 1, 1)
+      return iter_new(ast[base + 1])
+    end
+    when bid = BI_ID then do
+      if na \= 1 then return nargs_err("id", na, 1, 1)
+      return mkint(ast[base + 1])
+    end
+    when bid = BI_HASH then do
+      if na \= 1 then return nargs_err("hash", na, 1, 1)
+      return bi_hash(ast[base + 1])
+    end
+    when bid = BI_INPUT then return bi_input(base, na)
+    when bid = BI_OPEN then return bi_open(base, na, nk)
+    when bid = BI_REVERSED then do
+      if na \= 1 then return nargs_err("reversed", na, 1, 1)
+      return bi_reversed(ast[base + 1])
+    end
+    when bid = BI_FORMAT then return bi_format(base, na)
+    when bid = BI_SUPER then return bi_super(base, na)
+    when bid = BI__EXC_INIT then return bi_exc_init(base, na)
+    when bid = BI__OBJ_INIT then return NONE_OOP
+    when bid = BI_EXIT then return bi_exit(base, na)
+    when bid = BI_QUIT then return bi_exit(base, na)
+    when bid = BI__SECOND then do
+      return sl[ob_p[ast[base + 1] % 2] + 1]
+    end
+    when bid = BI__IDENTITY then do
+      if na >= 1 then return ast[base + 1]
+      return NONE_OOP
+    end
+    when bid = BI__DECORATOR then do
+      if na >= 1 & (kind_of(ast[base + 1]) = K_FUNC | kind_of(ast[base + 1]) = K_CLASS) then return ast[base + 1]
+      return identity_oop
+    end
+    otherwise nop
+  end
+  if bid >= BI_MATH_SQRT then return bcall_mod(bid, base, na, nk)
+  return raise_exc(C_TYPEERROR, "unsupported built-in function")

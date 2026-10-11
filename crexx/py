@@ -1,0 +1,17 @@
+#!/bin/sh
+# Launcher for the CREXX Python interpreter.
+#   ./py file.py [arg ...]     run a script
+#   ./py -c "code"             run a command string
+#   ./py                       read the program from standard input
+# The interpreter is compiled to bytecode on first use (about a minute),
+# afterwards it starts quickly.  Set CREXX to the crexx driver if it is not on your PATH.
+DIR=$(cd "$(dirname "$0")" && pwd)
+CREXX=${CREXX:-crexx}
+if [ ! -f "$DIR/py.rxbin" ] || [ "$DIR/py.crexx" -nt "$DIR/py.rxbin" ]; then
+  echo "py: compiling interpreter (first run only)..." >&2
+  "$CREXX" "$DIR/py.crexx" -noexec >/dev/null 2>&1 || {
+    echo "py: compilation failed - run: $CREXX $DIR/py.crexx -noexec" >&2
+    exit 2
+  }
+fi
+exec "$CREXX" "$DIR/py.crexx" -nocompile -args "$@"

@@ -1,0 +1,694 @@
+/* ---------------------------------------------------------------------
+   Arbitrary-precision integers on decimal strings (as in the Smalltalk interpreter)
+   --------------------------------------------------------------------- */
+mag_clean: procedure = .string
+  arg s = .string
+  p = .int
+  p = verify(s, "0", "N")
+  if p = 0 then return "0"
+  return substr(s, p)
+
+mag_cmp: procedure = .int
+  arg a = .string, b = .string
+  if length(a) < length(b) then return -1
+  if length(a) > length(b) then return 1
+  if a == b then return 0
+  if a << b then return -1
+  return 1
+
+mag_add: procedure = .string
+  arg a = .string, b = .string
+  r = .string
+  i = .int
+  j = .int
+  x = .int
+  y = .int
+  c = .int
+  s = .int
+  piece = .string
+  i = length(a)
+  j = length(b)
+  c = 0
+  r = ""
+  do while i > 0 | j > 0 | c > 0
+    x = 0
+    y = 0
+    if i > 0 then do
+      if i > 9 then x = substr(a, i - 8, 9) as .int
+      else x = substr(a, 1, i) as .int
+      i = i - 9
+    end
+    if j > 0 then do
+      if j > 9 then y = substr(b, j - 8, 9) as .int
+      else y = substr(b, 1, j) as .int
+      j = j - 9
+    end
+    s = x + y + c
+    if s >= 1000000000 then do
+      s = s - 1000000000
+      c = 1
+    end
+    else c = 0
+    piece = s as .string
+    if i > 0 | j > 0 | c > 0 then piece = right(copies("0", 9) || piece, 9)
+    r = piece || r
+  end
+  return mag_clean(r)
+
+/* a >= b */
+mag_sub: procedure = .string
+  arg a = .string, b = .string
+  r = .string
+  i = .int
+  j = .int
+  x = .int
+  y = .int
+  c = .int
+  s = .int
+  piece = .string
+  i = length(a)
+  j = length(b)
+  c = 0
+  r = ""
+  do while i > 0
+    if i > 9 then x = substr(a, i - 8, 9) as .int
+    else x = substr(a, 1, i) as .int
+    i = i - 9
+    y = 0
+    if j > 0 then do
+      if j > 9 then y = substr(b, j - 8, 9) as .int
+      else y = substr(b, 1, j) as .int
+      j = j - 9
+    end
+    s = x - y - c
+    if s < 0 then do
+      s = s + 1000000000
+      c = 1
+    end
+    else c = 0
+    piece = s as .string
+    if i > 0 then piece = right(copies("0", 9) || piece, 9)
+    r = piece || r
+  end
+  return mag_clean(r)
+
+mag_mul: procedure = .string
+  arg a = .string, b = .string
+  la = .int
+  lb = .int
+  i = .int
+  j = .int
+  k = .int
+  x = .int
+  c = .int
+  t = .int
+  r = .string
+  piece = .string
+  al0 = .int[]
+  bl0 = .int[]
+  rl = .int[]
+  if a == "0" | b == "0" then return "0"
+  la = 0
+  i = length(a)
+  do while i > 0
+    la = la + 1
+    if i > 9 then al0[la] = substr(a, i - 8, 9) as .int
+    else al0[la] = substr(a, 1, i) as .int
+    i = i - 9
+  end
+  lb = 0
+  i = length(b)
+  do while i > 0
+    lb = lb + 1
+    if i > 9 then bl0[lb] = substr(b, i - 8, 9) as .int
+    else bl0[lb] = substr(b, 1, i) as .int
+    i = i - 9
+  end
+  do k = 1 to la + lb
+    rl[k] = 0
+  end
+  do i = 1 to la
+    c = 0
+    x = al0[i]
+    do j = 1 to lb
+      t = x * bl0[j] + rl[i + j - 1] + c
+      c = t % 1000000000
+      rl[i + j - 1] = t // 1000000000
+    end
+    k = i + lb
+    do while c > 0
+      t = rl[k] + c
+      c = t % 1000000000
+      rl[k] = t // 1000000000
+      k = k + 1
+    end
+  end
+  k = la + lb
+  do while k > 1 & rl[k] = 0
+    k = k - 1
+  end
+  r = rl[k] as .string
+  do i = k - 1 to 1 by -1
+    piece = rl[i] as .string
+    r = r || right(copies("0", 9) || piece, 9)
+  end
+  return mag_clean(r)
+
+/* truncated division of magnitudes: quotient in bq, remainder in brm */
+mag_divmod: procedure = .void
+  arg a = .string, b = .string
+  i = .int
+  r = .string
+  q = .string
+  d = .int
+  qd = .int
+  bn = .int
+  rn = .int
+  chunk = .int
+  cur = .int
+  p = .int
+  l = .int
+  piece = .string
+  if mag_cmp(a, b) < 0 then do
+    bq = "0"
+    brm = a
+    return
+  end
+  if length(b) <= 9 then do
+    bn = b as .int
+    rn = 0
+    q = ""
+    l = length(a)
+    /* first chunk length so the rest are 9 digits */
+    p = l // 9
+    if p = 0 then p = 9
+    cur = 1
+    do while cur <= l
+      chunk = substr(a, cur, p) as .int
+      cur = cur + p
+      rn = rn * (10 ** length(substr(a, cur - p, p))) + chunk
+      qd = rn % bn
+      rn = rn // bn
+      piece = right(copies("0", 9) || qd, 9)
+      q = q || piece
+      p = 9
+    end
+    bq = mag_clean(q)
+    brm = rn as .string
+    return
+  end
+  r = "0"
+  q = ""
+  do i = 1 to length(a)
+    r = mag_clean(r || substr(a, i, 1))
+    qd = 0
+    do while mag_cmp(r, b) >= 0
+      r = mag_sub(r, b)
+      qd = qd + 1
+    end
+    q = q || qd
+  end
+  bq = mag_clean(q)
+  brm = r
+  return
+
+/* signed string helpers: s is "123" or "-123" */
+sgn_split: procedure = .void
+  arg s = .string
+  if left(s, 1) == "-" then do
+    sg = -1
+    mg = substr(s, 2)
+  end
+  else do
+    sg = 1
+    mg = s
+  end
+  return
+
+sgn_make: procedure = .string
+  arg sgv = .int, mgv = .string
+  if mgv == "0" then return "0"
+  if sgv < 0 then return "-" || mgv
+  return mgv
+
+sadd: procedure = .string
+  arg a = .string, b = .string
+  sa = .int
+  sb = .int
+  ma = .string
+  mb = .string
+  c = .int
+  call sgn_split a
+  sa = sg
+  ma = mg
+  call sgn_split b
+  sb = sg
+  mb = mg
+  if sa = sb then return sgn_make(sa, mag_add(ma, mb))
+  c = mag_cmp(ma, mb)
+  if c = 0 then return "0"
+  if c > 0 then return sgn_make(sa, mag_sub(ma, mb))
+  return sgn_make(sb, mag_sub(mb, ma))
+
+sneg: procedure = .string
+  arg a = .string
+  if a == "0" then return "0"
+  if left(a, 1) == "-" then return substr(a, 2)
+  return "-" || a
+
+ssub: procedure = .string
+  arg a = .string, b = .string
+  return sadd(a, sneg(b))
+
+smul: procedure = .string
+  arg a = .string, b = .string
+  sa = .int
+  sb = .int
+  ma = .string
+  mb = .string
+  call sgn_split a
+  sa = sg
+  ma = mg
+  call sgn_split b
+  sb = sg
+  mb = mg
+  return sgn_make(sa * sb, mag_mul(ma, mb))
+
+/* truncated quotient and remainder: results in sq, sr */
+sdivmod: procedure = .void
+  arg a = .string, b = .string
+  sa = .int
+  sb = .int
+  ma = .string
+  mb = .string
+  call sgn_split a
+  sa = sg
+  ma = mg
+  call sgn_split b
+  sb = sg
+  mb = mg
+  call mag_divmod ma, mb
+  sq = sgn_make(sa * sb, bq)
+  sr = sgn_make(sa, brm)
+  return
+
+scmp: procedure = .int
+  arg a = .string, b = .string
+  sa = .int
+  sb = .int
+  ma = .string
+  mb = .string
+  call sgn_split a
+  sa = sg
+  ma = mg
+  call sgn_split b
+  sb = sg
+  mb = mg
+  if ma == "0" then sa = 0
+  if mb == "0" then sb = 0
+  if sa < sb then return -1
+  if sa > sb then return 1
+  if sa = 0 then return 0
+  if sa > 0 then return mag_cmp(ma, mb)
+  return mag_cmp(mb, ma)
+
+
+/* decimal string of an integer oop (small, bool or big) */
+num_str: procedure = .string
+  arg x = .int
+  if x // 2 \= 0 then return ival(x) as .string
+  if ob_k[x % 2] = K_BIG then return ob_s[x % 2]
+  return ival(x) as .string
+
+/* oop for an integer given as a (signed) decimal string */
+big_norm: procedure = .int
+  arg s0 = .string
+  s = .string
+  neg = .int
+  s = s0
+  neg = 0
+  if left(s, 1) == "-" then do
+    neg = 1
+    s = substr(s, 2)
+  end
+  s = mag_clean(s)
+  if length(s) <= 18 then do
+    if neg = 1 then return (0 - (s as .int)) * 2 + 1
+    return (s as .int) * 2 + 1
+  end
+  if neg = 1 then s = "-" || s
+  return mkbig(s)
+
+/* integer power of a decimal string (exponent >= 0) */
+big_pow: procedure = .string
+  arg b = .string, e = .int
+  r = .string
+  p = .string
+  r = "1"
+  p = b
+  do while e > 0
+    if e // 2 = 1 then r = smul(r, p)
+    e = e % 2
+    if e > 0 then p = smul(p, p)
+  end
+  return r
+
+/* integer string of a float's truncation (|f| large) */
+float_to_istr: procedure = .string
+  arg f = .float
+  neg = .int
+  x = .float
+  neg = 0
+  x = f
+  if x < 0.0 then do
+    neg = 1
+    x = 0.0 - x
+  end
+  call float_exact x
+  if fx_q >= 0 then fx_d = fx_d || copies("0", fx_q)
+  else do
+    if length(fx_d) + fx_q <= 0 then fx_d = "0"
+    else fx_d = left(fx_d, length(fx_d) + fx_q)
+  end
+  if neg = 1 & fx_d \== "0" then return "-" || fx_d
+  return fx_d
+
+/* oop for the truncation of a float (0 if nan or inf) */
+float_to_int: procedure = .int
+  arg f = .float
+  if f \= f then return 0
+  if finf(f) \= 0 then return 0
+  if f > -900000000000000000.0 & f < 900000000000000000.0 then return (rxfloat..trunc(f) as .int) * 2 + 1
+  return big_norm(float_to_istr(f))
+
+/* 0 finite or nan, 1 +inf, 2 -inf */
+finf: procedure = .int
+  arg f = .float
+  d = .float
+  if f \= f then return 0
+  d = f - f
+  if d = 0.0 then return 0
+  if f > 0.0 then return 1
+  return 2
+
+f_inf: procedure = .float
+  z = .float
+  z = 1.0e308
+  z = z * 10.0
+  return z
+
+f_nan: procedure = .float
+  z = .float
+  z = f_inf()
+  return z - z
+
+/* exact decimal expansion of the finite non-negative float x:  x = fx_d * 10 ** fx_q
+   (fx_d has no leading or trailing zeros; x = 0 gives "0") */
+float_exact: procedure = .void
+  arg f = .float
+  x = .float
+  e = .int
+  m = .int
+  k = .int
+  z = .int
+  x = f
+  if x = 0.0 then do
+    fx_d = "0"
+    fx_q = 0
+    return
+  end
+  e = 0
+  do while x >= 38685626227668133590597632.0
+    x = x / 4294967296.0
+    e = e + 32
+  end
+  do while x >= 9007199254740992.0
+    x = x / 2.0
+    e = e + 1
+  end
+  do while x < 4503599627370496.0
+    if x < 1048576.0 then do
+      x = x * 4294967296.0
+      e = e - 32
+    end
+    else do
+      x = x * 2.0
+      e = e - 1
+    end
+  end
+  m = rxfloat..trunc(x) as .int
+  if e >= 0 then do
+    fx_d = smul(m as .string, big_pow("2", e))
+    fx_q = 0
+  end
+  else do
+    fx_d = smul(m as .string, big_pow("5", 0 - e))
+    fx_q = e
+  end
+  /* strip trailing zeros */
+  k = length(fx_d)
+  z = k
+  do while z > 1 & substr(fx_d, z, 1) == "0"
+    z = z - 1
+  end
+  if z < k then do
+    fx_q = fx_q + (k - z)
+    fx_d = left(fx_d, z)
+  end
+  return
+
+/* n significant digits (correctly rounded, half even) of |f|; the decimal exponent of the
+   first digit is left in fx_e */
+float_digits: procedure = .string
+  arg f = .float, n = .int
+  l = .int
+  head = .string
+  rest = .string
+  up = .int
+  first = .string
+  lastd = .int
+  call float_exact f
+  l = length(fx_d)
+  fx_e = l - 1 + fx_q
+  if fx_d == "0" then do
+    fx_e = 0
+    return copies("0", n)
+  end
+  if l <= n then return fx_d || copies("0", n - l)
+  head = left(fx_d, n)
+  rest = substr(fx_d, n + 1)
+  first = left(rest, 1)
+  up = 0
+  if first >>= "6" then up = 1
+  else if first == "5" then do
+    if length(rest) > 1 then up = 1
+    else do
+      lastd = right(head, 1) as .int
+      if lastd // 2 = 1 then up = 1
+    end
+  end
+  if up = 1 then do
+    head = mag_add(head, "1")
+    if length(head) > n then do
+      head = left(head, n)
+      fx_e = fx_e + 1
+    end
+  end
+  return head
+
+/* parse a decimal float literal string; handles overflow / underflow without a panic */
+parse_flt: procedure = .float
+  arg s0 = .string
+  s = .string
+  p = .int
+  ex = .int
+  mant = .string
+  ip = .int
+  y = .float
+  z = .float
+  s = lower(s0)
+  p = pos("e", s)
+  ex = 0
+  mant = s
+  if p > 0 then do
+    mant = left(s, p - 1)
+    s = substr(s, p + 1)
+    if left(s, 1) == "+" then s = substr(s, 2)
+    ex = s as .int
+  end
+  ip = pos(".", mant)
+  if ip = 0 then ip = length(mant) + 1
+  if ex + ip - 1 > 310 then return f_inf()
+  if ex + ip - 1 < -330 then return 0.0
+  if ex >= -290 & ex <= 290 then return (mant || "e" || ex) as .float
+  if ex > 290 then do
+    y = (mant || "e290") as .float
+    z = rxfloat..pow10((ex - 290) as .float)
+    return y * z
+  end
+  y = (mant || "e-290") as .float
+  z = rxfloat..pow10((ex + 290) as .float)
+  return y * z
+
+/* shortest repr that round-trips (as Python's repr) */
+float_repr: procedure = .string
+  arg f = .float
+  x = .float
+  neg = .int
+  n = .int
+  d = .string
+  dexp = .int
+  ds = .string
+  y = .float
+  ok = .int
+  l = .int
+  mant = .string
+  es = .string
+  if f \= f then return "nan"
+  if finf(f) = 1 then return "inf"
+  if finf(f) = 2 then return "-inf"
+  if f = 0.0 then do
+    if fl_negzero(f) = 1 then return "-0.0"
+    return "0.0"
+  end
+  x = f
+  neg = 0
+  if x < 0.0 then do
+    neg = 1
+    x = 0.0 - x
+  end
+  ok = 0
+  do n = 15 to 17
+    d = float_digits(x, n)
+    dexp = fx_e
+    if n = 17 | dexp < -300 then ok = 1
+    else do
+      y = (left(d, 1) || "." || substr(d, 2) || "e" || dexp) as .float
+      if y = x then ok = 1
+    end
+    if ok = 1 then leave
+  end
+  /* strip trailing zeros */
+  l = length(d)
+  do while l > 1 & substr(d, l, 1) == "0"
+    l = l - 1
+  end
+  ds = left(d, l)
+  if dexp >= -4 & dexp < 16 then do
+    if dexp >= 0 then do
+      if length(ds) <= dexp + 1 then mant = ds || copies("0", dexp + 1 - length(ds)) || ".0"
+      else mant = left(ds, dexp + 1) || "." || substr(ds, dexp + 2)
+    end
+    else mant = "0." || copies("0", 0 - dexp - 1) || ds
+  end
+  else do
+    mant = left(ds, 1)
+    if length(ds) > 1 then mant = mant || "." || substr(ds, 2)
+    if dexp < 0 then es = "-"
+    else es = "+"
+    d = abs(dexp) as .string
+    if length(d) < 2 then d = "0" || d
+    mant = mant || "e" || es || d
+  end
+  if neg = 1 then return "-" || mant
+  return mant
+
+fl_negzero: procedure = .int
+  arg f = .float
+  s = .string
+  s = f as .string
+  if left(s, 1) == "-" then return 1
+  return 0
+
+/* fixed notation with nd decimals (C printf %.{nd}f) */
+float_fixed: procedure = .string
+  arg f = .float, nd = .int
+  x = .float
+  neg = .int
+  d = .string
+  q = .int
+  r = .string
+  cut = .int
+  head = .string
+  rest = .string
+  up = .int
+  first = .string
+  lastd = .int
+  ip = .string
+  fp = .string
+  if f \= f then return "nan"
+  if finf(f) = 1 then return "inf"
+  if finf(f) = 2 then return "-inf"
+  x = f
+  neg = 0
+  if x < 0.0 then do
+    neg = 1
+    x = 0.0 - x
+  end
+  else if x = 0.0 then do
+    if fl_negzero(f) = 1 then neg = 1
+  end
+  call float_exact x
+  d = fx_d
+  q = fx_q + nd
+  if d == "0" then r = "0"
+  else if q >= 0 then r = d || copies("0", q)
+  else do
+    cut = 0 - q
+    if cut > length(d) then r = "0"
+    else do
+      head = left(d, length(d) - cut)
+      rest = right(d, cut)
+      if head == "" then head = "0"
+      first = left(rest, 1)
+      up = 0
+      if first >>= "6" then up = 1
+      else if first == "5" then do
+        if length(rest) > 1 then up = 1
+        else do
+          lastd = right(head, 1) as .int
+          if lastd // 2 = 1 then up = 1
+        end
+      end
+      if up = 1 then head = mag_add(head, "1")
+      r = head
+    end
+  end
+  r = mag_clean(r)
+  if nd > 0 then do
+    if length(r) <= nd then r = copies("0", nd - length(r) + 1) || r
+    ip = left(r, length(r) - nd)
+    fp = right(r, nd)
+    r = ip || "." || fp
+  end
+  if neg = 1 then return "-" || r
+  return r
+
+/* scientific notation with nd digits after the point: d.ddde+XX */
+float_sci: procedure = .string
+  arg f = .float, nd = .int, upper = .int
+  x = .float
+  neg = .int
+  d = .string
+  es = .string
+  ee = .string
+  if f \= f then return "nan"
+  if finf(f) = 1 then return "inf"
+  if finf(f) = 2 then return "-inf"
+  x = f
+  neg = 0
+  if x < 0.0 then do
+    neg = 1
+    x = 0.0 - x
+  end
+  d = float_digits(x, nd + 1)
+  if x = 0.0 then fx_e = 0
+  if nd > 0 then d = left(d, 1) || "." || substr(d, 2)
+  if fx_e < 0 then es = "-"
+  else es = "+"
+  ee = abs(fx_e) as .string
+  if length(ee) < 2 then ee = "0" || ee
+  if upper = 1 then d = d || "E" || es || ee
+  else d = d || "e" || es || ee
+  if neg = 1 then return "-" || d
+  return d
