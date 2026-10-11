@@ -60,3 +60,18 @@ sin cos log where concatenate vstack hstack sort unique dot matmul transpose dia
 clip any all allclose array_equal median std var round pi e`. `print(array)` uses numpy's layout for int and
 bool arrays (space separated, right-aligned to the widest element, nested brackets, one row per line for 2-d);
 float arrays print like numpy where feasible. Scalars returned by reductions are plain Python int/float/bool.
+
+## Stage 2: stdlib, pandas, scipy (tests 12-14)
+* `12_stdlib.py`: `json re datetime collections itertools functools statistics string copy operator textwrap`
+  (re: a backtracking regex engine - groups, named groups, classes, `\d\w\s\b`, quantifiers incl. lazy, anchors,
+  alternation, `match search fullmatch findall sub split compile finditer`), more format-spec cases.
+* `13_pandas.py`: `pandas` subset on top of the numpy subset: `Series`, `DataFrame` (dict of columns / list of
+  records), indexing (`[]`, `.loc`, `.iloc`, boolean masks, attribute access), arithmetic, `head tail sort_values
+  groupby(agg mean sum max min count size) merge concat drop rename apply map isna fillna dropna describe
+  value_counts unique set_index pivot_table iterrows to_dict to_csv read_csv(StringIO/path) T values shape`, and
+  pandas' `print` layout for Series/DataFrame (right-aligned columns, index column, `Name:/dtype:` footer, NaN).
+* `14_scipy.py`: `scipy.stats` (norm/t/chi2 cdf pdf ppf, pearsonr spearmanr ttest_ind zscore sem mode),
+  `optimize` (minimize (Nelder-Mead/BFGS), minimize_scalar, brentq, fsolve, curve_fit), `integrate` (quad, trapezoid,
+  simpson, solve_ivp RK45), `interpolate.interp1d`, `linalg` (inv det solve norm), `numpy.linalg`
+  (inv det solve eigvalsh matrix_rank norm), `special` (gamma erf comb factorial beta), `spatial.distance`,
+  `numpy.random` (default_rng, seed, rand, randn, randint, choice, permutation, normal - values need not match numpy).
