@@ -1,0 +1,23 @@
+fin
+zde division by zero
+fin
+0.5 None
+ValueError invalid literal for int() with base 10: 'abc'
+IndexError list index out of range
+KeyError 'k'
+NameError name 'undefined_name' is not defined
+TypeError
+MyErr code 42 42 ('code 42',)
+outer
+f 0
+f 1
+f 2
+f 3
+3
+Exception('plain') plain
+else ran
+AE assertion msg
+cleanup
+caught outer
+stop
+True True

@@ -1,0 +1,10 @@
+Rex says woof! Generic says ... 2 Animal(Rex) <A Rex> [<A Rex>, <A Generic>]
+['sit', 'roll'] True False True
+Dog Dog True False Rex 9
+3
+Vec(4, 6) Vec(8, 12) Vec(-4, -6) Vec(3, 5) True True 2 6 False [Vec(1, 5), Vec(2, 1)]
+[1, 2] True 2 q
+base M Leaf Mid
+enter
+5
+exit
