@@ -4,7 +4,7 @@
 enum {
     N_CONST = 1, N_NAME, N_ATTR, N_SUBSCR, N_SLICE, N_CALL, N_BINOP, N_UNARY, N_AND, N_OR,
     N_NOT, N_CMP, N_IFEXP, N_LIST, N_TUPLE, N_DICT, N_SET, N_LAMBDA, N_COMP, N_FSTR, N_FPART,
-    N_STAR, N_DSTAR, N_KW,
+    N_STAR, N_DSTAR, N_KW, N_WALRUS,
     S_EXPR, S_ASSIGN, S_AUG, S_IF, S_WHILE, S_FOR, S_BREAK, S_CONTINUE, S_RETURN, S_PASS,
     S_DEF, S_CLASS, S_TRY, S_EXCEPT, S_RAISE, S_ASSERT, S_DEL, S_IMPORT, S_FROM, S_WITH,
     S_BLOCK, S_YIELD, S_YIELDFROM, S_LISTAPP, S_SETADD, S_DICTSET, S_NOP
@@ -12,6 +12,7 @@ enum {
 enum { C_LT = 1, C_LE, C_GT, C_GE, C_EQ, C_NE, C_IN, C_NOTIN, C_IS, C_ISNOT };
 
 static int pp;
+static Str *cur_gpfx;    /* global name prefix of the module being compiled */
 static Scope *cur_scope;
 static Scope *mod_scope;
 
@@ -367,6 +368,24 @@ static Node *parse_test(void)
     Node *e;
     if (atkw(KW_LAMBDA)) return parse_lambda();
     e = parse_or();
+    if (at(TK_WALRUS)) {
+        Node *w = mk(N_WALRUS);
+        Scope *cs = cur_scope;
+        if (e->kind != N_NAME) perr("cannot use assignment expressions with expression");
+        pp++;
+        /* inside a comprehension the target binds in the enclosing function/module */
+        while (cs->kind == SC_FUNC && cs->parent && cs->fd &&
+               (cs->fd->name == intern_c("<comp>") || cs->fd->name == intern_c("<genexpr>")))
+            cs = cs->parent;
+        if (cs != cur_scope) {
+            Var *ov = scope_var(cs, e->name);
+            if (cs->kind == SC_MOD) e->var->isglobal = 1;
+            else { ov->defined = 1; e->var->isnonlocal = 1; }
+        } else e->var->defined = 1;
+        w->a = e;
+        w->b = parse_test();
+        return w;
+    }
     if (atkw(KW_IF)) {
         Node *n = mk(N_IFEXP);
         pp++;
@@ -837,9 +856,17 @@ static Node *parse_atom(void)
         }
         if (!anyf) {
             Buf b;
+            int isb = TOK.op;
             buf_init(&b);
             while (pp < i) { buf_addn(&b, TOK.s->s, TOK.s->len); pp++; }
-            n = mk_const(perm_str(b.s, b.n), line);
+            if (isb) {
+                int sp = gc_perm;
+                Value bv;
+                gc_perm = 1;
+                bv = mkbytes(b.s, b.n);
+                gc_perm = sp;
+                n = mk_const(bv, line);
+            } else n = mk_const(perm_str(b.s, b.n), line);
             buf_free(&b);
             return n;
         } else {
@@ -864,7 +891,7 @@ static Node *parse_atom(void)
         if (TOK.kw == KW_FALSE) { pp++; return mk_const(FALSE_V, line); }
         if (TOK.kw == KW_LAMBDA) return parse_lambda();
     }
-    if (t == TK_ELLIPSIS) { pp++; return mk_const(NONE_V, line); }
+    if (t == TK_ELLIPSIS) { pp++; return mk_const(Ellipsis_V, line); }
     if (t == '(') {
         pp++;
         if (at(')')) { pp++; return node_new(N_TUPLE, line); }
@@ -1111,6 +1138,7 @@ static Node *parse_import(void)
     int line = TOK.line;
     if (atkw(KW_IMPORT)) {
         Node *n = node_new(S_IMPORT, line);
+        n->pfx = cur_gpfx;
         pp++;
         do {
             Node *it = mk(N_NAME);
@@ -1146,11 +1174,18 @@ static Node *parse_import(void)
         int paren;
         pp++;
         buf_init(&b);
-        while (at('.')) pp++;
-        if (!at(TK_NAME)) perr("expected module name");
-        buf_add(&b, TOK.s->s); pp++;
-        while (at('.')) { pp++; buf_addc(&b, '.'); buf_add(&b, TOK.s->s); pp++; }
-        n->name = intern(b.s, b.n);
+        n->pfx = cur_gpfx;
+        while (at('.') || at(TK_ELLIPSIS)) { n->level += at('.') ? 1 : 3; pp++; }
+        if (at(TK_NAME)) {
+            buf_add(&b, TOK.s->s); pp++;
+            while (at('.')) {
+                pp++;
+                buf_addc(&b, '.');
+                if (!at(TK_NAME)) perr("expected name");
+                buf_add(&b, TOK.s->s); pp++;
+            }
+            n->name = intern(b.s, b.n);
+        } else if (n->level == 0) perr("expected module name");
         buf_free(&b);
         expect_kw(KW_IMPORT, "import");
         if (at('*')) { pp++; n->op = 1; return n; }
@@ -1171,6 +1206,23 @@ static Node *parse_import(void)
         if (paren) expect(')', ")");
         return n;
     }
+}
+
+static Node *parse_yield_stmt(int line)
+{
+    Node *n;
+    pp++;
+    check_yield_scope();
+    if (accept_kw(KW_FROM)) {
+        n = node_new(S_YIELDFROM, line);
+        n->a = parse_test();
+    } else {
+        n = node_new(S_YIELD, line);
+        if (!at(TK_NEWLINE) && !at(';') && !at(TK_EOF) && !at(TK_DEDENT) && !at(')'))
+            n->a = parse_testlist(1);
+    }
+    n->sidx = cur_scope->nstate++;
+    return n;
 }
 
 static Node *parse_simple(void)
@@ -1226,18 +1278,7 @@ static Node *parse_simple(void)
         case KW_IMPORT: case KW_FROM:
             return parse_import();
         case KW_YIELD:
-            pp++;
-            check_yield_scope();
-            if (accept_kw(KW_FROM)) {
-                n = node_new(S_YIELDFROM, line);
-                n->a = parse_test();
-            } else {
-                n = node_new(S_YIELD, line);
-                if (!at(TK_NEWLINE) && !at(';') && !at(TK_EOF) && !at(TK_DEDENT))
-                    n->a = parse_testlist(1);
-            }
-            n->sidx = cur_scope->nstate++;
-            return n;
+            return parse_yield_stmt(line);
         default: break;
         }
     }
@@ -1250,7 +1291,14 @@ static Node *parse_simple(void)
             while (accept('=')) {
                 to_target(val, line);
                 node_add(as, val);
-                if (atkw(KW_YIELD)) perr("yield in assignment is not supported");
+                if (atkw(KW_YIELD)) {
+                    Node *y;
+                    if (as->n != 1) perr("yield in chained assignment is not supported");
+                    y = parse_yield_stmt(line);
+                    if (y->kind != S_YIELD) perr("'yield from' in assignment is not supported");
+                    y->b = as->list[0];
+                    return y;
+                }
                 val = parse_testlist(1);
             }
             as->a = val;

@@ -14,4 +14,4 @@ if [ ! -f "$DIR/py.rxbin" ] || [ "$DIR/py.crexx" -nt "$DIR/py.rxbin" ]; then
     exit 2
   }
 fi
-exec "$CREXX" "$DIR/py.crexx" -nocompile -args "$@"
+exec "$CREXX" "$DIR/py.crexx" -nocompile -args --pypath="$DIR/pylib:$DIR/../pylib" "$@"

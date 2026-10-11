@@ -1,24 +1,6 @@
 /* =========================================================================
    p8_main.c   command line, REPL, main
    ========================================================================= */
-static char *read_whole(const char *path, long *len)
-{
-    FILE *fp = fopen(path, "rb");
-    char *buf;
-    long n = 0, cap = 4096;
-    int c;
-    if (!fp) return NULL;
-    buf = (char *)xmalloc((size_t)cap);
-    while ((c = getc(fp)) != EOF) {
-        if (n + 2 >= cap) { cap *= 2; buf = (char *)xrealloc(buf, (size_t)cap); }
-        buf[n++] = (char)c;
-    }
-    buf[n] = 0;
-    fclose(fp);
-    *len = n;
-    return buf;
-}
-
 static int line_opens_block(const char *s, long n)
 {
     long i = 0, e = n;
@@ -130,6 +112,7 @@ int main(int argc, char **argv)
         sargv = dummy;
         sargc = 1;
     }
+    exe_path = argv[0];
     init_runtime(sargc, sargv);
     if (code) {
         script_name = "<string>";

@@ -45,7 +45,7 @@ enum {
     T_UNSET = 0, T_NONE, T_BOOL, T_INT, T_FLOAT,
     T_STR, T_BIG, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_FUNC, T_BUILTIN,
     T_CLASS, T_INST, T_BOUND, T_GEN, T_ITER, T_CELL, T_MODULE, T_PROP,
-    T_SMETH, T_CMETH, T_SUPER, T_FILE, T_ND, T_SLICE, T_NTYPES
+    T_SMETH, T_CMETH, T_SUPER, T_FILE, T_ND, T_SLICE, T_DVIEW, T_BYTES, T_NTYPES
 };
 #define IS_HEAP(t) ((t) >= T_STR)
 
@@ -115,12 +115,19 @@ typedef struct Class {
     AMap ns;
     BFn ctor;
     int flags;
+    struct Class **mro;  /* method resolution order (user classes), NULL = follow base */
+    int nmro;
+    struct Class **bases; /* all direct bases (user classes) */
+    int nbases;
+    struct Class *paycls; /* native base type (list dict set tuple str) holding the payload */
+    Str *modname;        /* defining module, NULL for builtins */
 } Class;
 #define CF_EXC 1
 #define CF_PROPS 2
 #define CF_BUILTIN 4
+#define CF_SETATTR 8
 
-typedef struct Inst { Hdr h; Class *cls; AMap a; } Inst;
+typedef struct Inst { Hdr h; Class *cls; AMap a; Value pay; } Inst;
 
 typedef struct Cell { Hdr h; Value v; } Cell;
 
@@ -133,11 +140,18 @@ typedef struct Func {
     Value *kwdefs;
     Class *defclass;
     Str *name;
+    AMap attrs;          /* function attributes (f.x = 1) */
 } Func;
 
-typedef struct Builtin { Hdr h; BFn fn; const char *name; Str *sname; } Builtin;
+typedef struct Builtin { Hdr h; BFn fn; const char *name; Str *sname; int selfpay; } Builtin;
 typedef struct Bound { Hdr h; Value self; Value fn; } Bound;
-typedef struct Module { Hdr h; Str *name; AMap ns; } Module;
+typedef struct Module {
+    Hdr h;
+    Str *name;
+    AMap ns;
+    Str *gp;             /* global name prefix ("pkg.mod.") for modules written in Python */
+    struct Dict *gmap;   /* attribute name -> global slot cache */
+} Module;
 typedef struct Range { Hdr h; long start, stop, step; } Range;
 #define ND_MAXD 8
 enum { ND_BOOL = 0, ND_INT = 1, ND_FLOAT = 2 };
@@ -150,7 +164,8 @@ typedef struct Nd {
     double *dv;          /* float data */
 } Nd;
 #define AS_ND(v) ((Nd *)(v).u.o)
-typedef struct Prop { Hdr h; Value get, set; } Prop;
+typedef struct Prop { Hdr h; Value get, set, del; } Prop;
+typedef struct DView { Hdr h; Value d; int what; } DView;   /* what: 0 keys 1 values 2 items */
 typedef struct Super { Hdr h; Class *start; Value obj; } Super;
 typedef struct File { Hdr h; FILE *fp; int closed; int out; } File;
 
@@ -164,11 +179,15 @@ typedef struct Gen {
     Value *state;
     int nstate;
     Value yielded;
+    Value sent;          /* value passed in by send() */
+    Value thrown;        /* exception to raise at the yield point (throw()) */
+    Value ret;           /* return value (StopIteration.value) */
     int started, done, running;
 } Gen;
 
 enum { IK_LIST, IK_TUPLE, IK_STR, IK_RANGE, IK_DICT, IK_DVALS, IK_DITEMS, IK_SET,
-       IK_ENUM, IK_ZIP, IK_MAP, IK_FILTER, IK_REV, IK_FILE, IK_CALL, IK_LISTREV, IK_ND };
+       IK_ENUM, IK_ZIP, IK_MAP, IK_FILTER, IK_REV, IK_FILE, IK_CALL, IK_LISTREV, IK_ND, IK_BYTES,
+       IK_CALLSENT };
 typedef struct Iter {
     Hdr h;
     int kind;
@@ -182,6 +201,7 @@ typedef struct Var {
     int kind;
     int slot;
     unsigned char defined, isglobal, isnonlocal, isparam;
+    int bslot;           /* builtin fallback slot for globals of modules, -1 = none */
     struct Var *src;     /* free variable: variable in the parent scope */
     struct Var *fb;      /* class namespace variable: fallback */
 } Var;
@@ -215,6 +235,8 @@ typedef struct Node {
     Class *ccls;         /* attribute inline cache */
     int cepoch;
     Value cval;
+    int level;           /* relative import level */
+    Str *pfx;            /* import statements: global prefix of the importing module */
 } Node;
 
 typedef struct FuncDef {
@@ -233,6 +255,7 @@ typedef struct FuncDef {
     Var **fv;
     int *cellslots; int ncells;
     int line;
+    Str *gpfx;           /* global name prefix of the module this was compiled in */
 } FuncDef;
 
 /* ---- interpreter state ------------------------------------------------ */
@@ -244,6 +267,7 @@ typedef struct Frame {
     Gen *gen;
     Class *ns;           /* class body being executed */
     int resuming;
+    Str *gp;             /* global prefix of the module this frame runs in */
     struct Frame *up;
 } Frame;
 
@@ -255,7 +279,9 @@ typedef struct Handler {
     Frame *frame;
 } Handler;
 
-static Value NONE_V, TRUE_V, FALSE_V, UNSET_V;
+static Value NONE_V, TRUE_V, FALSE_V, UNSET_V, NotImpl_V, Ellipsis_V;
+static Value object_init_v, obj_str_v;
+#define IS_NOTIMPL(v) ((v).t == T_INST && (v).u.o == NotImpl_V.u.o)
 static Value *vstack, *vsp, *vlimit;
 static Handler *cur_handler;
 static Frame *cur_frame;
@@ -285,13 +311,13 @@ static long nglobals, gcap;
 static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, *cls_list,
     *cls_tuple, *cls_dict, *cls_set, *cls_range, *cls_none, *cls_func, *cls_builtin,
     *cls_method, *cls_gen, *cls_module, *cls_iter, *cls_prop, *cls_file, *cls_cell,
-    *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice;
+    *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice, *cls_dview[3], *cls_notimpl, *cls_bytes;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError, *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError, *cls_KeyError, *cls_ValueError,
     *cls_TypeError, *cls_NameError, *cls_UnboundLocalError, *cls_AttributeError,
     *cls_RuntimeError, *cls_RecursionError, *cls_NotImplementedError, *cls_StopIteration,
     *cls_AssertionError, *cls_SystemExit, *cls_ImportError, *cls_OSError, *cls_EOFError,
-    *cls_SyntaxError, *cls_KeyboardInterrupt, *cls_GeneratorExit;
+    *cls_SyntaxError, *cls_KeyboardInterrupt, *cls_GeneratorExit, *cls_FileNotFoundError;
 
 /* interned names used by the runtime */
 static Str *S_init, *S_str, *S_repr, *S_eq, *S_ne, *S_lt, *S_le, *S_gt, *S_ge, *S_add, *S_sub,
@@ -299,7 +325,8 @@ static Str *S_init, *S_str, *S_repr, *S_eq, *S_ne, *S_lt, *S_le, *S_gt, *S_ge, *
     *S_call, *S_bool, *S_hash, *S_enter, *S_exit, *S_name, *S_class, *S_args, *S_truediv,
     *S_floordiv, *S_mod, *S_pow, *S_radd, *S_rsub, *S_rmul, *S_abs, *S_int, *S_float,
     *S_index, *S_pos, *S_invert, *S_and, *S_or, *S_xor, *S_lshift, *S_rshift, *S_dict,
-    *S_mro, *S_doc, *S_setter, *S_main, *S_getattr, *S_format, *S_self, *S_super;
+    *S_mro, *S_doc, *S_setter, *S_main, *S_getattr, *S_format, *S_self, *S_super, *S_setattr,
+    *S_new, *S_module, *S_reversed;
 
 static unsigned char ch_digit[256], ch_alpha[256], ch_alnum[256], ch_space[256],
     ch_upper[256], ch_lower[256], ch_hex[256];
@@ -437,6 +464,15 @@ static Str *str_new(const char *s, long n)
 static Value mkstr(const char *s, long n)
 {
     return mkobj(str_new(s, n), T_STR);
+}
+static Value mkbytes(const char *s, long n)
+{
+    Str *r = (Str *)gc_alloc(sizeof(Str) + (size_t)n, T_BYTES);
+    r->len = n;
+    r->hash = 0;
+    if (n > 0) memcpy(r->s, s, (size_t)n);
+    r->s[n] = 0;
+    return mkobj(r, T_BYTES);
 }
 static Value mkcstr(const char *s)
 {
@@ -769,7 +805,7 @@ static void gc_mark_amap(AMap *m)
 static long gc_obj_size(Hdr *h)
 {
     switch (h->type) {
-    case T_STR: return (long)sizeof(Str) + ((Str *)h)->len;
+    case T_STR: case T_BYTES: return (long)sizeof(Str) + ((Str *)h)->len;
     case T_BIG: return (long)sizeof(Big) + 2L * ((Big *)h)->n;
     case T_LIST: case T_TUPLE: case T_SLICE:
         return (long)sizeof(List) + (long)sizeof(Value) * ((List *)h)->cap;
@@ -799,11 +835,15 @@ static void gc_scan(Hdr *h)
         break; }
     case T_CLASS: {
         Class *c = (Class *)h;
+        int k;
         gc_pushp(c->name, T_STR); gc_pushp(c->base, T_CLASS); gc_mark_amap(&c->ns);
+        for (k = 0; k < c->nmro; k++) gc_pushp(c->mro[k], T_CLASS);
+        for (k = 0; k < c->nbases; k++) gc_pushp(c->bases[k], T_CLASS);
+        gc_pushp(c->paycls, T_CLASS); gc_pushp(c->modname, T_STR);
         break; }
     case T_INST: {
         Inst *n = (Inst *)h;
-        gc_pushp(n->cls, T_CLASS); gc_mark_amap(&n->a);
+        gc_pushp(n->cls, T_CLASS); gc_mark_amap(&n->a); gc_push(n->pay);
         break; }
     case T_FUNC: {
         Func *f = (Func *)h;
@@ -812,15 +852,19 @@ static void gc_scan(Hdr *h)
         for (k = 0; k < f->ndefs; k++) gc_push(f->defs[k]);
         for (k = 0; f->kwdefs && k < f->def->fd->nkwonly; k++) gc_push(f->kwdefs[k]);
         gc_pushp(f->defclass, T_CLASS); gc_pushp(f->name, T_STR);
+        gc_mark_amap(&f->attrs);
         break; }
     case T_BOUND: {
         Bound *b = (Bound *)h;
         gc_push(b->self); gc_push(b->fn);
         break; }
     case T_CELL: gc_push(((Cell *)h)->v); break;
-    case T_MODULE: gc_pushp(((Module *)h)->name, T_STR); gc_mark_amap(&((Module *)h)->ns); break;
+    case T_MODULE:
+        gc_pushp(((Module *)h)->name, T_STR); gc_mark_amap(&((Module *)h)->ns);
+        gc_pushp(((Module *)h)->gp, T_STR); gc_pushp(((Module *)h)->gmap, T_DICT);
+        break;
     case T_PROP: case T_SMETH: case T_CMETH:
-        gc_push(((Prop *)h)->get); gc_push(((Prop *)h)->set);
+        gc_push(((Prop *)h)->get); gc_push(((Prop *)h)->set); gc_push(((Prop *)h)->del);
         break;
     case T_SUPER: gc_pushp(((Super *)h)->start, T_CLASS); gc_push(((Super *)h)->obj); break;
     case T_GEN: {
@@ -829,7 +873,7 @@ static void gc_scan(Hdr *h)
         for (k = 0; k < g->nloc; k++) gc_push(g->loc[k]);
         for (k = 0; k < g->nstate; k++) gc_push(g->state[k]);
         for (k = 0; g->cells && k < g->def->fd->nfree; k++) gc_pushp(g->cells[k], T_CELL);
-        gc_push(g->yielded);
+        gc_push(g->yielded); gc_push(g->sent); gc_push(g->thrown); gc_push(g->ret);
         gc_pushp(g->fn, T_FUNC);
         break; }
     case T_ITER: {
@@ -837,6 +881,7 @@ static void gc_scan(Hdr *h)
         gc_push(t->a); gc_push(t->b); gc_push(t->c);
         break; }
     case T_BUILTIN: gc_pushp(((Builtin *)h)->sname, T_STR); break;
+    case T_DVIEW: gc_push(((DView *)h)->d); break;
     default: break;
     }
 }
@@ -846,9 +891,11 @@ static void gc_free_obj(Hdr *h)
     case T_LIST: case T_TUPLE: case T_SLICE: free(((List *)h)->a); break;
     case T_ND: free(((Nd *)h)->iv); free(((Nd *)h)->dv); break;
     case T_DICT: case T_SET: free(((Dict *)h)->e); free(((Dict *)h)->idx); break;
-    case T_CLASS: free(((Class *)h)->ns.k); free(((Class *)h)->ns.v); break;
+    case T_CLASS: free(((Class *)h)->ns.k); free(((Class *)h)->ns.v);
+        free(((Class *)h)->mro); free(((Class *)h)->bases); break;
     case T_INST: free(((Inst *)h)->a.k); free(((Inst *)h)->a.v); break;
     case T_FUNC: free(((Func *)h)->cells); free(((Func *)h)->defs); free(((Func *)h)->kwdefs);
+        free(((Func *)h)->attrs.k); free(((Func *)h)->attrs.v);
         break;
     case T_MODULE: free(((Module *)h)->ns.k); free(((Module *)h)->ns.v); break;
     case T_GEN: free(((Gen *)h)->loc); free(((Gen *)h)->state); free(((Gen *)h)->cells); break;

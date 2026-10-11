@@ -163,26 +163,160 @@ define_class: procedure = .int
   arg name = .string, base = .int
   c = .int
   o = .int
+  i = .int
   ncls = ncls + 1
   c = ncls
   cl_name[c] = name
   cl_base[c] = base
   cl_ns[c] = 0
   cl_flags[c] = 0
+  cl_mod[c] = cur_mi
+  cl_bt[c] = 0
   o = newobj(K_CLASS)
   ob_x[o % 2] = c
   cl_obj[c] = o
   if base > 0 then cl_flags[c] = cl_flags[base]
+  /* linearisation: the class followed by the linearisation of its base */
+  cl_ms[c] = nmro + 1
+  nmro = nmro + 1
+  mro_a[nmro] = c
+  cl_mn[c] = 1
+  cl_bs[c] = nbs + 1
+  cl_bn[c] = 0
+  if base > 0 then do
+    do i = 0 to cl_mn[base] - 1
+      nmro = nmro + 1
+      mro_a[nmro] = mro_a[cl_ms[base] + i]
+    end
+    cl_mn[c] = cl_mn[base] + 1
+    nbs = nbs + 1
+    bs_a[nbs] = base
+    cl_bn[c] = 1
+  end
   return c
 
-/* look a name id up through the class chain: oop or 0 */
+/* class c gets the bases bl_a[1 .. n]; C3 linearisation.  returns 1, or 0 with a TypeError */
+set_bases: procedure = .int
+  arg c = .int, n = .int
+  i = .int
+  j = .int
+  k = .int
+  b = .int
+  ns = .int
+  tot = .int
+  cand = .int
+  fin = .int
+  h = .int
+  ok = .int
+  cnt = .int
+  fl = .int
+  names = .string
+  cl_bs[c] = nbs + 1
+  do i = 1 to n
+    nbs = nbs + 1
+    bs_a[nbs] = bl_a[i]
+  end
+  cl_bn[c] = n
+  cl_base[c] = bl_a[1]
+  fl = 0
+  do i = 1 to n
+    if (cl_flags[bl_a[i]] // 4) >= 2 then fl = fl + 2
+    if fl > 2 then fl = 2
+  end
+  cl_flags[c] = fl
+  ns = n + 1
+  tot = 0
+  do i = 1 to n
+    b = bl_a[i]
+    sq_s[i] = tot + 1
+    do j = 0 to cl_mn[b] - 1
+      tot = tot + 1
+      sq_a[tot] = mro_a[cl_ms[b] + j]
+    end
+    sq_e[i] = tot
+    sq_p[i] = sq_s[i]
+  end
+  sq_s[ns] = tot + 1
+  do i = 1 to n
+    tot = tot + 1
+    sq_a[tot] = bl_a[i]
+  end
+  sq_e[ns] = tot
+  sq_p[ns] = sq_s[ns]
+  cl_ms[c] = nmro + 1
+  nmro = nmro + 1
+  mro_a[nmro] = c
+  cnt = 1
+  fin = 0
+  do while fin = 0
+    cand = 0
+    fin = 1
+    do i = 1 to ns
+      if sq_p[i] <= sq_e[i] then do
+        fin = 0
+        if cand = 0 then do
+          h = sq_a[sq_p[i]]
+          ok = 1
+          do k = 1 to ns
+            do j = sq_p[k] + 1 to sq_e[k]
+              if sq_a[j] = h then ok = 0
+            end
+          end
+          if ok = 1 then cand = h
+        end
+      end
+    end
+    if fin = 0 then do
+      if cand = 0 then do
+        names = ""
+        do i = 1 to n
+          if i > 1 then names = names || ", "
+          names = names || cl_name[bl_a[i]]
+        end
+        cl_mn[c] = cnt
+        call raise_exc C_TYPEERROR, "Cannot create a consistent method resolution order (MRO) for bases " || names
+        return 0
+      end
+      nmro = nmro + 1
+      mro_a[nmro] = cand
+      cnt = cnt + 1
+      do i = 1 to ns
+        if sq_p[i] <= sq_e[i] then do
+          if sq_a[sq_p[i]] = cand then sq_p[i] = sq_p[i] + 1
+        end
+      end
+    end
+  end
+  cl_mn[c] = cnt
+  return 1
+
+/* the builtin container type among the bases of user class c (0 if none) */
+set_btype: procedure = .void
+  arg c = .int
+  i = .int
+  k = .int
+  cl_bt[c] = 0
+  do i = 1 to cl_mn[c] - 1
+    k = mro_a[cl_ms[c] + i - 1]
+    if k = C_DICT | k = C_LIST | k = C_TUPLE | k = C_SET | k = C_STR | k = C_INT | k = C_FLOAT then do
+      cl_bt[c] = k
+      return
+    end
+  end
+  return
+
+/* look a name id up through the linearisation: oop or 0 */
 cls_find: procedure = .int
   arg c = .int, nid = .int
   v = .string
-  do while c > 0
-    v = ca[c || "." || nid]
+  i = .int
+  st = .int
+  n = .int
+  st = cl_ms[c]
+  n = cl_mn[c]
+  do i = 0 to n - 1
+    v = ca[mro_a[st + i] || "." || nid]
     if v \== "" then return v as .int
-    c = cl_base[c]
   end
   return 0
 
@@ -190,24 +324,38 @@ cls_find: procedure = .int
 cls_owner: procedure = .int
   arg c = .int, nid = .int
   v = .string
-  do while c > 0
-    v = ca[c || "." || nid]
-    if v \== "" then return c
-    c = cl_base[c]
+  i = .int
+  st = .int
+  n = .int
+  st = cl_ms[c]
+  n = cl_mn[c]
+  do i = 0 to n - 1
+    v = ca[mro_a[st + i] || "." || nid]
+    if v \== "" then return mro_a[st + i]
   end
   return 0
 
 cls_set: procedure = .void
   arg c = .int, nid = .int, v = .int
+  if ca[c || "." || nid] == "" then do
+    nca = nca + 1
+    ca_c[nca] = c
+    ca_n[nca] = nid
+  end
   ca[c || "." || nid] = v as .string
   cgen = cgen + 1
   return
 
 cls_issub: procedure = .int
   arg c = .int, base = .int
-  do while c > 0
-    if c = base then return 1
-    c = cl_base[c]
+  i = .int
+  st = .int
+  n = .int
+  if c = base then return 1
+  st = cl_ms[c]
+  n = cl_mn[c]
+  do i = 0 to n - 1
+    if mro_a[st + i] = base then return 1
   end
   return 0
 
@@ -217,6 +365,10 @@ cls_of: procedure = .int
   if x // 2 \= 0 then return C_INT
   k = ob_k[x % 2]
   if k = K_INST then return ob_c[x % 2]
+  if k >= K_STR & k <= K_SET then do
+    if ob_c[x % 2] > 0 then return ob_c[x % 2]
+  end
+  if k = K_DVIEW then return C_DICT_KEYS + ob_n[x % 2] - 1
   return kcls[k]
 
 kind_of: procedure = .int
@@ -259,6 +411,10 @@ inst_set: procedure = .void
     slot = cl_ns[c]
     sm[c || "." || nid] = slot as .string
     cgen = cgen + 1
+    nis = nis + 1
+    is_c[nis] = c
+    is_n[nis] = nid
+    is_s[nis] = slot
   end
   else slot = v as .int
   if slot > ob_n[ix] then do
@@ -334,6 +490,17 @@ truthy: procedure = .int
   if x = TRUE_OOP then return 1
   if x = FALSE_OOP | x = NONE_OOP then return 0
   k = ob_k[x % 2]
+  if k >= K_STR & k <= K_SET then do
+    if ob_c[x % 2] > 0 then do
+      m = cls_find(ob_c[x % 2], M___BOOL__)
+      if m = 0 then m = cls_find(ob_c[x % 2], M___LEN__)
+      if m > 0 then do
+        r = call0(m, x)
+        if r = 0 then return 0
+        return truthy(r)
+      end
+    end
+  end
   select
     when k = K_STR then do
       if length(ob_s[x % 2]) > 0 then return 1
@@ -360,6 +527,10 @@ truthy: procedure = .int
     end
     when k = K_RANGE then do
       if range_len(x) > 0 then return 1
+      return 0
+    end
+    when k = K_DVIEW then do
+      if dd_n[ob_x[ob_x[x % 2] % 2]] > 0 then return 1
       return 0
     end
     when k = K_INST then do
@@ -390,6 +561,7 @@ dict_new: procedure = .int
   dd_head[ndd] = 0
   dd_tail[ndd] = 0
   dd_n[ndd] = 0
+  dd_own[ndd] = 0
   ob_x[o % 2] = ndd
   return o
 
@@ -403,6 +575,9 @@ dict_find: procedure = .int
 dict_put: procedure = .void
   arg d = .int, key = .string, k = .int, v = .int
   e = .int
+  if dd_own[d] > 0 then do
+    if kind_of(k) = K_STR then call inst_set dd_own[d], nameid(ob_s[k % 2]), v
+  end
   e = dict_find(d, key)
   if e > 0 then do
     de_val[e] = v
@@ -427,6 +602,7 @@ dict_del: procedure = .int
   e = .int
   e = dict_find(d, key)
   if e = 0 then return 0
+  if dd_own[d] > 0 & left(key, 1) == "s" then call inst_del dd_own[d], nameid(substr(key, 2))
   de_live[e] = 0
   dd_n[d] = dd_n[d] - 1
   dmap[d || "|" || key] = ""

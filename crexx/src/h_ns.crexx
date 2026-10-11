@@ -1,0 +1,345 @@
+/* ---------------------------------------------------------------------
+   Namespaces: globals() locals() vars() dir() eval() exec() __import__()
+   --------------------------------------------------------------------- */
+
+/* instance __dict__: a snapshot whose writes are mirrored into the instance */
+inst_dict: procedure = .int
+  arg o = .int
+  d = .int
+  c = .int
+  i = .int
+  v = .int
+  d = dict_new(K_DICT)
+  c = ob_c[o % 2]
+  do i = 1 to nis
+    if is_c[i] = c then do
+      if is_s[i] <= ob_n[o % 2] then do
+        v = sl[ob_p[o % 2] + is_s[i] - 1]
+        if v \= 0 then call dset d, mkstr(nid_name[is_n[i]]), v
+      end
+    end
+  end
+  dd_own[ob_x[d % 2]] = o
+  return d
+
+/* class attributes (own table only) */
+cls_dict: procedure = .int
+  arg c = .int
+  d = .int
+  i = .int
+  v = .string
+  d = dict_new(K_DICT)
+  do i = 1 to nca
+    if ca_c[i] = c then do
+      v = ca[c || "." || ca_n[i]]
+      if v \== "" then call dset d, mkstr(nid_name[ca_n[i]]), v as .int
+    end
+  end
+  return d
+
+/* fill d with the bound names of scope sc in frame fb */
+ns_scope_dict: procedure = .void
+  arg sc = .int, fb = .int, d = .int, skipb = .int
+  j = .int
+  v = .int
+  nm = .string
+  do j = 1 to nbn
+    if bn_sc[j] = sc then do
+      v = vp[fb + bn_slot[j]]
+      if v \= 0 then do
+        nm = bn_name[j]
+        if skipb = 1 then do
+          if builtin_lookup(nm) = v then iterate
+        end
+        call dset d, mkstr(nm), v
+      end
+    end
+  end
+  return
+
+dict_sorted_keys: procedure = .int
+  arg d = .int
+  l = .int
+  e = .int
+  l = mklist(8)
+  e = dd_head[ob_x[d % 2]]
+  do while e > 0
+    if de_live[e] = 1 then call list_append l, de_key[e]
+    e = de_next[e]
+  end
+  if sort_list(l, 0, 0) = 0 then return 0
+  return l
+
+/* N_LOCALS: locals() (mode 1), vars() (2), dir() (3) with no argument */
+ev_locals: procedure = .int
+  arg n = .int, fb = .int
+  d = .int
+  sc = .int
+  sc = n_a[n]
+  d = dict_new(K_DICT)
+  if sc_kind[sc] = SK_MODULE then call ns_scope_dict sc, fb, d, 1
+  else call ns_scope_dict sc, fb, d, 0
+  if n_b[n] = 3 then return dict_sorted_keys(d)
+  return d
+
+bi_globals: procedure = .int
+  return mod_dict(cur_mi)
+
+bi_vars: procedure = .int
+  arg x = .int
+  k = .int
+  k = kind_of(x)
+  if k = K_INST then return inst_dict(x)
+  if k = K_CLASS then return cls_dict(ob_x[x % 2])
+  if k = K_MODULE then do
+    if ob_x[x % 2] > 0 then return mod_dict(ob_x[x % 2])
+  end
+  return raise_exc(C_TYPEERROR, "vars() argument must have __dict__ attribute")
+
+bi_dir: procedure = .int
+  arg x = .int
+  d = .int
+  k = .int
+  c = .int
+  i = .int
+  j = .int
+  v = .string
+  k = kind_of(x)
+  d = dict_new(K_DICT)
+  if k = K_INST | k = K_CLASS then do
+    if k = K_INST then do
+      c = ob_c[x % 2]
+      do i = 1 to nis
+        if is_c[i] = c then do
+          if is_s[i] <= ob_n[x % 2] then do
+            if sl[ob_p[x % 2] + is_s[i] - 1] \= 0 then call dset d, mkstr(nid_name[is_n[i]]), TRUE_OOP
+          end
+        end
+      end
+    end
+    else c = ob_x[x % 2]
+    do j = 0 to cl_mn[c] - 1
+      do i = 1 to nca
+        if ca_c[i] = mro_a[cl_ms[c] + j] then call dset d, mkstr(nid_name[ca_n[i]]), TRUE_OOP
+      end
+    end
+  end
+  else if k = K_MODULE then do
+    if ob_x[x % 2] > 0 then d = mod_dict(ob_x[x % 2])
+  end
+  return dict_sorted_keys(d)
+
+/* copy every entry of dict s into dict d */
+dict_copy_into: procedure = .void
+  arg s = .int, d = .int
+  e = .int
+  e = dd_head[ob_x[s % 2]]
+  do while e > 0
+    if de_live[e] = 1 then call dset d, de_key[e], de_val[e]
+    e = de_next[e]
+  end
+  return
+
+/* run source text src in the namespace dict nsd (mode 0 exec, 1 eval); eval returns the value */
+ns_exec: procedure = .int
+  arg src = .string, mode = .int, nsd = .int
+  mi = .int
+  sc = .int
+  body = .int
+  sz = .int
+  fbm = .int
+  i = .int
+  e = .int
+  s = .string
+  v = .int
+  nm = .string
+  sv_g = .int
+  sv_m = .int
+  res = .int
+  sv_pe = .int
+  if mode = 1 then src = "__eval_result__ = (" || src || '0a'x || ")"
+  mi = new_module("<string>", "<string>", 0, "")
+  parse_dyn_init = 1
+  body = parse_module(src, mi)
+  parse_dyn_init = 0
+  if body = 0 then return raise_exc(C_SYNTAXERROR, pe_msg)
+  sc = mod_sc[mi]
+  sz = sc_n[sc] + 1 + 512
+  mod_fsz[mi] = sz
+  fbm = alloc_frame(sz)
+  mod_fb[mi] = fbm
+  call setg mi, "__name__", mkstr("<string>")
+  call setg mi, "__file__", mkstr("<string>")
+  call setg mi, "__package__", mkstr("")
+  do i = 1 to ndyn
+    if dyn_mi[i] = mi then vp[fbm + dyn_slot[i]] = dyn_val[i]
+  end
+  e = dd_head[ob_x[nsd % 2]]
+  do while e > 0
+    if de_live[e] = 1 & kind_of(de_key[e]) = K_STR then do
+      s = scm[sc || "|" || ob_s[de_key[e] % 2]]
+      if s \== "" then vp[fbm + (s as .int)] = de_val[e]
+    end
+    e = de_next[e]
+  end
+  sv_g = gfb
+  sv_m = cur_mi
+  gfb = fbm
+  cur_mi = mi
+  call ex body, fbm
+  gfb = sv_g
+  cur_mi = sv_m
+  if unw > 0 then return 0
+  res = NONE_OOP
+  if mode = 1 then do
+    s = scm[sc || "|__eval_result__"]
+    res = vp[fbm + (s as .int)]
+    if res = 0 then res = NONE_OOP
+    return res
+  end
+  do i = 1 to nbn
+    if bn_sc[i] = sc then do
+      v = vp[fbm + bn_slot[i]]
+      if v \= 0 then do
+        nm = bn_name[i]
+        if nm \== "__eval_result__" then do
+          e = dict_find(ob_x[nsd % 2], hashkey(mkstr(nm)))
+          if e = 0 then do
+            if left(nm, 2) == "__" & right(nm, 2) == "__" then iterate
+            if builtin_lookup(nm) = v then iterate
+          end
+          call dset nsd, mkstr(nm), v
+        end
+      end
+    end
+  end
+  return NONE_OOP
+
+/* store the entries of dict nsd back into the namespace of the running module */
+ns_writeback: procedure = .void
+  arg nsd = .int
+  e = .int
+  s = .string
+  nm = .string
+  sc = .int
+  sc = mod_sc[cur_mi]
+  e = dd_head[ob_x[nsd % 2]]
+  do while e > 0
+    if de_live[e] = 1 & kind_of(de_key[e]) = K_STR then do
+      nm = ob_s[de_key[e] % 2]
+      s = scm[sc || "|" || nm]
+      if s == "" then s = dyn_alloc(cur_mi, nm)
+      if s \== "" then vp[gfb + (s as .int)] = de_val[e]
+      else modx[cur_mi || "." || nm] = de_val[e] as .string
+    end
+    e = de_next[e]
+  end
+  return
+
+/* eval(src[, globals[, locals[, module_level_flag]]]) and exec(...) */
+bi_evalexec: procedure = .int
+  arg mode = .int, base = .int, na = .int
+  src = .int
+  g = .int
+  l = .int
+  nsd = .int
+  r = .int
+  modlvl = .int
+  if na < 1 then return nargs_err("eval", na, 1, 3)
+  src = ast[base + 1]
+  if kind_of(src) \= K_STR then return raise_exc(C_TYPEERROR, "eval() arg 1 must be a string, bytes or code object")
+  g = NONE_OOP
+  l = NONE_OOP
+  modlvl = 0
+  if na >= 2 then g = ast[base + 2]
+  if na >= 3 then l = ast[base + 3]
+  if na >= 4 then modlvl = ival(ast[base + 4])
+  if g = NONE_OOP then do
+    nsd = mod_dict(cur_mi)
+    if l \= NONE_OOP & kind_of(l) = K_DICT then call dict_copy_into l, nsd
+    r = ns_exec(ob_s[src % 2], mode, nsd)
+    if r = 0 then return 0
+    if mode = 0 & modlvl = 1 then call ns_writeback nsd
+    return r
+  end
+  if kind_of(g) \= K_DICT then return raise_exc(C_TYPEERROR, "globals must be a dict")
+  nsd = g
+  if l \= NONE_OOP & l \= g & kind_of(l) = K_DICT then do
+    nsd = dict_new(K_DICT)
+    call dict_copy_into g, nsd
+    call dict_copy_into l, nsd
+    r = ns_exec(ob_s[src % 2], mode, nsd)
+    if r = 0 then return 0
+    if mode = 0 then call dict_copy_into nsd, l
+    return r
+  end
+  return ns_exec(ob_s[src % 2], mode, nsd)
+
+/* __import__(name, globals, locals, fromlist, level) */
+bi_import: procedure = .int
+  arg base = .int, na = .int
+  nm = .string
+  p = .int
+  m = .int
+  if na < 1 | kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "__import__() argument 'name' must be str")
+  nm = ob_s[ast[base + 1] % 2]
+  m = import_mod(nm)
+  if m = 0 then return 0
+  if na >= 4 then do
+    if truthy(ast[base + 4]) = 1 then return m
+  end
+  p = pos(".", nm)
+  if p > 0 then return import_mod(left(nm, p - 1))
+  return m
+
+/* find / allocate a global slot for a new name of a dynamic module; "" when the frame is full */
+dyn_alloc: procedure = .string
+  arg mi = .int, nm = .string
+  sc = .int
+  slot = .int
+  sc = mod_sc[mi]
+  slot = sc_n[sc]
+  if mod_dyn[mi] = 0 | slot >= mod_fsz[mi] then return ""
+  sc_n[sc] = slot + 1
+  scm[sc || "|" || nm] = slot as .string
+  nbn = nbn + 1
+  bn_sc[nbn] = sc
+  bn_name[nbn] = nm
+  bn_slot[nbn] = slot
+  return slot as .string
+
+/* type(name, bases, dict) */
+type_new: procedure = .int
+  arg nm = .int, bo = .int, d = .int
+  i = .int
+  b = .int
+  c = .int
+  nb = .int
+  e = .int
+  if kind_of(nm) \= K_STR | kind_of(bo) \= K_TUPLE | kind_of(d) \= K_DICT then return raise_exc(C_TYPEERROR, "type() argument types are (str, tuple, dict)")
+  bl_n = 0
+  do i = 0 to ob_n[bo % 2] - 1
+    b = sl[ob_p[bo % 2] + i]
+    if kind_of(b) \= K_CLASS then return raise_exc(C_TYPEERROR, "bases must be types")
+    bl_n = bl_n + 1
+    bl_a[bl_n] = ob_x[b % 2]
+  end
+  if bl_n = 0 then do
+    bl_n = 1
+    bl_a[1] = C_OBJECT
+  end
+  nb = bl_n
+  b = bl_a[1]
+  c = define_class(ob_s[nm % 2], b)
+  if nb > 1 then do
+    if set_bases(c, nb) = 0 then return 0
+  end
+  if (cl_flags[c] // 2) = 1 then cl_flags[c] = cl_flags[c] - 1
+  call set_btype c
+  cl_dflt[c] = cl_dflt[b]
+  e = dd_head[ob_x[d % 2]]
+  do while e > 0
+    if de_live[e] = 1 & kind_of(de_key[e]) = K_STR then call cls_set c, nameid(ob_s[de_key[e] % 2]), de_val[e]
+    e = de_next[e]
+  end
+  return cl_obj[c]

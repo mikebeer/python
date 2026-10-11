@@ -115,6 +115,12 @@ bi_print: procedure = .int
   end
   out = out || endv
   if fo > 0 & fo \= NONE_OOP then do
+    if kind_of(fo) = K_INST then do
+      v = getattr_obj(fo, M_WRITE, 0)
+      if v = 0 then return 0
+      if call1(v, mkstr(out)) = 0 then return 0
+      return NONE_OOP
+    end
     if kind_of(fo) \= K_FILE then return raise_exc(C_ATTRIBUTEERROR, "'" || type_name(fo) || "' object has no attribute 'write'")
     call file_write fo, out
     if unw > 0 then return 0
@@ -131,6 +137,7 @@ bi_len: procedure = .int
     when k = K_STR then return mkint(length(ob_s[x % 2]))
     when k = K_LIST | k = K_TUPLE then return mkint(ob_n[x % 2])
     when k = K_DICT | k = K_SET then return mkint(dd_n[ob_x[x % 2]])
+    when k = K_DVIEW then return mkint(dd_n[ob_x[ob_x[x % 2] % 2]])
     when k = K_RANGE then return mkint(range_len(x))
     when k = K_ARRAY then do
       if ob_x[x % 2] = 0 then return raise_exc(C_TYPEERROR, "len() of unsized object")
@@ -151,6 +158,7 @@ bi_len: procedure = .int
 bi_abs: procedure = .int
   arg x = .int
   s = .string
+  m = .int
   if x // 2 \= 0 then do
     if x < 1 then return mkint(0 - ival(x))
     return x
@@ -165,6 +173,10 @@ bi_abs: procedure = .int
     when ob_k[x % 2] = K_BOOL then return mkint(ival(x))
     when ob_k[x % 2] = K_ARRAY then return np_math1(BI_NUMPY_ABS, x)
     otherwise nop
+  end
+  if kind_of(x) = K_INST then do
+    m = cls_find(ob_c[x % 2], M___ABS__)
+    if m > 0 then return call1(m, x)
   end
   return raise_exc(C_TYPEERROR, "bad operand type for abs(): '" || type_name(x) || "'")
 
@@ -226,6 +238,12 @@ bi_sum: procedure = .int
   it = .int
   v = .int
   st = .int
+  fm = .int
+  fr = .float
+  cc = .float
+  x = .float
+  tt = .float
+  ok = .int
   if na < 1 then return nargs_err("sum", na, 1, 2)
   acc = mkint(0)
   if na >= 2 then acc = ast[base + 2]
@@ -233,8 +251,45 @@ bi_sum: procedure = .int
   if st \= 0 then acc = st
   it = iter_new(ast[base + 1])
   if it = 0 then return 0
+  fm = 0
+  cc = 0.0
+  if acc // 2 = 0 then do
+    if ob_k[acc % 2] = K_FLOAT then do
+      fm = 1
+      fr = ob_f[acc % 2]
+    end
+  end
   do forever
     v = iter_next(it)
+    if fm = 1 then do
+      if v = 0 then do
+        if cc \= 0.0 & cc = cc & finf(cc) = 0 & fr = fr & finf(fr) = 0 then fr = fr + cc
+        acc = mkfloat(fr)
+        leave
+      end
+      if v // 2 \= 0 then do
+        x = ((v - 1) % 2) as .float
+        ok = 1
+      end
+      else if ob_k[v % 2] = K_FLOAT then do
+        x = ob_f[v % 2]
+        ok = 1
+      end
+      else ok = 0
+      if ok = 1 then do
+        if x = x & finf(x) = 0 & fr = fr & finf(fr) = 0 then do
+          tt = fr + x
+          if rxfloat..fabs(fr) >= rxfloat..fabs(x) then cc = cc + ((fr - tt) + x)
+          else cc = cc + ((x - tt) + fr)
+          fr = tt
+        end
+        else fr = fr + x
+        iterate
+      end
+      if cc \= 0.0 & cc = cc & finf(cc) = 0 & fr = fr & finf(fr) = 0 then fr = fr + cc
+      acc = mkfloat(fr)
+      fm = 0
+    end
     if v = 0 then leave
     if acc // 2 \= 0 & v // 2 \= 0 then do
       acc = acc + v - 1
@@ -242,6 +297,13 @@ bi_sum: procedure = .int
     end
     else acc = arith(O_ADD, acc, v)
     if acc = 0 then return 0
+    if acc // 2 = 0 then do
+      if ob_k[acc % 2] = K_FLOAT then do
+        fm = 1
+        fr = ob_f[acc % 2]
+        cc = 0.0
+      end
+    end
   end
   if unw > 0 then return 0
   return acc
@@ -374,6 +436,13 @@ bi_round: procedure = .int
   s = .string
   if na < 1 | na > 2 then return nargs_err("round", na, 1, 2)
   x = ast[base + 1]
+  if kind_of(x) = K_INST then do
+    p = cls_find(ob_c[x % 2], M___ROUND__)
+    if p > 0 then do
+      if na = 1 then return call1(p, x)
+      return call2(p, x, ast[base + 2])
+    end
+  end
   hasnd = 0
   if na = 2 then do
     if ast[base + 2] \= NONE_OOP then do
@@ -625,7 +694,7 @@ bi_next: procedure = .int
     if unw > 0 then return 0
     if na = 2 then return ast[base + 2]
     unw = U_RAISE
-    unw_v = exc_new0(C_STOPITERATION)
+    unw_v = stop_exc(it)
     return 0
   end
   return v
@@ -927,7 +996,7 @@ parse_float_str: procedure = .int
   l = lower(s)
   if l == "inf" | l == "infinity" then do
     f = f_inf()
-    if neg = 1 then f = 0.0 - f
+    if neg = 1 then f = fneg(f)
     return mkfloat(f)
   end
   if l == "nan" then return mkfloat(f_nan())
@@ -967,7 +1036,7 @@ parse_float_str: procedure = .int
   if right(mant, 1) == "." then mant = mant || "0"
   if pos(".", mant) = 0 then mant = mant || ".0"
   f = parse_flt(mant || ex)
-  if neg = 1 then f = 0.0 - f
+  if neg = 1 then f = fneg(f)
   return mkfloat(f)
 
 /* int(...) */
@@ -1098,6 +1167,22 @@ bcall_type: procedure = .int
   l = .int
   o = .int
   select
+    when c = C_SLICE then do
+      if na < 1 | na > 3 then return nargs_err("slice", na, 1, 3)
+      o = newobj(K_SLICE)
+      if na = 1 then do
+        ob_n[o % 2] = NONE_OOP
+        ob_x[o % 2] = ast[base + 1]
+        ob_y[o % 2] = NONE_OOP
+      end
+      else do
+        ob_n[o % 2] = ast[base + 1]
+        ob_x[o % 2] = ast[base + 2]
+        if na = 3 then ob_y[o % 2] = ast[base + 3]
+        else ob_y[o % 2] = NONE_OOP
+      end
+      return o
+    end
     when c = C_RANGE then return ctor_range(base, na)
     when c = C_INT then return ctor_int(base, na, nk)
     when c = C_STR then do
@@ -1126,6 +1211,7 @@ bcall_type: procedure = .int
     when c = C_OBJECT then return inst_new(C_OBJECT)
     when c = C_TYPE then do
       if na = 1 then return cl_obj[cls_of(ast[base + 1])]
+      if na = 3 then return type_new(ast[base + 1], ast[base + 2], ast[base + 3])
       return raise_exc(C_TYPEERROR, "type() takes 1 or 3 arguments")
     end
     when c = C_PROPERTY then do
@@ -1271,6 +1357,18 @@ bcall: procedure = .int
     when bid = BI_SUPER then return bi_super(base, na)
     when bid = BI__EXC_INIT then return bi_exc_init(base, na)
     when bid = BI__OBJ_INIT then return NONE_OOP
+    when bid = BI_GLOBALS then return bi_globals()
+    when bid = BI_EVAL then return bi_evalexec(1, base, na)
+    when bid = BI_EXEC then return bi_evalexec(0, base, na)
+    when bid = BI___IMPORT__ then return bi_import(base, na)
+    when bid = BI_VARS then do
+      if na \= 1 then return nargs_err("vars", na, 1, 1)
+      return bi_vars(ast[base + 1])
+    end
+    when bid = BI_DIR then do
+      if na \= 1 then return nargs_err("dir", na, 1, 1)
+      return bi_dir(ast[base + 1])
+    end
     when bid = BI_EXIT then return bi_exit(base, na)
     when bid = BI_QUIT then return bi_exit(base, na)
     when bid = BI__SECOND then do

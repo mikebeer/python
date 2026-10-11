@@ -31,11 +31,26 @@ static Class *class_of(Value v)
     case T_CELL: return cls_cell;
     case T_ND: return cls_ndarray;
     case T_SLICE: return cls_slice;
+    case T_DVIEW: return cls_dview[((DView *)v.u.o)->what];
+    case T_BYTES: return cls_bytes;
     default: return cls_object;
     }
 }
+static Str *modname_of_gp(Str *gp)
+{
+    if (!gp) return NULL;
+    return intern(gp->s, gp->len > 0 ? gp->len - 1 : 0);
+}
 static Value *class_find(Class *c, Str *nm)
 {
+    if (c->mro) {
+        int i;
+        for (i = 0; i < c->nmro; i++) {
+            Value *p = amap_get(&c->mro[i]->ns, nm);
+            if (p) return p;
+        }
+        return NULL;
+    }
     while (c) {
         Value *p = amap_get(&c->ns, nm);
         if (p) return p;
@@ -45,11 +60,46 @@ static Value *class_find(Class *c, Str *nm)
 }
 static int class_isa(Class *c, Class *base)
 {
+    if (c->mro) {
+        int i;
+        for (i = 0; i < c->nmro; i++)
+            if (c->mro[i] == base) return 1;
+        return 0;
+    }
     while (c) {
         if (c == base) return 1;
         c = c->base;
     }
     return 0;
+}
+/* find nm in the MRO of `type` strictly after class `after` (for super()) */
+static Value *class_find_after(Class *type, Class *after, Str *nm)
+{
+    Class *k;
+    int i;
+    if (type->mro) {
+        for (i = 0; i < type->nmro; i++) {
+            if (type->mro[i] == after) {
+                for (i++; i < type->nmro; i++) {
+                    Value *p = amap_get(&type->mro[i]->ns, nm);
+                    if (p) return p;
+                }
+                return NULL;
+            }
+        }
+        return NULL;
+    }
+    for (k = type; k && k != after; k = k->base) { }
+    if (!k) return NULL;
+    for (k = k->base; k; k = k->base) {
+        Value *p = amap_get(&k->ns, nm);
+        if (p) return p;
+    }
+    return NULL;
+}
+static Value unpay(Value v)
+{
+    return (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET) ? AS_INST(v)->pay : v;
 }
 static const char *type_name(Value v)
 {
@@ -60,6 +110,7 @@ static Inst *new_inst(Class *c)
     Inst *in = (Inst *)gc_alloc(sizeof(Inst), T_INST);
     in->cls = c;
     in->a.k = NULL; in->a.v = NULL; in->a.n = in->a.cap = 0;
+    in->pay = UNSET_V;
     return in;
 }
 static Value new_bound(Value self, Value fn)
@@ -124,7 +175,7 @@ static long range_len(Range *r)
 static Value mk_prop(int type, Value g, Value s)
 {
     Prop *p = (Prop *)gc_alloc(sizeof(Prop), type);
-    p->get = g; p->set = s;
+    p->get = g; p->set = s; p->del = UNSET_V;
     return mkobj(p, type);
 }
 
@@ -136,11 +187,12 @@ static int py_truthy(Value v)
     case T_NONE: return 0;
     case T_BOOL: case T_INT: return v.u.i != 0;
     case T_FLOAT: return v.u.d != 0;
-    case T_STR: return AS_STR(v)->len != 0;
+    case T_STR: case T_BYTES: return AS_STR(v)->len != 0;
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n != 0;
     case T_DICT: case T_SET: return AS_DICT(v)->n != 0;
     case T_RANGE: return range_len((Range *)v.u.o) != 0;
     case T_ND: return nd_truthy(v);
+    case T_DVIEW: return AS_DICT(((DView *)v.u.o)->d)->n != 0;
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_bool);
         if (m) return py_truthy(call1(*m, v));
@@ -153,11 +205,12 @@ static int py_truthy(Value v)
 static long py_len(Value v)
 {
     switch (v.t) {
-    case T_STR: return AS_STR(v)->len;
+    case T_STR: case T_BYTES: return AS_STR(v)->len;
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n;
     case T_DICT: case T_SET: return AS_DICT(v)->n;
     case T_RANGE: return range_len((Range *)v.u.o);
     case T_ND: return nd_len(v);
+    case T_DVIEW: return AS_DICT(((DView *)v.u.o)->d)->n;
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_len);
         if (m) {
@@ -194,6 +247,32 @@ static long need_long(Value v, const char *what)
     return 0;
 }
 
+/* ---- dict views ------------------------------------------------------- */
+static Value mkdview(Value d, int what)
+{
+    DView *v = (DView *)gc_alloc(sizeof(DView), T_DVIEW);
+    v->d = d;
+    v->what = what;
+    return mkobj(v, T_DVIEW);
+}
+/* snapshot of a dict view as a set (keys and items only) */
+static Value dview_set(Value v)
+{
+    DView *dv = (DView *)v.u.o;
+    Dict *d = AS_DICT(dv->d), *r = dict_new_t(T_SET);
+    Value rv = mkobj(r, T_SET);
+    long i;
+    VPUSH(rv);
+    for (i = 0; i < d->used; i++) {
+        if (d->e[i].k.t == T_UNSET) continue;
+        if (dv->what == 0) set_add(r, d->e[i].k);
+        else if (dv->what == 2) set_add(r, mktuple2(d->e[i].k, d->e[i].v));
+        else set_add(r, d->e[i].v);
+    }
+    vsp--;
+    return rv;
+}
+
 /* ---- equality --------------------------------------------------------- */
 static int num_eq(Value a, Value b)
 {
@@ -203,13 +282,27 @@ static int num_eq(Value a, Value b)
 static int py_eq(Value a, Value b)
 {
     if (is_num(a) && is_num(b)) return num_eq(a, b);
+    if (a.t == T_DVIEW || b.t == T_DVIEW) {
+        Value x = a, y = b;
+        int r;
+        Value *base = vsp;
+        if ((a.t == T_DVIEW && ((DView *)a.u.o)->what == 1) ||
+            (b.t == T_DVIEW && ((DView *)b.u.o)->what == 1)) return a.t == b.t && a.u.o == b.u.o;
+        if (a.t == T_DVIEW) x = dview_set(a);
+        VPUSH(x);
+        if (b.t == T_DVIEW) y = dview_set(b);
+        if (x.t != T_SET || y.t != T_SET) { vsp = base; return 0; }
+        r = py_eq(x, y);
+        vsp = base;
+        return r;
+    }
     if (a.t != b.t) {
         if (a.t == T_INST || b.t == T_INST) goto inst;
         return 0;
     }
     switch (a.t) {
     case T_NONE: return 1;
-    case T_STR:
+    case T_STR: case T_BYTES:
         return a.u.o == b.u.o || (AS_STR(a)->len == AS_STR(b)->len &&
             memcmp(AS_STR(a)->s, AS_STR(b)->s, (size_t)AS_STR(a)->len) == 0);
     case T_LIST: case T_TUPLE: {
@@ -253,11 +346,17 @@ static int py_eq(Value a, Value b)
 inst:
     if (a.t == T_INST) {
         Value *m = class_find(AS_INST(a)->cls, S_eq);
-        if (m) return py_truthy(call2(*m, a, b));
+        if (m) {
+            Value r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) return py_truthy(r);
+        }
     }
     if (b.t == T_INST) {
         Value *m = class_find(AS_INST(b)->cls, S_eq);
-        if (m) return py_truthy(call2(*m, b, a));
+        if (m) {
+            Value r = call2(*m, b, a);
+            if (!IS_NOTIMPL(r)) return py_truthy(r);
+        }
     }
     return a.t == b.t && a.u.o == b.u.o;
 }
@@ -278,7 +377,7 @@ static unsigned long py_hash(Value v)
             for (i = 0; i < sizeof(double); i++) h = h * 31 + p[i];
             return h;
         } }
-    case T_STR: return str_hash(AS_STR(v));
+    case T_STR: case T_BYTES: return str_hash(AS_STR(v));
     case T_TUPLE: {
         List *l = AS_LIST(v);
         unsigned long h = 0x345678UL;
@@ -306,7 +405,7 @@ static unsigned long py_hash(Value v)
 /* ---- ordering --------------------------------------------------------- */
 static int cmp3(Value a, Value b, int *ok);
 static int rich_lt_hook(Value a, Value b);
-static Value propsetter_fn, obj_eq_v, obj_ne_v, obj_hash_v;
+static Value propdeleter_fn, propgetter_fn, propsetter_fn, obj_eq_v, obj_ne_v, obj_hash_v;
 static Str **op_names(int op, int rev)
 {
     static Str *fwd[11], *bwd[11];
@@ -336,7 +435,7 @@ static int cmp3(Value a, Value b, int *ok)
         }
         return int_cmp(a, b);
     }
-    if (a.t == T_STR && b.t == T_STR) {
+    if ((a.t == T_STR && b.t == T_STR) || (a.t == T_BYTES && b.t == T_BYTES)) {
         Str *x = AS_STR(a), *y = AS_STR(b);
         long n = x->len < y->len ? x->len : y->len;
         int c = memcmp(x->s, y->s, (size_t)n);
@@ -366,17 +465,26 @@ static int rich_cmp(int op, Value a, Value b)
     if (op == C_NE) {
         if (a.t == T_INST) {
             Value *m = class_find(AS_INST(a)->cls, S_ne);
-            if (m) return py_truthy(call2(*m, a, b));
+            if (m) {
+                Value r = call2(*m, a, b);
+                if (!IS_NOTIMPL(r)) return py_truthy(r);
+            }
         }
         return !py_eq(a, b);
     }
     if (a.t == T_INST) {
         Value *m = class_find(AS_INST(a)->cls, *op_names(op, 0));
-        if (m) return py_truthy(call2(*m, a, b));
+        if (m) {
+            Value r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) return py_truthy(r);
+        }
     }
     if (b.t == T_INST) {
         Value *m = class_find(AS_INST(b)->cls, *op_names(op, 1));
-        if (m) return py_truthy(call2(*m, b, a));
+        if (m) {
+            Value r = call2(*m, b, a);
+            if (!IS_NOTIMPL(r)) return py_truthy(r);
+        }
     }
     if (a.t == T_FLOAT || b.t == T_FLOAT) {
         if (is_num(a) && is_num(b)) {
@@ -386,6 +494,16 @@ static int rich_cmp(int op, Value a, Value b)
             case C_GT: return x > y; default: return x >= y;
             }
         }
+    }
+    if ((a.t == T_DVIEW || b.t == T_DVIEW) && (a.t == T_SET || b.t == T_SET || (a.t == T_DVIEW && b.t == T_DVIEW))) {
+        Value *base = vsp;
+        if (a.t == T_DVIEW) a = dview_set(a);
+        VPUSH(a);
+        if (b.t == T_DVIEW) b = dview_set(b);
+        VPUSH(b);
+        op = rich_cmp(op, a, b);
+        vsp = base;
+        return op;
     }
     if (a.t == T_SET && b.t == T_SET) {
         Dict *x = AS_DICT(a), *y = AS_DICT(b);
@@ -454,6 +572,24 @@ static void repr_buf(Value v, Buf *b, int depth)
     case T_INT: case T_BIG: int_str(v, b); break;
     case T_FLOAT: float_repr(v.u.d, t); buf_add(b, t); break;
     case T_STR: repr_str_lit(AS_STR(v), b); break;
+    case T_BYTES: {
+        Str *bs = AS_STR(v);
+        int q = '\'';
+        char tt[8];
+        if (memchr(bs->s, '\'', (size_t)bs->len) && !memchr(bs->s, '"', (size_t)bs->len)) q = '"';
+        buf_addc(b, 'b');
+        buf_addc(b, q);
+        for (i = 0; i < bs->len; i++) {
+            int c = (unsigned char)bs->s[i];
+            if (c == q || c == '\\') { buf_addc(b, '\\'); buf_addc(b, c); }
+            else if (c == '\n') buf_add(b, "\\n");
+            else if (c == '\t') buf_add(b, "\\t");
+            else if (c == '\r') buf_add(b, "\\r");
+            else if (c < 32 || c >= 127) { sprintf(tt, "\\x%02x", c); buf_add(b, tt); }
+            else buf_addc(b, c);
+        }
+        buf_addc(b, q);
+        break; }
     case T_LIST: case T_TUPLE: {
         List *l = AS_LIST(v);
         buf_addc(b, v.t == T_LIST ? '[' : '(');
@@ -550,7 +686,32 @@ static void repr_buf(Value v, Buf *b, int depth)
         break;
     case T_FILE: buf_add(b, "<_io.TextIOWrapper>"); break;
     case T_ND: nd_format(v, b, 1); break;
-    case T_SLICE: buf_add(b, "slice(...)"); break;
+    case T_SLICE: {
+        List *sl = AS_LIST(v);
+        buf_add(b, "slice(");
+        repr_buf(sl->a[0], b, depth + 1); buf_add(b, ", ");
+        repr_buf(sl->a[1], b, depth + 1); buf_add(b, ", ");
+        repr_buf(sl->a[2], b, depth + 1); buf_addc(b, ')');
+        break; }
+    case T_DVIEW: {
+        DView *dv = (DView *)v.u.o;
+        Dict *d = AS_DICT(dv->d);
+        int first = 1;
+        buf_add(b, dv->what == 0 ? "dict_keys([" : (dv->what == 1 ? "dict_values([" : "dict_items(["));
+        for (i = 0; i < d->used; i++) {
+            if (d->e[i].k.t == T_UNSET) continue;
+            if (!first) buf_add(b, ", ");
+            first = 0;
+            if (dv->what == 0) repr_buf(d->e[i].k, b, depth + 1);
+            else if (dv->what == 1) repr_buf(d->e[i].v, b, depth + 1);
+            else {
+                buf_addc(b, '(');
+                repr_buf(d->e[i].k, b, depth + 1); buf_add(b, ", ");
+                repr_buf(d->e[i].v, b, depth + 1); buf_addc(b, ')');
+            }
+        }
+        buf_add(b, "])");
+        break; }
     default:
         sprintf(t, "<object at 0x%lx>", (unsigned long)(size_t)v.u.o);
         buf_add(b, t);
@@ -589,6 +750,10 @@ static void str_buf(Value v, Buf *b)
     if (v.t == T_INST) {
         Inst *in = AS_INST(v);
         Value *m = class_find(in->cls, S_str);
+        if (m && m->t == T_BUILTIN && m->u.o == obj_str_v.u.o && in->pay.t == T_STR) {
+            buf_addn(b, AS_STR(in->pay)->s, AS_STR(in->pay)->len);
+            return;
+        }
         if (m) {
             Value r = call1(*m, v);
             if (r.t != T_STR) throw_new(cls_TypeError, "__str__ returned non-string (type %.40s)", type_name(r));
@@ -625,6 +790,19 @@ static void attr_error(Value o, Str *nm)
                   ((Module *)o.u.o)->name->s, nm->s);
     throw_new(cls_AttributeError, "'%.60s' object has no attribute '%.60s'", type_name(o), nm->s);
 }
+/* global slot of attribute `nm` of a module written in Python (-1 if none and !create) */
+static long module_slot(Module *m, Str *nm, int create)
+{
+    Value r;
+    long gi;
+    if (m->gmap && dict_get(m->gmap, mkobj(nm, T_STR), &r)) return r.u.i;
+    gi = create ? global_index(prefixed(m->gp, nm)) : global_find(prefixed(m->gp, nm));
+    if (gi >= 0) {
+        if (!m->gmap) m->gmap = dict_new();
+        dict_set(m->gmap, mkobj(nm, T_STR), mkint(gi));
+    }
+    return gi;
+}
 static Value bind_class_attr(Value o, Value *cv, Class *owner_for_cls)
 {
     switch (cv->t) {
@@ -643,11 +821,81 @@ static Value class_mro_tuple(Class *c)
     List *t;
     Class *k;
     long n = 0;
+    if (c->mro) {
+        int i;
+        t = tuple_new(c->nmro);
+        for (i = 0; i < c->nmro; i++) t->a[i] = mkobj(c->mro[i], T_CLASS);
+        return mkobj(t, T_TUPLE);
+    }
     for (k = c; k; k = k->base) n++;
     t = tuple_new(n);
     n = 0;
     for (k = c; k; k = k->base) t->a[n++] = mkobj(k, T_CLASS);
     return mkobj(t, T_TUPLE);
+}
+
+/* C3 linearisation: returns a malloc'ed array of *n classes */
+typedef struct MSeq { Class **a; int n, pos; } MSeq;
+static Class **class_mro_array(Class *c, int *n)
+{
+    Class **r;
+    int i;
+    if (c->mro) {
+        r = (Class **)xmalloc(sizeof(Class *) * (size_t)(c->nmro + 1));
+        for (i = 0; i < c->nmro; i++) r[i] = c->mro[i];
+        *n = c->nmro;
+        return r;
+    }
+    {
+        Class *k;
+        int cnt = 0;
+        for (k = c; k; k = k->base) cnt++;
+        r = (Class **)xmalloc(sizeof(Class *) * (size_t)(cnt + 1));
+        cnt = 0;
+        for (k = c; k; k = k->base) r[cnt++] = k;
+        *n = cnt;
+    }
+    return r;
+}
+static void c3_build(Class *c, Class **bases, int nb)
+{
+    MSeq *sq = (MSeq *)xmalloc(sizeof(MSeq) * (size_t)(nb + 1));
+    Class **res = (Class **)xmalloc(sizeof(Class *) * 64);
+    int nres = 0, rcap = 64, i, j, k, remaining;
+    res[nres++] = c;
+    for (i = 0; i < nb; i++) { sq[i].a = class_mro_array(bases[i], &sq[i].n); sq[i].pos = 0; }
+    sq[nb].a = (Class **)xmalloc(sizeof(Class *) * (size_t)(nb + 1));
+    for (i = 0; i < nb; i++) sq[nb].a[i] = bases[i];
+    sq[nb].n = nb; sq[nb].pos = 0;
+    for (;;) {
+        Class *cand = NULL;
+        remaining = 0;
+        for (i = 0; i <= nb; i++) if (sq[i].pos < sq[i].n) remaining = 1;
+        if (!remaining) break;
+        for (i = 0; i <= nb && !cand; i++) {
+            Class *t;
+            int ok = 1;
+            if (sq[i].pos >= sq[i].n) continue;
+            t = sq[i].a[sq[i].pos];
+            for (j = 0; j <= nb && ok; j++)
+                for (k = sq[j].pos + 1; k < sq[j].n; k++)
+                    if (sq[j].a[k] == t) { ok = 0; break; }
+            if (ok) cand = t;
+        }
+        if (!cand) {
+            for (i = 0; i <= nb; i++) free(sq[i].a);
+            free(sq); free(res);
+            throw_new(cls_TypeError, "Cannot create a consistent method resolution order (MRO) for bases");
+        }
+        if (nres >= rcap) { rcap *= 2; res = (Class **)xrealloc(res, sizeof(Class *) * (size_t)rcap); }
+        res[nres++] = cand;
+        for (i = 0; i <= nb; i++)
+            if (sq[i].pos < sq[i].n && sq[i].a[sq[i].pos] == cand) sq[i].pos++;
+    }
+    for (i = 0; i <= nb; i++) free(sq[i].a);
+    free(sq);
+    c->mro = res;
+    c->nmro = nres;
 }
 static Value get_attr(Value o, Str *nm)
 {
@@ -681,24 +929,54 @@ static Value get_attr(Value o, Str *nm)
             return *p;
         }
         if (nm == S_name) return mkobj(c->name, T_STR);
+        if (nm == S_dict) {
+            Dict *d = dict_new();
+            int k;
+            Value dv = mkobj(d, T_DICT);
+            VPUSH(dv);
+            for (k = 0; k < c->ns.n; k++) dict_set(d, mkobj(c->ns.k[k], T_STR), c->ns.v[k]);
+            vsp--;
+            return dv;
+        }
+        if (nm == intern_c("__qualname__")) return mkobj(c->name, T_STR);
+        if (nm == S_module) return c->modname ? mkobj(c->modname, T_STR) : mkcstr("builtins");
         if (nm == S_mro) return class_mro_tuple(c);
         if (nm == S_doc) return NONE_V;
         if (nm == S_class) return mkobj(cls_type, T_CLASS);
         if (nm == intern_c("__bases__")) {
             Value bv[1];
+            int k;
+            List *bt;
+            if (c->nbases > 0) {
+                bt = tuple_new(c->nbases);
+                for (k = 0; k < c->nbases; k++) bt->a[k] = mkobj(c->bases[k], T_CLASS);
+                return mkobj(bt, T_TUPLE);
+            }
             if (!c->base) return mktuple_from(bv, 0);
             bv[0] = mkobj(c->base, T_CLASS);
             return mktuple_from(bv, 1);
         }
         break; }
-    case T_MODULE:
-        p = amap_get(&((Module *)o.u.o)->ns, nm);
-        if (p) return *p;
-        if (nm == S_name) return mkobj(((Module *)o.u.o)->name, T_STR);
-        break;
+    case T_MODULE: {
+        Module *md = (Module *)o.u.o;
+        if (md->gp) {
+            long gi = module_slot(md, nm, 0);
+            if (gi >= 0 && G[gi].t != T_UNSET) return G[gi];
+        } else {
+            p = amap_get(&md->ns, nm);
+            if (p) return *p;
+        }
+        if (nm == S_name) return mkobj(md->name, T_STR);
+        break; }
+    case T_SLICE: {
+        List *sl = AS_LIST(o);
+        if (nm == intern_c("start")) return sl->a[0];
+        if (nm == intern_c("stop")) return sl->a[1];
+        if (nm == intern_c("step")) return sl->a[2];
+        break; }
     case T_SUPER: {
         Super *s = (Super *)o.u.o;
-        p = class_find(s->start, nm);
+        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start, nm);
         if (p) {
             if (s->obj.t == T_CLASS) {
                 if (p->t == T_CMETH) return new_bound(s->obj, ((Prop *)p->u.o)->get);
@@ -712,8 +990,24 @@ static Value get_attr(Value o, Str *nm)
         if (nm == S_hash) return new_bound(s->obj, obj_hash_v);
         break; }
     case T_FUNC:
-        if (nm == S_name) return mkobj(AS_FUNC(o)->name, T_STR);
+        p = amap_get(&AS_FUNC(o)->attrs, nm);
+        if (p) return *p;
+        if (nm == S_dict) {
+            Dict *d = dict_new();
+            int k;
+            Value dv = mkobj(d, T_DICT);
+            VPUSH(dv);
+            for (k = 0; k < AS_FUNC(o)->attrs.n; k++)
+                dict_set(d, mkobj(AS_FUNC(o)->attrs.k[k], T_STR), AS_FUNC(o)->attrs.v[k]);
+            vsp--;
+            return dv;
+        }
+        if (nm == S_name || nm == intern_c("__qualname__")) return mkobj(AS_FUNC(o)->name, T_STR);
         if (nm == S_doc) return NONE_V;
+        if (nm == S_module) {
+            Str *mn = modname_of_gp(AS_FUNC(o)->def->fd->gpfx);
+            return mn ? mkobj(mn, T_STR) : mkcstr("builtins");
+        }
         break;
     case T_BUILTIN:
         if (nm == S_name) return mkobj(((Builtin *)o.u.o)->sname, T_STR);
@@ -726,6 +1020,11 @@ static Value get_attr(Value o, Str *nm)
         if (nm == S_setter) {
             return new_bound(o, propsetter_fn);
         }
+        if (nm == intern_c("deleter")) return new_bound(o, propdeleter_fn);
+        if (nm == intern_c("getter")) return new_bound(o, propgetter_fn);
+        if (nm == intern_c("fget")) return ((Prop *)o.u.o)->get.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->get;
+        if (nm == intern_c("fset")) return ((Prop *)o.u.o)->set.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->set;
+        if (nm == intern_c("fdel")) return ((Prop *)o.u.o)->del.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->del;
         break; }
     case T_ND: {
         Value r;
@@ -734,6 +1033,13 @@ static Value get_attr(Value o, Str *nm)
     default: break;
     }
     if (nm == S_class) return mkobj(class_of(o), T_CLASS);
+    if (o.t == T_INT || o.t == T_BOOL || o.t == T_BIG || o.t == T_FLOAT) {
+        const char *a = nm->s;
+        if (!strcmp(a, "real") || (o.t != T_FLOAT && !strcmp(a, "numerator")))
+            return o.t == T_BOOL ? mkint(o.u.i) : o;
+        if (!strcmp(a, "imag")) return o.t == T_FLOAT ? mkfloat(0.0) : mkint(0);
+        if (o.t != T_FLOAT && !strcmp(a, "denominator")) return mkint(1);
+    }
     {
         Class *c = class_of(o);
         p = class_find(c, nm);
@@ -741,6 +1047,12 @@ static Value get_attr(Value o, Str *nm)
         if (nm == S_name && o.t != T_INST) {
             /* fallthrough to error */
         }
+    }
+    if (o.t == T_INST && ((nm == intern_c("value") && class_isa(AS_INST(o)->cls, cls_StopIteration)) ||
+                          (nm == intern_c("code") && class_isa(AS_INST(o)->cls, cls_SystemExit)))) {
+        Value *av = amap_get(&AS_INST(o)->a, S_args);
+        if (av && av->t == T_TUPLE && AS_LIST(*av)->n > 0) return AS_LIST(*av)->a[0];
+        return NONE_V;
     }
     attr_error(o, nm);
     return NONE_V;
@@ -767,7 +1079,7 @@ static int lookup_method(Value *o, Str *nm, Value *out, Node *cache)
         break; }
     case T_SUPER: {
         Super *s = (Super *)o->u.o;
-        p = class_find(s->start, nm);
+        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start, nm);
         if (p && (p->t == T_FUNC || p->t == T_BUILTIN) && s->obj.t != T_CLASS) {
             *out = *p;
             *o = s->obj;
@@ -798,6 +1110,16 @@ static void set_attr(Value o, Str *nm, Value v)
     switch (o.t) {
     case T_INST: {
         Inst *in = AS_INST(o);
+        if (in->cls->flags & CF_SETATTR) {
+            Value *sa = class_find(in->cls, S_setattr);
+            if (sa && sa->t == T_FUNC) {
+                Value *base = vsp;
+                VPUSH(*sa); VPUSH(o); VPUSH(mkobj(nm, T_STR)); VPUSH(v);
+                call_value(*sa, 3, base + 1, 0, NULL);
+                vsp = base;
+                return;
+            }
+        }
         if (in->cls->flags & CF_PROPS) {
             Value *p = class_find(in->cls, nm);
             if (p && p->t == T_PROP) {
@@ -814,16 +1136,31 @@ static void set_attr(Value o, Str *nm, Value v)
         if (v.t == T_PROP) AS_CLASS(o)->flags |= CF_PROPS;
         class_epoch++;
         return;
-    case T_MODULE:
-        amap_set(&((Module *)o.u.o)->ns, nm, v);
+    case T_FUNC:
+        amap_set(&AS_FUNC(o)->attrs, nm, v);
         return;
+    case T_MODULE: {
+        Module *md = (Module *)o.u.o;
+        if (md->gp) G[module_slot(md, nm, 1)] = v;
+        else amap_set(&md->ns, nm, v);
+        return; }
     default: break;
     }
     throw_new(cls_AttributeError, "'%.60s' object has no attribute '%.60s' and no __dict__ for setting new attributes", type_name(o), nm->s);
 }
 static void del_attr(Value o, Str *nm)
 {
+    if (o.t == T_INST && (AS_INST(o)->cls->flags & CF_PROPS)) {
+        Value *p = class_find(AS_INST(o)->cls, nm);
+        if (p && p->t == T_PROP) {
+            Prop *pr = (Prop *)p->u.o;
+            if (pr->del.t == T_UNSET) throw_new(cls_AttributeError, "can't delete attribute '%.60s'", nm->s);
+            call1(pr->del, o);
+            return;
+        }
+    }
     if (o.t == T_INST && amap_del(&AS_INST(o)->a, nm)) return;
+    if (o.t == T_FUNC && amap_del(&AS_FUNC(o)->attrs, nm)) return;
     if (o.t == T_CLASS && amap_del(&AS_CLASS(o)->ns, nm)) { class_epoch++; return; }
     attr_error(o, nm);
 }
@@ -885,6 +1222,13 @@ static Value slice_get(Value o, Value lo, Value hi, Value st)
         buf_init(&b);
         for (i = 0; i < cnt; i++) buf_addc(&b, s->s[start + i * step]);
         return buf_value(&b); }
+    case T_BYTES: {
+        Str *s = AS_STR(o);
+        Buf b;
+        slice_adjust(lo, hi, st, s->len, &start, &stop, &step, &cnt);
+        buf_init(&b);
+        for (i = 0; i < cnt; i++) buf_addc(&b, s->s[start + i * step]);
+        { Value r = mkbytes(b.s, b.n); buf_free(&b); return r; } }
     case T_ND: return nd_subscr(o, mkslice(lo, hi, st));
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
@@ -895,11 +1239,9 @@ static Value slice_get(Value o, Value lo, Value hi, Value st)
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_getitem);
         if (m) {
-            Value args[3];
             Value *base = vsp;
             Value sl, r;
-            args[0] = lo; args[1] = hi; args[2] = st;
-            sl = mktuple_from(args, 3);
+            sl = mkslice(lo, hi, st);
             VPUSH(*m); VPUSH(o); VPUSH(sl);
             r = call_value(*m, 2, base + 1, 0, NULL);
             vsp = base;
@@ -917,8 +1259,13 @@ static long norm_index(long i, long n, const char *what)
     if (i < 0 || i >= n) throw_new(cls_IndexError, "%s index out of range", what);
     return i;
 }
+static void slice_del(Value o, Value lo, Value hi, Value st);
 static Value subscr(Value o, Value idx)
 {
+    if (idx.t == T_SLICE && o.t != T_INST && o.t != T_ND && o.t != T_DICT) {
+        List *sl = AS_LIST(idx);
+        return slice_get(o, sl->a[0], sl->a[1], sl->a[2]);
+    }
     switch (o.t) {
     case T_LIST: case T_TUPLE:
         if (idx.t == T_INT || idx.t == T_BOOL) {
@@ -946,6 +1293,14 @@ static Value subscr(Value o, Value idx)
         if (dict_get(AS_DICT(o), idx, &r)) return r;
         throw_key(idx);
         break; }
+    case T_BYTES:
+        if (idx.t == T_INT || idx.t == T_BOOL) {
+            Str *s = AS_STR(o);
+            long i = norm_index(idx.u.i, s->len, "index");
+            return mkint((unsigned char)s->s[i]);
+        }
+        throw_new(cls_TypeError, "byte indices must be integers or slices, not %.40s", type_name(idx));
+        break;
     case T_ND: return nd_subscr(o, idx);
     case T_RANGE:
         if (idx.t == T_INT || idx.t == T_BOOL) {
@@ -997,10 +1352,25 @@ static void slice_set(Value o, Value lo, Value hi, Value st, Value v)
         return;
     }
     if (o.t == T_ND) { nd_setitem(o, mkslice(lo, hi, st), v); return; }
+    if (o.t == T_INST) {
+        Value *m = class_find(AS_INST(o)->cls, S_setitem);
+        if (m) {
+            Value *base = vsp;
+            VPUSH(*m); VPUSH(o); VPUSH(mkslice(lo, hi, st)); VPUSH(v);
+            call_value(*m, 3, base + 1, 0, NULL);
+            vsp = base;
+            return;
+        }
+    }
     throw_new(cls_TypeError, "'%.60s' object does not support slice assignment", type_name(o));
 }
 static void setitem(Value o, Value idx, Value v)
 {
+    if (idx.t == T_SLICE && o.t != T_INST && o.t != T_ND && o.t != T_DICT) {
+        List *sl = AS_LIST(idx);
+        slice_set(o, sl->a[0], sl->a[1], sl->a[2], v);
+        return;
+    }
     switch (o.t) {
     case T_LIST:
         if (idx.t == T_INT || idx.t == T_BOOL) {
@@ -1031,6 +1401,11 @@ static void setitem(Value o, Value idx, Value v)
 }
 static void delitem(Value o, Value idx)
 {
+    if (idx.t == T_SLICE && o.t != T_INST && o.t != T_DICT) {
+        List *sl = AS_LIST(idx);
+        slice_del(o, sl->a[0], sl->a[1], sl->a[2]);
+        return;
+    }
     switch (o.t) {
     case T_LIST:
         if (idx.t == T_INT || idx.t == T_BOOL) {
@@ -1066,6 +1441,10 @@ static void slice_del(Value o, Value lo, Value hi, Value st)
         for (i = cnt - 1; i >= 0; i--) list_splice(l, start + i * step, start + i * step + 1, NULL, 0);
         return;
     }
+    if (o.t == T_INST) {
+        Value *m = class_find(AS_INST(o)->cls, S_delitem);
+        if (m) { call2(*m, o, mkslice(lo, hi, st)); return; }
+    }
     throw_new(cls_TypeError, "'%.60s' object doesn't support slice deletion", type_name(o));
 }
 
@@ -1086,12 +1465,18 @@ static Value get_iter(Value o)
     case T_LIST: it = iter_new(IK_LIST); it->a = o; return mkobj(it, T_ITER);
     case T_TUPLE: it = iter_new(IK_TUPLE); it->a = o; return mkobj(it, T_ITER);
     case T_STR: it = iter_new(IK_STR); it->a = o; return mkobj(it, T_ITER);
+    case T_BYTES: it = iter_new(IK_BYTES); it->a = o; return mkobj(it, T_ITER);
     case T_DICT: it = iter_new(IK_DICT); it->a = o; return mkobj(it, T_ITER);
     case T_SET: it = iter_new(IK_SET); it->a = o; return mkobj(it, T_ITER);
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
         it = iter_new(IK_RANGE);
         it->i = r->start; it->n = r->stop; it->step = r->step;
+        return mkobj(it, T_ITER); }
+    case T_DVIEW: {
+        DView *dv = (DView *)o.u.o;
+        it = iter_new(dv->what == 0 ? IK_DICT : (dv->what == 1 ? IK_DVALS : IK_DITEMS));
+        it->a = dv->d;
         return mkobj(it, T_ITER); }
     case T_ITER: case T_GEN: return o;
     case T_FILE: it = iter_new(IK_FILE); it->a = o; return mkobj(it, T_ITER);
@@ -1145,6 +1530,16 @@ static int iter_next(Value it, Value *out)
         if (t->i >= s->len) return 0;
         *out = mkstr(s->s + t->i, 1);
         t->i++;
+        return 1; }
+    case IK_BYTES: {
+        Str *s = AS_STR(t->a);
+        if (t->i >= s->len) return 0;
+        *out = mkint((unsigned char)s->s[t->i++]);
+        return 1; }
+    case IK_CALLSENT: {
+        Value r = call0(t->a);
+        if (py_eq(r, t->b)) return 0;
+        *out = r;
         return 1; }
     case IK_RANGE:
         if (t->step > 0 ? t->i >= t->n : t->i <= t->n) return 0;
@@ -1290,6 +1685,16 @@ static int contains(Value c, Value x)
         for (i = 0; i + u->len <= s->len; i++)
             if (s->s[i] == u->s[0] && memcmp(s->s + i, u->s, (size_t)u->len) == 0) return 1;
         return 0; }
+    case T_BYTES: {
+        Str *s = AS_STR(c), *u;
+        long i;
+        if (x.t == T_INT) return memchr(s->s, (int)x.u.i, (size_t)s->len) != NULL;
+        if (x.t != T_BYTES) throw_new(cls_TypeError, "a bytes-like object is required, not '%.40s'", type_name(x));
+        u = AS_STR(x);
+        if (u->len == 0) return 1;
+        for (i = 0; i + u->len <= s->len; i++)
+            if (s->s[i] == u->s[0] && memcmp(s->s + i, u->s, (size_t)u->len) == 0) return 1;
+        return 0; }
     case T_RANGE: {
         Range *r = (Range *)c.u.o;
         if (x.t == T_INT || x.t == T_BOOL) {
@@ -1298,6 +1703,15 @@ static int contains(Value c, Value x)
             return v <= r->start && v > r->stop && (r->start - v) % (-r->step) == 0;
         }
         return 0; }
+    case T_DVIEW: {
+        DView *dv = (DView *)c.u.o;
+        Value o;
+        if (dv->what == 0) return dict_get(AS_DICT(dv->d), x, &o);
+        if (dv->what == 2) {
+            if (x.t != T_TUPLE || AS_LIST(x)->n != 2) return 0;
+            return dict_get(AS_DICT(dv->d), AS_LIST(x)->a[0], &o) && py_eq(o, AS_LIST(x)->a[1]);
+        }
+        break; }
     case T_INST: {
         Value *m = class_find(AS_INST(c)->cls, S_contains);
         if (m) return py_truthy(call2(*m, c, x));
@@ -1306,7 +1720,7 @@ static int contains(Value c, Value x)
     }
     {
         Value it, y;
-        if (c.t != T_INST && c.t != T_GEN && c.t != T_ITER && c.t != T_ND)
+        if (c.t != T_DVIEW && c.t != T_INST && c.t != T_GEN && c.t != T_ITER && c.t != T_ND)
             throw_new(cls_TypeError, "argument of type '%.60s' is not iterable", type_name(c));
         it = get_iter(c);
         VPUSH(it);
@@ -1331,21 +1745,46 @@ static const char *op_str(int op)
 }
 static Str *dunder(int op, int rev)
 {
-    switch (op) {
-    case B_ADD: return rev ? S_radd : S_add;
-    case B_SUB: return rev ? S_rsub : S_sub;
-    case B_MUL: return rev ? S_rmul : S_mul;
-    case B_DIV: return rev ? NULL : S_truediv;
-    case B_FDIV: return rev ? NULL : S_floordiv;
-    case B_MOD: return rev ? NULL : S_mod;
-    case B_POW: return rev ? NULL : S_pow;
-    case B_AND: return rev ? NULL : S_and;
-    case B_OR: return rev ? NULL : S_or;
-    case B_XOR: return rev ? NULL : S_xor;
-    case B_LSH: return rev ? NULL : S_lshift;
-    default: return rev ? NULL : S_rshift;
+    static Str *tab[2][16];
+    static const char *nm[] = { "", "add", "sub", "mul", "truediv", "floordiv", "mod", "pow",
+        "and", "or", "xor", "lshift", "rshift", "matmul" };
+    if (op < 1 || op > 13) return NULL;
+    if (!tab[rev][op]) {
+        char b[40];
+        sprintf(b, "__%s%s__", rev ? "r" : "", nm[op]);
+        tab[rev][op] = intern_c(b);
     }
+    return tab[rev][op];
 }
+/* in-place dunder name (__iadd__ ...) */
+static Str *idunder(int op)
+{
+    static Str *tab[16];
+    static const char *nm[] = { "", "add", "sub", "mul", "truediv", "floordiv", "mod", "pow",
+        "and", "or", "xor", "lshift", "rshift", "matmul" };
+    if (op < 1 || op > 13) return NULL;
+    if (!tab[op]) {
+        char b[40];
+        sprintf(b, "__i%s__", nm[op]);
+        tab[op] = intern_c(b);
+    }
+    return tab[op];
+}
+static Value to_set_any(Value v)
+{
+    Dict *d = dict_new_t(T_SET);
+    Value dv = mkobj(d, T_SET), it, y;
+    Value *base = vsp;
+    VPUSH(dv);
+    VPUSH(v);
+    it = get_iter(v);
+    VPUSH(it);
+    while (iter_next(it, &y)) set_add(d, y);
+    vsp = base;
+    return dv;
+}
+static void dict_update_from(Dict *d, Value src);
+#define dict_update_from_hook dict_update_from
 static Value int_pow_v(Value a, Value b)
 {
     if (int_sign(b) < 0) {
@@ -1473,6 +1912,28 @@ static Value binop(int op, Value a, Value b)
         r->s[r->len] = 0;
         return mkobj(r, T_STR);
     }
+    if (a.t == T_BYTES && b.t == T_BYTES && op == B_ADD) {
+        Str *x = AS_STR(a), *y = AS_STR(b);
+        Buf bf;
+        Value r;
+        buf_init(&bf);
+        buf_addn(&bf, x->s, x->len);
+        buf_addn(&bf, y->s, y->len);
+        r = mkbytes(bf.s, bf.n);
+        buf_free(&bf);
+        return r;
+    }
+    if (op == B_MUL && ((a.t == T_BYTES && b.t == T_INT) || (b.t == T_BYTES && a.t == T_INT))) {
+        Str *x = AS_STR(a.t == T_BYTES ? a : b);
+        long n = a.t == T_BYTES ? b.u.i : a.u.i, i;
+        Buf bf;
+        Value r;
+        buf_init(&bf);
+        for (i = 0; i < n; i++) buf_addn(&bf, x->s, x->len);
+        r = mkbytes(bf.s, bf.n);
+        buf_free(&bf);
+        return r;
+    }
     if (op == B_ADD && a.t == b.t && (a.t == T_LIST || a.t == T_TUPLE)) {
         List *x = AS_LIST(a), *y = AS_LIST(b), *r;
         long i;
@@ -1491,17 +1952,47 @@ static Value binop(int op, Value a, Value b)
             throw_new(cls_TypeError, "can't multiply sequence by non-int of type '%.40s'", type_name(b));
     }
     if (op == B_MOD && a.t == T_STR) return py_format_percent(a, b);
+    if (op == B_OR && a.t == T_DICT && b.t == T_DICT) {
+        Dict *nd = dict_new();
+        Value nv = mkobj(nd, T_DICT);
+        VPUSH(nv);
+        dict_update_from_hook(nd, a);
+        dict_update_from_hook(nd, b);
+        vsp--;
+        return nv;
+    }
     if (a.t == T_SET && b.t == T_SET && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR))
         return set_op(op, a, b);
+    if ((a.t == T_DVIEW || b.t == T_DVIEW) && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR)) {
+        Value x = a, y = b, r;
+        Value *base = vsp;
+        if (a.t == T_DVIEW) x = ((DView *)a.u.o)->what == 1 ? a : dview_set(a);
+        VPUSH(x);
+        if (b.t == T_DVIEW) y = ((DView *)b.u.o)->what == 1 ? b : dview_set(b);
+        VPUSH(y);
+        if (x.t != T_SET) x = to_set_any(x);
+        VPUSH(x);
+        if (y.t != T_SET) y = to_set_any(y);
+        VPUSH(y);
+        r = set_op(op, x, y);
+        vsp = base;
+        return r;
+    }
     if (a.t == T_INST) {
         Str *dn = dunder(op, 0);
         Value *m = dn ? class_find(AS_INST(a)->cls, dn) : NULL;
-        if (m) return call2(*m, a, b);
+        if (m) {
+            Value r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) return r;
+        }
     }
     if (b.t == T_INST) {
         Str *dn = dunder(op, 1);
         Value *m = dn ? class_find(AS_INST(b)->cls, dn) : NULL;
-        if (m) return call2(*m, b, a);
+        if (m) {
+            Value r = call2(*m, b, a);
+            if (!IS_NOTIMPL(r)) return r;
+        }
     }
     if (op == B_ADD && a.t == T_STR)
         throw_new(cls_TypeError, "can only concatenate str (not \"%.40s\") to str", type_name(b));
@@ -1512,6 +2003,18 @@ static Value binop(int op, Value a, Value b)
     throw_new(cls_TypeError, "unsupported operand type(s) for %s: '%.40s' and '%.40s'",
               op_str(op), type_name(a), type_name(b));
     return NONE_V;
+}
+static Value inplace_binop(int op, Value a, Value b)
+{
+    if (a.t == T_INST) {
+        Str *dn = idunder(op);
+        Value *m = dn ? class_find(AS_INST(a)->cls, dn) : NULL;
+        if (m) {
+            Value r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) return r;
+        }
+    }
+    return binop(op, a, b);
 }
 static Value unop(int op, Value a)
 {

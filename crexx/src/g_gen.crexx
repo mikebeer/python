@@ -93,6 +93,7 @@ gen_new: procedure = .int
   gn_sp[g] = 0
   gn_rb[g] = ngs
   gn_val[g] = NONE_OOP
+  gn_ret[g] = NONE_OOP
   ngs = ngs + cap + 1
   gs_n[ngs] = 0
   o = newobj(K_GEN)
@@ -124,6 +125,11 @@ gx_unw: procedure = .int
   matched = .int
   body = .int
   sv_cur = .int
+  ctx = .int
+  exm = .int
+  r = .int
+  sv_unw = .int
+  sv_v = .int
   rb = gn_rb[g]
   fb = gn_fb[g]
   do while sp > 0
@@ -195,6 +201,35 @@ gx_unw: procedure = .int
         end
       end
     end
+    else if t = N_WITH then do
+      if gs_s[rb + sp] = 1 then do
+        ctx = gs_a[rb + sp]
+        exm = gs_b[rb + sp]
+        sv_unw = unw
+        sv_v = unw_v
+        unw = 0
+        r = 0
+        if sv_unw = U_RAISE then do
+          if exm = 0 then call file_close ctx
+          else r = call_exit(exm, ctx, cl_obj[ob_c[sv_v % 2]], sv_v)
+          if unw = 0 then do
+            if r \= 0 then do
+              if truthy(r) = 1 then return sp - 1
+            end
+            unw = sv_unw
+            unw_v = sv_v
+          end
+        end
+        else do
+          if exm = 0 then call file_close ctx
+          else r = call_exit(exm, ctx, NONE_OOP, NONE_OOP)
+          if unw = 0 then do
+            unw = sv_unw
+            unw_v = sv_v
+          end
+        end
+      end
+    end
     sp = sp - 1
   end
   return -1
@@ -217,6 +252,10 @@ gen_resume: procedure = .int
   fd = .int
   r = .int
   h = .int
+  ctx = .int
+  exm = .int
+  en = .int
+  k = .int
   if gn_st[g] = 3 then return 0
   if gn_st[g] = 2 then return raise_exc(C_VALUEERROR, "generator already executing")
   rb = gn_rb[g]
@@ -229,6 +268,16 @@ gen_resume: procedure = .int
   else sp = gn_sp[g]
   gn_val[g] = sent
   gn_st[g] = 2
+  if gen_throw \= 0 then do
+    unw = U_RAISE
+    unw_v = gen_throw
+    gen_throw = 0
+    sp = gx_unw(g, sp)
+    if sp < 0 then do
+      gn_st[g] = 3
+      return 0
+    end
+  end
   do forever
     if sp = 0 then do
       gn_st[g] = 3
@@ -300,13 +349,30 @@ gen_resume: procedure = .int
           gs_a[rb + sp] = it
           gs_s[rb + sp] = 1
         end
-        v = iter_next(gs_a[rb + sp])
+        it = gs_a[rb + sp]
+        if st > 0 & kind_of(it) = K_GEN then v = gen_resume(ob_x[it % 2], gn_val[g])
+        else v = iter_next(it)
         if v = 0 then do
           if unw > 0 then do
             sp = gx_unw(g, sp)
             if sp < 0 then leave
           end
-          else sp = sp - 1
+          else do
+            if t = N_ASSIGN then do
+              it = gs_a[rb + sp]
+              if kind_of(it) = K_GEN then v = gn_ret[ob_x[it % 2]]
+              else v = NONE_OOP
+              do b = 0 to n_c[n] - 1
+                call store al[n_b[n] + b], v, fb
+              end
+              if unw > 0 then do
+                sp = gx_unw(g, sp)
+                if sp < 0 then leave
+                iterate
+              end
+            end
+            sp = sp - 1
+          end
         end
         else do
           gn_sp[g] = sp
@@ -515,6 +581,49 @@ gen_resume: procedure = .int
         else sp = sp - 1
       end
     end
+    else if t = N_WITH then do
+      if st = 0 then do
+        ctx = ev(n_a[n], fb)
+        if ctx = 0 then do
+          sp = gx_unw(g, sp)
+          if sp < 0 then leave
+          iterate
+        end
+        k = kind_of(ctx)
+        exm = 0
+        r = 0
+        if k = K_INST then do
+          en = cls_find(ob_c[ctx % 2], M___ENTER__)
+          exm = cls_find(ob_c[ctx % 2], M___EXIT__)
+          if en = 0 | exm = 0 then r = raise_exc(C_ATTRIBUTEERROR, "__enter__")
+          else r = call1(en, ctx)
+        end
+        else if k = K_FILE then r = ctx
+        else r = raise_exc(C_ATTRIBUTEERROR, "__enter__")
+        if r \= 0 & n_b[n] > 0 then call store n_b[n], r, fb
+        if unw > 0 then do
+          sp = gx_unw(g, sp)
+          if sp < 0 then leave
+          iterate
+        end
+        gs_a[rb + sp] = ctx
+        gs_b[rb + sp] = exm
+        gs_s[rb + sp] = 1
+        sp = sp + 1
+        call gpush rb, sp, n_c[n]
+      end
+      else do
+        ctx = gs_a[rb + sp]
+        exm = gs_b[rb + sp]
+        sp = sp - 1
+        if exm = 0 then call file_close ctx
+        else r = call_exit(exm, ctx, NONE_OOP, NONE_OOP)
+        if unw > 0 then do
+          sp = gx_unw(g, sp)
+          if sp < 0 then leave
+        end
+      end
+    end
     else do
       r = raise_exc(C_RUNTIMEERROR, "unsupported statement containing yield")
       sp = gx_unw(g, sp)
@@ -523,5 +632,8 @@ gen_resume: procedure = .int
   end
   /* the generator ended: sp < 0 */
   gn_st[g] = 3
-  if unw = U_RET then unw = 0
+  if unw = U_RET then do
+    gn_ret[g] = unw_v
+    unw = 0
+  end
   return 0

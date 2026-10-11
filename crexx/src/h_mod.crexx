@@ -237,18 +237,6 @@ meth_file: procedure = .int
 /* ---------------------------------------------------------------------
    modules
    --------------------------------------------------------------------- */
-mod_get: procedure = .int
-  arg name = .string
-  v = .string
-  o = .int
-  v = modo[name]
-  if v \== "" then return v as .int
-  if pos(" " || name || " ", " math random sys time itertools functools collections string copy typing __future__ os numpy ") = 0 then return 0
-  o = newobj(K_MODULE)
-  ob_s[o % 2] = name
-  modo[name] = o as .string
-  return o
-
 /* float value of a numeric argument; raises TypeError otherwise */
 mf: procedure = .float
   arg v = .int
@@ -476,6 +464,7 @@ bcall_mod: procedure = .int
   b = .int
   st = .int
   if bid >= BI_NUMPY_ARRAY then return bcall_np(bid, base, na, nk)
+  if bid >= BI_OS_GETENV & bid <= BI_SYS_GETRECURSIONLIMIT then return bcall_os(bid, base, na, nk)
   if bid <= BI_MATH_PERM & na >= 1 then do
     /* functions of one or two floats */
     if bid <= BI_MATH_TANH | bid = BI_MATH_HYPOT then do

@@ -561,7 +561,7 @@ float_repr: procedure = .string
   do n = 15 to 17
     d = float_digits(x, n)
     dexp = fx_e
-    if n = 17 | dexp < -300 then ok = 1
+    if n = 17 | dexp < -300 | dexp > 306 then ok = 1
     else do
       y = (left(d, 1) || "." || substr(d, 2) || "e" || dexp) as .float
       if y = x then ok = 1
@@ -593,9 +593,32 @@ float_repr: procedure = .string
   if neg = 1 then return "-" || mant
   return mant
 
+/* negation that keeps the sign of zero */
+fneg: procedure = .float
+  arg f = .float
+  half = .float
+  z = .float
+  if f = 0.0 then do
+    if fl_negzero(f) = 1 then return 0.0
+    z = 0.0
+    half = 0.5
+    return rxfloat..ceil(z - half)
+  end
+  return 0.0 - f
+
 fl_negzero: procedure = .int
   arg f = .float
   s = .string
+  z = .float
+  one = .float
+  m1 = .float
+  if f = 0.0 then do
+    z = 0.0
+    one = 1.0
+    m1 = z - one
+    if rxfloat..atan2(f, m1) < 0.0 then return 1
+    return 0
+  end
   s = f as .string
   if left(s, 1) == "-" then return 1
   return 0

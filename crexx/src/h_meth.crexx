@@ -34,13 +34,83 @@ bmeth: procedure = .int
 bmeth_unbound: procedure = .int
   arg c = .int, nid = .int, base = .int, na = .int, nk = .int
   if c = C_DICT & nid = M_FROMKEYS then return dict_fromkeys(base, na)
+  if c = C_OBJECT & nid = M___NEW__ & na >= 1 then do
+    if kind_of(ast[base + 1]) = K_CLASS then return inst_new(ob_x[ast[base + 1] % 2])
+  end
   if na < 1 then return raise_exc(C_TYPEERROR, "descriptor '" || nid_name[nid] || "' of '" || cl_name[c] || "' object needs an argument")
   return bmeth(ast[base + 1], nid, base + 1, na - 1, nk)
 
 meth_common: procedure = .int
   arg o = .int, nid = .int, base = .int, na = .int, nk = .int
   r = .int
+  if kind_of(o) = K_INST then do
+    select
+      when nid = M___SETATTR__ & na = 2 then do
+        call setattr_raw o, nameid(ob_s[ast[base + 1] % 2]), ast[base + 2]
+        if unw > 0 then return 0
+        return NONE_OOP
+      end
+      when nid = M___GETATTRIBUTE__ & na = 1 then return getattr_obj(o, nameid(ob_s[ast[base + 1] % 2]), 0)
+      when nid = M___DELATTR__ & na = 1 then return bi_delattr(o, ast[base + 1])
+      when nid = M___INIT__ then return NONE_OOP
+      when nid = M___NE__ & na = 1 then do
+        r = py_eq(o, ast[base + 1])
+        if unw > 0 then return 0
+        return mkbool(1 - r)
+      end
+      when nid = M___EQ__ & na = 1 then do
+        if o = ast[base + 1] then return TRUE_OOP
+        return NOTIMPL_OOP
+      end
+      when nid = M___HASH__ then return mkint(o)
+      when nid = M___REPR__ | nid = M___STR__ then return mkstr(inst_repr0(o))
+      otherwise nop
+    end
+  end
   select
+    when nid = M___ADD__ then return arith(O_ADD, o, ast[base + 1])
+    when nid = M___SUB__ then return arith(O_SUB, o, ast[base + 1])
+    when nid = M___MUL__ then return arith(O_MUL, o, ast[base + 1])
+    when nid = M___TRUEDIV__ then return arith(O_DIV, o, ast[base + 1])
+    when nid = M___FLOORDIV__ then return arith(O_FLOORDIV, o, ast[base + 1])
+    when nid = M___MOD__ then return arith(O_MOD, o, ast[base + 1])
+    when nid = M___POW__ then return arith(O_POW, o, ast[base + 1])
+    when nid = M___LSHIFT__ then return arith(O_LSHIFT, o, ast[base + 1])
+    when nid = M___RSHIFT__ then return arith(O_RSHIFT, o, ast[base + 1])
+    when nid = M___AND__ then return arith(O_BITAND, o, ast[base + 1])
+    when nid = M___OR__ then return arith(O_BITOR, o, ast[base + 1])
+    when nid = M___XOR__ then return arith(O_BITXOR, o, ast[base + 1])
+    when nid = M___MATMUL__ then return arith(O_MATMUL, o, ast[base + 1])
+    when nid = M___RADD__ then return arith(O_ADD, ast[base + 1], o)
+    when nid = M___RSUB__ then return arith(O_SUB, ast[base + 1], o)
+    when nid = M___RMUL__ then return arith(O_MUL, ast[base + 1], o)
+    when nid = M___RTRUEDIV__ then return arith(O_DIV, ast[base + 1], o)
+    when nid = M___RFLOORDIV__ then return arith(O_FLOORDIV, ast[base + 1], o)
+    when nid = M___RMOD__ then return arith(O_MOD, ast[base + 1], o)
+    when nid = M___RPOW__ then return arith(O_POW, ast[base + 1], o)
+    when nid = M___LT__ then return py_cmp(CMP_LT, o, ast[base + 1])
+    when nid = M___LE__ then return py_cmp(CMP_LE, o, ast[base + 1])
+    when nid = M___GT__ then return py_cmp(CMP_GT, o, ast[base + 1])
+    when nid = M___GE__ then return py_cmp(CMP_GE, o, ast[base + 1])
+    when nid = M___NE__ then do
+      r = py_eq(o, ast[base + 1])
+      if unw > 0 then return 0
+      return mkbool(1 - r)
+    end
+    when nid = M___NEG__ then return unary(1, o)
+    when nid = M___POS__ then return unary(2, o)
+    when nid = M___INVERT__ then return unary(3, o)
+    when nid = M___ABS__ then return bi_abs(o)
+    when nid = M___SETITEM__ then do
+      call setitem o, ast[base + 1], ast[base + 2]
+      if unw > 0 then return 0
+      return NONE_OOP
+    end
+    when nid = M___DELITEM__ then do
+      call delitem o, ast[base + 1]
+      if unw > 0 then return 0
+      return NONE_OOP
+    end
     when nid = M___LEN__ then return bi_len(o)
     when nid = M___STR__ then do
       r = str_of(o)
@@ -58,7 +128,7 @@ meth_common: procedure = .int
       if r = 0 then do
         if unw > 0 then return 0
         unw = U_RAISE
-        unw_v = exc_new0(C_STOPITERATION)
+        unw_v = stop_exc(o)
         return 0
       end
       return r
@@ -929,31 +999,13 @@ meth_dict: procedure = .int
       if na = 2 then return ast[base + 2]
       return NONE_OOP
     end
-    when nid = M_ITEMS then do
-      l = mklist(dd_n[d])
-      e = dd_head[d]
-      do while e > 0
-        if de_live[e] = 1 then do
-          t = mktuple(2)
-          sl[ob_p[t % 2]] = de_key[e]
-          sl[ob_p[t % 2] + 1] = de_val[e]
-          call list_append l, t
-        end
-        e = de_next[e]
-      end
-      return l
-    end
-    when nid = M_KEYS | nid = M_VALUES then do
-      l = mklist(dd_n[d])
-      e = dd_head[d]
-      do while e > 0
-        if de_live[e] = 1 then do
-          if nid = M_KEYS then call list_append l, de_key[e]
-          else call list_append l, de_val[e]
-        end
-        e = de_next[e]
-      end
-      return l
+    when nid = M_ITEMS | nid = M_KEYS | nid = M_VALUES then do
+      t = newobj(K_DVIEW)
+      ob_x[t % 2] = o
+      if nid = M_KEYS then ob_n[t % 2] = 1
+      else if nid = M_VALUES then ob_n[t % 2] = 2
+      else ob_n[t % 2] = 3
+      return t
     end
     when nid = M_SETDEFAULT then do
       if na < 1 | na > 2 then return nargs_err("setdefault", na, 1, 2)
@@ -1008,7 +1060,7 @@ meth_dict: procedure = .int
       return NONE_OOP
     end
     when nid = M_MOST_COMMON then do
-      l = meth_dict(o, M_ITEMS, base, 0, 0)
+      l = iter_list(meth_dict(o, M_ITEMS, base, 0, 0))
       /* stable sort by count, descending */
       a = newobj(K_BUILTIN)
       ob_x[a % 2] = BI__SECOND
@@ -1154,22 +1206,71 @@ meth_num: procedure = .int
   end
   return meth_common(o, nid, base, na, nk)
 
+stop_exc: procedure = .int
+  arg o = .int
+  e = .int
+  e = exc_new0(C_STOPITERATION)
+  if kind_of(o) = K_GEN then call inst_set e, M_VALUE, gn_ret[ob_x[o % 2]]
+  else call inst_set e, M_VALUE, NONE_OOP
+  return e
+
 meth_gen: procedure = .int
   arg o = .int, nid = .int, base = .int, na = .int, nk = .int
   v = .int
+  g = .int
+  e = .int
   if nid = M_SEND then do
     if kind_of(o) \= K_GEN then return no_attr(o, nid)
     v = gen_resume(ob_x[o % 2], ast[base + 1])
     if v = 0 then do
       if unw > 0 then return 0
       unw = U_RAISE
-      unw_v = exc_new0(C_STOPITERATION)
+      unw_v = stop_exc(o)
+      return 0
+    end
+    return v
+  end
+  if nid = M_THROW & kind_of(o) = K_GEN then do
+    g = ob_x[o % 2]
+    e = ast[base + 1]
+    if kind_of(e) = K_CLASS then e = exc_new0(ob_x[e % 2])
+    if gn_st[g] = 0 | gn_st[g] = 3 then do
+      gn_st[g] = 3
+      unw = U_RAISE
+      unw_v = e
+      return 0
+    end
+    gen_throw = e
+    v = gen_resume(g, NONE_OOP)
+    gen_throw = 0
+    if v = 0 then do
+      if unw > 0 then return 0
+      unw = U_RAISE
+      unw_v = stop_exc(o)
       return 0
     end
     return v
   end
   if nid = M_CLOSE then do
-    if kind_of(o) = K_GEN then gn_st[ob_x[o % 2]] = 3
+    if kind_of(o) = K_GEN then do
+      g = ob_x[o % 2]
+      if gn_st[g] = 1 then do
+        gen_throw = exc_new0(C_GENERATOREXIT)
+        v = gen_resume(g, NONE_OOP)
+        gen_throw = 0
+        if v = 0 then do
+          if unw = U_RAISE then do
+            if cls_issub(ob_c[unw_v % 2], C_GENERATOREXIT) = 1 | cls_issub(ob_c[unw_v % 2], C_STOPITERATION) = 1 then unw = 0
+          end
+          if unw > 0 then return 0
+        end
+        else do
+          gn_st[g] = 3
+          return raise_exc(C_RUNTIMEERROR, "generator ignored GeneratorExit")
+        end
+      end
+      gn_st[g] = 3
+    end
     return NONE_OOP
   end
   return meth_common(o, nid, base, na, nk)

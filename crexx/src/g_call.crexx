@@ -220,6 +220,8 @@ callfunc: procedure = .int
   d = .int
   ok = .int
   fx = .int
+  mi = .int
+  sv_g = .int
   fd = ob_x[f % 2]
   size = fd_ns[fd]
   np = fd_np[fd]
@@ -253,7 +255,16 @@ callfunc: procedure = .int
     cdepth = cdepth - 1
     return raise_exc(C_RECURSIONERROR, "maximum recursion depth exceeded")
   end
-  call ex fd_body[fd], nf
+  mi = fd_mod[fd]
+  if mi \= cur_mi then do
+    sv_g = cur_mi
+    cur_mi = mi
+    gfb = mod_fb[mi]
+    call ex fd_body[fd], nf
+    cur_mi = sv_g
+    gfb = mod_fb[sv_g]
+  end
+  else call ex fd_body[fd], nf
   cdepth = cdepth - 1
   if unw = U_RET then do
     unw = 0
@@ -360,6 +371,11 @@ getattr_obj: procedure = .int
     if nid = M___DICT__ then return inst_dict(o)
     return no_attr(o, nid)
   end
+  if k = K_SLICE then do
+    if nid = M_START then return ob_n[o % 2]
+    if nid = M_STOP then return ob_x[o % 2]
+    if nid = M_STEP then return ob_y[o % 2]
+  end
   if k = K_CLASS then do
     c = ob_x[o % 2]
     v = cls_find(c, nid)
@@ -370,29 +386,36 @@ getattr_obj: procedure = .int
     end
     if nid = M___NAME__ | nid = M___QUALNAME__ then return mkstr(cl_name[c])
     if nid = M___BASES__ then do
-      if cl_base[c] = 0 then return mktuple(0)
-      v = mktuple(1)
-      sl[ob_p[v % 2]] = cl_obj[cl_base[c]]
+      v = mktuple(cl_bn[c])
+      do ix = 0 to cl_bn[c] - 1
+        sl[ob_p[v % 2] + ix] = cl_obj[bs_a[cl_bs[c] + ix]]
+      end
       return v
     end
     if nid = M___MRO__ then return cls_mro(c)
-    if nid = M___MODULE__ then return mkstr("__main__")
+    if nid = M___MODULE__ then return mkstr(modname_of(cl_mod[c]))
     if nid = M___DOC__ then return NONE_OOP
     if nid = M___CLASS__ then return cl_obj[C_TYPE]
     return no_attr(o, nid)
   end
   if k = K_MODULE then do
-    s = modattr[ob_s[o % 2] || "." || nid_name[nid]]
-    if s \== "" then return s as .int
+    v = mod_getattr(o, nid)
+    if v \= 0 then return v
+    if unw > 0 then return 0
     return no_attr(o, nid)
   end
   if k = K_SUPER then do
-    c = cl_base[ob_x[ob_y[o % 2] % 2]]
-    v = cls_find(c, nid)
-    if v = 0 then return raise_exc(C_ATTRIBUTEERROR, "'super' object has no attribute '" || nid_name[nid] || "'")
-    return bind_attr(v, ob_x[o % 2], c)
+    v = super_find(o, nid)
+    if v = 0 then do
+      c = ob_x[o % 2]
+      if kind_of(c) \= K_CLASS then return mkbmethb(c, nid)
+      return raise_exc(C_ATTRIBUTEERROR, "'super' object has no attribute '" || nid_name[nid] || "'")
+    end
+    return bind_attr(v, ob_x[o % 2], sup_c)
   end
   if k = K_FUNC then do
+    s = fnattr[o || "." || nid]
+    if s \== "" then return s as .int
     if nid = M___NAME__ | nid = M___QUALNAME__ then return mkstr(fd_name[ob_x[o % 2]])
     if nid = M___DOC__ then return NONE_OOP
     if nid = M___CLASS__ then return cl_obj[C_FUNCTION]
@@ -439,24 +462,47 @@ getattr_obj: procedure = .int
   end
   return mkbmethb(o, nid)
 
-inst_dict: procedure = .int
-  arg o = .int
-  d = .int
-  c = .int
-  s = .string
-  i = .int
-  d = dict_new(K_DICT)
-  return d
-
 cls_mro: procedure = .int
   arg c = .int
   l = .int
+  i = .int
   l = mklist(4)
-  do while c > 0
-    call list_append l, cl_obj[c]
-    c = cl_base[c]
+  do i = 0 to cl_mn[c] - 1
+    call list_append l, cl_obj[mro_a[cl_ms[c] + i]]
   end
   return tup_of_list(l)
+
+/* the next definition of nid after the defining class of super object o in the linearisation
+   of the receiver; sup_c is set to the receiver class */
+super_find: procedure = .int
+  arg o = .int, nid = .int
+  selfv = .int
+  dcls = .int
+  start = .int
+  st = .int
+  n = .int
+  i = .int
+  p = .int
+  v = .string
+  selfv = ob_x[o % 2]
+  dcls = ob_x[ob_y[o % 2] % 2]
+  if kind_of(selfv) = K_CLASS then start = ob_x[selfv % 2]
+  else start = cls_of(selfv)
+  sup_c = start
+  st = cl_ms[start]
+  n = cl_mn[start]
+  p = n
+  do i = 0 to n - 1
+    if mro_a[st + i] = dcls then do
+      p = i
+      leave
+    end
+  end
+  do i = p + 1 to n - 1
+    v = ca[mro_a[st + i] || "." || nid]
+    if v \== "" then return v as .int
+  end
+  return 0
 
 mkbmethb: procedure = .int
   arg o = .int, nid = .int
@@ -517,12 +563,15 @@ getattr_call: procedure = .int
     return 1
   end
   if k = K_SUPER then do
-    c = cl_base[ob_x[ob_y[o % 2] % 2]]
-    v = cls_find(c, nid)
-    if v = 0 then return raise_exc(C_ATTRIBUTEERROR, "'super' object has no attribute '" || nid_name[nid] || "'")
+    v = super_find(o, nid)
+    if v = 0 then do
+      c = ob_x[o % 2]
+      if kind_of(c) \= K_CLASS then return mkbmethb(c, nid)
+      return raise_exc(C_ATTRIBUTEERROR, "'super' object has no attribute '" || nid_name[nid] || "'")
+    end
     ev_self = ob_x[o % 2]
     if kind_of(v) = K_FUNC | kind_of(v) = K_BUILTIN then return v
-    return bind_attr(v, ob_x[o % 2], c)
+    return bind_attr(v, ob_x[o % 2], sup_c)
   end
   if k = K_CLASS then do
     c = ob_x[o % 2]
@@ -539,7 +588,32 @@ getattr_call: procedure = .int
       return 1
     end
   end
-  return getattr_obj(o, nid, 0)
+  v = getattr_obj(o, nid, 0)
+  ev_self = 0
+  ev_bm = 0
+  return v
+
+setattr_raw: procedure = .void
+  arg o = .int, nid = .int, v = .int
+  p = .int
+  r = .int
+  if kind_of(o) \= K_INST then do
+    call setattr_obj o, nid, v
+    return
+  end
+  p = cls_find(ob_c[o % 2], nid)
+  if p > 0 then do
+    if kind_of(p) = K_PROP then do
+      if ob_y[p % 2] = 0 then do
+        r = raise_exc(C_ATTRIBUTEERROR, "can't set attribute '" || nid_name[nid] || "'")
+        return
+      end
+      r = call2(ob_y[p % 2], o, v)
+      return
+    end
+  end
+  call inst_set o, nid, v
+  return
 
 setattr_obj: procedure = .void
   arg o = .int, nid = .int, v = .int
@@ -573,6 +647,13 @@ setattr_obj: procedure = .void
     call cls_set ob_x[o % 2], nid, v
     return
   end
-  if k = K_FUNC then return
+  if k = K_FUNC then do
+    fnattr[o || "." || nid] = v as .string
+    return
+  end
+  if k = K_MODULE then do
+    call mod_setattr o, nid, v
+    return
+  end
   r = raise_exc(C_ATTRIBUTEERROR, "'" || type_name(o) || "' object has no attribute '" || nid_name[nid] || "'")
   return

@@ -1,0 +1,47 @@
+det 4.686 5.0 1.0
+inv [[0.1408, 0.2347, -0.1408], [-0.7362, 0.4396, 0.2817], [3.1818, -3.0303, 0.0]]
+inv*A [[1.0, -0.0], [0.0, 1.0]]
+solve [0.187793, 0.98805, -2.878788]
+solve2 [[0.6, -0.2], [-0.2, 0.4]]
+eigvalsh [1.880087, 2.398343, 4.72157]
+eigh [1.880087, 2.398343, 4.72157] True True
+eigvals [2.0, 3.0, 6.0]
+eigvals2 [-0.372281, 5.372281]
+norm 9.442987 5.0 12.1 10.5 9.158651 5.0
+norm axis [4.512206, 4.705316, 6.831544] [6.989278, 6.217717, 1.28841]
+rank 3 1 0
+svd [9.158651, 2.28892, 0.223532]
+svd recon True (3, 3) (3,) (3, 3)
+svd tall (3, 3) (2,) (2, 2) [9.525518, 0.514301]
+svd thin (3, 2) True
+qr True True True (3, 3) (3, 3)
+qr tall (3, 2) (2, 2) [5.91608, 0.828079]
+lstsq [3.5, 1.4] [4.2] 2 [5.779379, 0.773809]
+pinv [[1.0, 0.5, -0.0, -0.5], [-0.3, -0.1, 0.1, 0.3]]
+pinv2 True
+cond 40.9724
+power [[15.0, 20.0], [20.0, 35.0]] [[0.6, -0.2], [-0.2, 0.4]]
+cholesky [[2.0, 0.0, 0.0], [0.5, 1.658312, 0.0], [0.25, 0.045227, 1.391206]]
+LinAlgError: Singular matrix
+LinAlgError: Singular matrix
+rand (3, 4) True True
+randn (2000,) True True
+randint (200,) True True True
+randint scalar True True
+uniform True (2, 3)
+normal (4, 500) True True
+choice (4,) 4 True
+choice list (6,) True
+choice p {1}
+permutation True (5,)
+shuffle True
+shuffle list True
+shuffle rows True True
+seed repeat True
+rng.random (5,) float
+rng.integers True (2, 2)
+rng.normal (300,) (2, 3)
+rng.choice (3,) 6
+rng.uniform True (5,)
+rng repeat True True
+rng.shuffle (10,)

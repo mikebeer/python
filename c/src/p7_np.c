@@ -18,6 +18,9 @@ enum {
 static Module *new_module(const char *name);
 static void mod_def(Module *m, const char *name, BFn fn);
 static void mod_val(Module *m, const char *name, Value v);
+static void np_init2(Module *m);
+static void la_init(Module *np);
+static void rnd_init(Module *np);
 
 typedef struct NdTmp { Nd nd; long i; double d; } NdTmp;
 
@@ -2097,12 +2100,8 @@ static void np_init(void)
     c->name = intern_c("ndarray"); c->base = cls_object;
     c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
     c->ctor = np_array; c->flags = CF_BUILTIN;
+    c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL; c->modname = NULL;
     cls_ndarray = c;
-    c = (Class *)gc_alloc(sizeof(Class), T_CLASS);
-    c->name = intern_c("slice"); c->base = cls_object;
-    c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
-    c->ctor = NULL; c->flags = CF_BUILTIN;
-    cls_slice = c;
     def_bi(cls_ndarray, "tolist", nd_tolist); def_bi(cls_ndarray, "copy", nd_copy);
     def_bi(cls_ndarray, "reshape", nd_reshape); def_bi(cls_ndarray, "flatten", nd_flatten);
     def_bi(cls_ndarray, "ravel", nd_flatten); def_bi(cls_ndarray, "astype", nd_astype_m);
@@ -2167,4 +2166,7 @@ static void np_init(void)
     mod_val(m, "float64", mkobj(cls_float, T_CLASS));
     mod_val(m, "int64", mkobj(cls_int, T_CLASS));
     mod_val(m, "bool_", mkobj(cls_bool, T_CLASS));
+    np_init2(m);
+    la_init(m);
+    rnd_init(m);
 }

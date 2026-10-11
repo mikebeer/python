@@ -12,7 +12,13 @@ import _rxsysb
 @@EXPOSE@@
 
 arg av = .string[]
+if av.0 >= 1 then do
+  if av[1] == "--noinit" then exit 0
+end
 call init
+if av.0 >= 1 then do
+  if av[1] == "--noboot" then exit 0
+end
 script = ""
 code = ""
 have_code = 0
@@ -20,7 +26,8 @@ nfiles = 0
 ia = 1
 do while ia <= av.0
   oa = av[ia]
-  if oa == "-c" & ia < av.0 & nfiles = 0 & have_code = 0 then do
+  if left(oa, 9) == "--pypath=" & nfiles = 0 & have_code = 0 then pypath = substr(oa, 10)
+  else if oa == "-c" & ia < av.0 & nfiles = 0 & have_code = 0 then do
     ia = ia + 1
     code = av[ia]
     have_code = 1
@@ -40,6 +47,11 @@ do while ia <= av.0
     sargs[nsargs] = oa
   end
   ia = ia + 1
+end
+if nfiles = 1 then do
+  ip = lastpos("/", script)
+  if ip > 1 then script_dir = left(script, ip - 1)
+  else if ip = 1 then script_dir = "/"
 end
 call boot
 if have_code = 1 then rc_exit = run_source(code, "<string>")
@@ -130,24 +142,27 @@ run_source: procedure = .int
   a = .int
   s = .string
   v = .int
-  ntk = 0
-  nnode = 0
-  nal = 0
-  psp = 0
-  pe = 0
-  pe_msg = ""
-  tpp = 1
-  cursc = 0
-  call lex_text src, 0
-  sc = scope_push(SK_MODULE)
-  sc_id[sc] = 0
-  body = p_file()
-  call scope_end sc
+  mi = .int
+  i = .int
+  mi = new_module("__main__", name, 0, "")
+  call reg_module "__main__", mod_obj[mi]
+  body = parse_module(src, mi)
   if pe = 1 then do
     call errs "  File " || '"' || name || '"' || '0a'x || pe_msg || '0a'x
     return 1
   end
-  gfb = alloc_frame(sc_n[1] + 1)
+  sc = mod_sc[mi]
+  mod_fsz[mi] = sc_n[sc] + 1 + 64
+  if mod_dyn[mi] = 1 then mod_fsz[mi] = mod_fsz[mi] + 512
+  gfb = alloc_frame(mod_fsz[mi])
+  mod_fb[mi] = gfb
+  cur_mi = mi
+  call setg mi, "__name__", mkstr("__main__")
+  call setg mi, "__file__", mkstr(name)
+  call setg mi, "__package__", NONE_OOP
+  do i = 1 to ndyn
+    if dyn_mi[i] = mi then vp[gfb + dyn_slot[i]] = dyn_val[i]
+  end
   unw = 0
   exc_cur = 0
   call ex body, gfb
@@ -269,6 +284,7 @@ init: procedure = .void
   fd_cx = .int[]
   fd_gd = .int[]
   fd_name = .string[]
+  fd_mod = .int[]
   npr = 0
   pr_name = .string[]
   pr_def = .int[]
@@ -387,6 +403,76 @@ init: procedure = .void
   fx_e = 0
   fneg_max = 0.0
   fneg_max = fneg_max - 1.7976931348623157e308
+  /* ---- modules ---- */
+  nmod = 0
+  pypath = ""
+  script_dir = "."
+  mod_name = .string[]
+  mod_file = .string[]
+  mod_pkg = .string[]
+  mod_pdir = .string[]
+  mod_ispkg = .int[]
+  mod_sc = .int[]
+  mod_fb = .int[]
+  mod_obj = .int[]
+  mod_dyn = .int[]
+  modx = .stem()
+  hyb = .stem()
+  cur_mi = 0
+  parse_mi = 0
+  parse_dyn = 0
+  cur_msc = 0
+  ndyn = 0
+  dyn_mi = .int[]
+  dyn_slot = .int[]
+  dyn_val = .int[]
+  nbn = 0
+  bn_sc = .int[]
+  bn_name = .string[]
+  bn_slot = .int[]
+  sys_modules = 0
+  syspath = .string[]
+  nsyspath = 0
+  imp_file = ""
+  imp_ispkg = 0
+  imp_pdir = ""
+  imp_quiet = 0
+  natives = " math random sys time itertools functools collections string copy typing __future__ os os.path numpy numpy.linalg numpy.random warnings abc "
+  shadow = " functools.wraps functools.lru_cache functools.cache "
+  /* ---- class linearisation ---- */
+  cl_mod = .int[]
+  cl_bt = .int[]
+  cl_ms = .int[]
+  cl_mn = .int[]
+  cl_bs = .int[]
+  cl_bn = .int[]
+  mro_a = .int[]
+  bs_a = .int[]
+  nmro = 0
+  nbs = 0
+  nca = 0
+  ca_c = .int[]
+  ca_n = .int[]
+  nis = 0
+  is_c = .int[]
+  is_n = .int[]
+  is_s = .int[]
+  gn_ret = .int[]
+  gen_throw = 0
+  mod_fsz = .int[]
+  parse_dyn_init = 0
+  fmt_nested = 0
+  fmt_auto_in = 0
+  fmt_auto_out = 0
+  fnattr = .stem()
+  dd_own = .int[]
+  bl_a = .int[]
+  bl_n = 0
+  sq_a = .int[]
+  sq_s = .int[]
+  sq_e = .int[]
+  sq_p = .int[]
+  sup_c = 0
   /* ---- numpy ---- */
   npn = 0
   npf = .float[]
@@ -490,7 +576,7 @@ boot: procedure = .void
     ob_x[o % 2] = i
     bi_oop[i] = o
     if p > 0 then modattr[nm] = o as .string
-    else if left(nm, 1) \== "_" then bimap[nm] = o as .string
+    else if left(nm, 1) \== "_" | nm == "__import__" then bimap[nm] = o as .string
   end
   do i = 1 to words(aliasboot)
     spec = word(aliasboot, i)
@@ -586,7 +672,16 @@ boot: procedure = .void
   modattr["os.sep"] = mkstr("/") as .string
   modattr["os.linesep"] = mkstr('0a'x) as .string
   modattr["os.name"] = mkstr("posix") as .string
-  bimap["__name__"] = mkstr("__main__") as .string
+  sys_modules = dict_new(K_DICT)
+  modattr["sys.modules"] = sys_modules as .string
+  call setup_path
+  modattr["os.path"] = native_mod("os.path") as .string
+  modattr["numpy.linalg"] = native_mod("numpy.linalg") as .string
+  modattr["numpy.random"] = native_mod("numpy.random") as .string
+  modattr["abc.ABC"] = cl_obj[C_ABC] as .string
+  modattr["abc.ABCMeta"] = cl_obj[C_ABC] as .string
+  bimap["IOError"] = cl_obj[C_OSERROR] as .string
+  bimap["EnvironmentError"] = cl_obj[C_OSERROR] as .string
   bimap["NotImplemented"] = NOTIMPL_OOP as .string
   bimap["Ellipsis"] = ELLIPSIS_OOP as .string
   bimap["frozenset"] = cl_obj[C_SET] as .string

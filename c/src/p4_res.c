@@ -1,18 +1,49 @@
 /* =========================================================================
    p4_res.c   scope resolution: locals, cells, free variables, globals
    ========================================================================= */
+static long *gtab;       /* open addressing hash: global index + 1, 0 = empty */
+static long gtabsz;
+
+static void gtab_insert(Str *nm, long idx)
+{
+    long k = (long)(nm->hash % (unsigned long)gtabsz);
+    while (gtab[k]) k = (k + 1) % gtabsz;
+    gtab[k] = idx + 1;
+}
+static long global_find(Str *nm)
+{
+    long k;
+    if (!gtab) return -1;
+    k = (long)(nm->hash % (unsigned long)gtabsz);
+    while (gtab[k]) {
+        if (gnames[gtab[k] - 1] == nm) return gtab[k] - 1;
+        k = (k + 1) % gtabsz;
+    }
+    return -1;
+}
 static long global_index(Str *nm)
 {
     long i;
-    for (i = 0; i < nglobals; i++)
-        if (gnames[i] == nm) return i;
+    if (nm->hash == 0) str_hash(nm);
+    i = global_find(nm);
+    if (i >= 0) return i;
     if (nglobals >= gcap) {
         gcap = gcap ? gcap * 2 : 256;
         gnames = (Str **)xrealloc(gnames, sizeof(Str *) * (size_t)gcap);
         G = (Value *)xrealloc(G, sizeof(Value) * (size_t)gcap);
     }
+    if (!gtab || (nglobals + 1) * 2 > gtabsz) {
+        long j;
+        free(gtab);
+        gtabsz = gtabsz ? gtabsz * 2 : 1024;
+        while ((nglobals + 1) * 2 > gtabsz) gtabsz *= 2;
+        gtab = (long *)xmalloc(sizeof(long) * (size_t)gtabsz);
+        for (j = 0; j < gtabsz; j++) gtab[j] = 0;
+        for (j = 0; j < nglobals; j++) gtab_insert(gnames[j], j);
+    }
     gnames[nglobals] = nm;
     G[nglobals] = UNSET_V;
+    gtab_insert(nm, nglobals);
     return nglobals++;
 }
 
@@ -20,6 +51,26 @@ static void set_global(Str *nm, Value v)
 {
     long i = global_index(nm);
     G[i] = v;
+}
+
+/* the global name `nm` of the module with prefix `pfx` ("a.b."); NULL prefix = builtins */
+static Str *prefixed(Str *pfx, Str *nm)
+{
+    Buf b;
+    Str *r;
+    if (!pfx) return nm;
+    buf_init(&b);
+    buf_addn(&b, pfx->s, pfx->len);
+    buf_addn(&b, nm->s, nm->len);
+    r = intern(b.s, b.n);
+    buf_free(&b);
+    return r;
+}
+static void setup_global(Var *v)
+{
+    v->kind = VK_GLOBAL;
+    v->slot = (int)global_index(prefixed(cur_gpfx, v->name));
+    v->bslot = cur_gpfx ? (int)global_index(v->name) : -1;
 }
 
 static void add_free(Scope *s, Var *v)
@@ -68,8 +119,7 @@ static void resolve_var(Scope *s, Var *v)
 {
     Var *src;
     if (s->kind == SC_MOD || v->isglobal) {
-        v->kind = VK_GLOBAL;
-        v->slot = (int)global_index(v->name);
+        setup_global(v);
         return;
     }
     if (v->isnonlocal) {
@@ -91,8 +141,7 @@ static void resolve_var(Scope *s, Var *v)
                 if (ex) { free(fb); fb = ex; }
                 else { fb->kind = VK_FREE; fb->src = src; add_free(s, fb); }
             } else {
-                fb->kind = VK_GLOBAL;
-                fb->slot = (int)global_index(v->name);
+                setup_global(fb);
             }
             v->fb = fb;
         }
@@ -109,8 +158,7 @@ static void resolve_var(Scope *s, Var *v)
             add_free(s, v);
         }
     } else {
-        v->kind = VK_GLOBAL;
-        v->slot = (int)global_index(v->name);
+        setup_global(v);
     }
 }
 
@@ -136,6 +184,7 @@ static void resolve_scope(Scope *s)
         fd->nfree = s->nfree;
         fd->fv = s->freevars;
         fd->nstate = s->nstate;
+        fd->gpfx = cur_gpfx;
         fd->ncells = nc;
         fd->cellslots = (int *)xmalloc(sizeof(int) * (size_t)(nc + 1));
         for (i = 0; i < s->nvars; i++)

@@ -912,14 +912,19 @@ np_rint: procedure = .float
 np_round1: procedure = .float
   arg f = .float, d = .int
   pw = .float
+  r = .float
   if f \= f | finf(f) \= 0 then return f
   if d > 300 | d < -300 then return f
   if d >= 0 then do
     pw = rxfloat..pow10(d as .float)
-    return np_rint(f * pw) / pw
+    r = np_rint(f * pw) / pw
   end
-  pw = rxfloat..pow10((0 - d) as .float)
-  return np_rint(f / pw) * pw
+  else do
+    pw = rxfloat..pow10((0 - d) as .float)
+    r = np_rint(f / pw) * pw
+  end
+  if r = 0.0 & f < 0.0 then return fneg(0.0)
+  return r
 
 np_round_arr: procedure = .int
   arg a = .int, d = .int

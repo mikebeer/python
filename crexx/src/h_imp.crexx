@@ -1,0 +1,685 @@
+/* ---------------------------------------------------------------------
+   Import system: modules from files, packages, relative imports,
+   sys.modules, native modules and the pylib fall-back
+   --------------------------------------------------------------------- */
+new_module: procedure = .int
+  arg name = .string, fname = .string, ispkg = .int, pdir = .string
+  o = .int
+  p = .int
+  nmod = nmod + 1
+  mod_name[nmod] = name
+  mod_file[nmod] = fname
+  mod_ispkg[nmod] = ispkg
+  mod_pdir[nmod] = pdir
+  mod_sc[nmod] = 0
+  mod_fb[nmod] = 0
+  mod_dyn[nmod] = 0
+  if ispkg = 1 then mod_pkg[nmod] = name
+  else do
+    p = lastpos(".", name)
+    if p > 0 then mod_pkg[nmod] = left(name, p - 1)
+    else mod_pkg[nmod] = ""
+  end
+  o = newobj(K_MODULE)
+  ob_s[o % 2] = name
+  ob_x[o % 2] = nmod
+  mod_obj[nmod] = o
+  return nmod
+
+native_mod: procedure = .int
+  arg name = .string
+  v = .string
+  o = .int
+  v = modo[name]
+  if v \== "" then return v as .int
+  o = newobj(K_MODULE)
+  ob_s[o % 2] = name
+  ob_x[o % 2] = 0
+  modo[name] = o as .string
+  return o
+
+reg_module: procedure = .void
+  arg key = .string, o = .int
+  call dict_put ob_x[sys_modules % 2], "s" || key, mkstr(key), o
+  return
+
+unreg_module: procedure = .void
+  arg key = .string
+  e = .int
+  e = dict_del(ob_x[sys_modules % 2], "s" || key)
+  return
+
+/* is there a file module leaf in directory dir (leaf.py or leaf/__init__.py) */
+imp_find: procedure = .int
+  arg dir = .string, leaf = .string
+  p = .string
+  if dir \== "" then p = dir || "/" || leaf
+  else p = leaf
+  if file_exists(p || ".py") = 1 then do
+    imp_file = p || ".py"
+    imp_ispkg = 0
+    imp_pdir = dir
+    return 1
+  end
+  if file_exists(p || "/__init__.py") = 1 then do
+    imp_file = p || "/__init__.py"
+    imp_ispkg = 1
+    imp_pdir = p
+    return 1
+  end
+  return 0
+
+/* parse the source of module mi; returns the body node or 0 (pe_msg set) */
+parse_module: procedure = .int
+  arg src = .string, mi = .int
+  body = .int
+  sc = .int
+  dmy = .int
+  ntk = 0
+  tpp = 1
+  psp = 0
+  pe = 0
+  pe_msg = ""
+  cursc = 0
+  parse_dyn = parse_dyn_init
+  parse_mi = mi
+  call lex_text src, 0
+  sc = scope_push(SK_MODULE)
+  sc_id[sc] = 0
+  mod_sc[mi] = sc
+  cur_msc = sc
+  dmy = bind_name("__name__")
+  dmy = bind_name("__file__")
+  dmy = bind_name("__package__")
+  body = p_file()
+  call scope_end sc
+  mod_dyn[mi] = parse_dyn
+  if pe = 1 then return 0
+  return body
+
+setg: procedure = .void
+  arg mi = .int, nm = .string, v = .int
+  s = .string
+  s = scm[mod_sc[mi] || "|" || nm]
+  if s \== "" then vp[mod_fb[mi] + (s as .int)] = v
+  return
+
+/* parse and run the source of module mi in a fresh global frame; 1 on success */
+module_exec: procedure = .int
+  arg mi = .int, src = .string
+  body = .int
+  sz = .int
+  fbm = .int
+  i = .int
+  sv_g = .int
+  sv_m = .int
+  body = parse_module(src, mi)
+  if body = 0 then do
+    call raise_exc C_SYNTAXERROR, mod_file[mi] || ": " || pe_msg
+    return 0
+  end
+  sz = sc_n[mod_sc[mi]] + 1 + 64
+  if mod_dyn[mi] = 1 then sz = sz + 512
+  mod_fsz[mi] = sz
+  fbm = alloc_frame(sz)
+  mod_fb[mi] = fbm
+  call setg mi, "__name__", mkstr(mod_name[mi])
+  call setg mi, "__file__", mkstr(mod_file[mi])
+  call setg mi, "__package__", mkstr(mod_pkg[mi])
+  do i = 1 to ndyn
+    if dyn_mi[i] = mi then vp[fbm + dyn_slot[i]] = dyn_val[i]
+  end
+  sv_g = gfb
+  sv_m = cur_mi
+  gfb = fbm
+  cur_mi = mi
+  call ex body, fbm
+  gfb = sv_g
+  cur_mi = sv_m
+  if unw > 0 then return 0
+  return 1
+
+module_load: procedure = .int
+  arg mi = .int
+  src = .string
+  src = read_file(mod_file[mi])
+  return module_exec(mi, src)
+
+/* import a module by its full dotted name: the module object, or 0 with an exception */
+import_mod: procedure = .int
+  arg full = .string
+  e = .int
+  p = .int
+  parent = .string
+  leaf = .string
+  pm = .int
+  mi = .int
+  found = .int
+  i = .int
+  o = .int
+  q = .int
+  q = imp_quiet
+  imp_quiet = 0
+  e = dict_find(ob_x[sys_modules % 2], "s" || full)
+  if e > 0 then return de_val[e]
+  p = lastpos(".", full)
+  parent = ""
+  leaf = full
+  pm = 0
+  if p > 0 then do
+    parent = left(full, p - 1)
+    leaf = substr(full, p + 1)
+    pm = import_mod(parent)
+    if pm = 0 then return 0
+  end
+  if pos(" " || full || " ", natives) > 0 then do
+    o = native_mod(full)
+    call reg_module full, o
+    return o
+  end
+  found = 0
+  if parent == "" then do
+    do i = 1 to nsyspath
+      if found = 0 then found = imp_find(syspath[i], leaf)
+    end
+  end
+  else if ob_x[pm % 2] > 0 then do
+    if mod_ispkg[ob_x[pm % 2]] = 1 then found = imp_find(mod_pdir[ob_x[pm % 2]], leaf)
+  end
+  else do
+    /* submodule of a native module (collections.abc): a library file */
+    do i = 2 to nsyspath
+      if found = 0 then found = imp_find(syspath[i], changestr(".", full, "/"))
+    end
+  end
+  if found = 0 then do
+    if q = 1 then return 0
+    return raise_exc(C_MODULENOTFOUNDERROR, "No module named '" || full || "'")
+  end
+  mi = new_module(full, imp_file, imp_ispkg, imp_pdir)
+  o = mod_obj[mi]
+  call reg_module full, o
+  if module_load(mi) = 0 then do
+    call unreg_module full
+    return 0
+  end
+  if pm > 0 then do
+    if ob_x[pm % 2] > 0 then call mod_setx pm, leaf, o
+    else modattr[parent || "." || leaf] = o as .string
+  end
+  return o
+
+/* attribute leaf of package module pm := o */
+mod_setx: procedure = .void
+  arg pm = .int, leaf = .string, o = .int
+  mi = .int
+  s = .string
+  mi = ob_x[pm % 2]
+  if mi > 0 then do
+    s = scm[mod_sc[mi] || "|" || leaf]
+    if s \== "" & mod_fb[mi] > 0 then do
+      if (s as .int) > 0 then do
+        vp[mod_fb[mi] + (s as .int)] = o
+        return
+      end
+    end
+    modx[mi || "." || leaf] = o as .string
+  end
+  else modattr[ob_s[pm % 2] || "." || leaf] = o as .string
+  return
+
+/* value of attribute nm of file module mi, or 0 */
+fmod_attr: procedure = .int
+  arg mi = .int, nm = .string
+  s = .string
+  v = .int
+  l = .int
+  s = scm[mod_sc[mi] || "|" || nm]
+  if s \== "" & mod_fb[mi] > 0 then do
+    if (s as .int) > 0 then do
+      v = vp[mod_fb[mi] + (s as .int)]
+      if v \= 0 then return v
+    end
+  end
+  s = modx[mi || "." || nm]
+  if s \== "" then return s as .int
+  if nm == "__dict__" then return mod_dict(mi)
+  if nm == "__path__" & mod_ispkg[mi] = 1 then do
+    l = mklist(4)
+    call list_append l, mkstr(mod_pdir[mi])
+    return l
+  end
+  if nm == "__spec__" | nm == "__loader__" then return NONE_OOP
+  if nm == "__doc__" then return NONE_OOP
+  return 0
+
+mod_dict: procedure = .int
+  arg mi = .int
+  d = .int
+  j = .int
+  v = .int
+  d = dict_new(K_DICT)
+  do j = 1 to nbn
+    if bn_sc[j] = mod_sc[mi] & mod_fb[mi] > 0 then do
+      v = vp[mod_fb[mi] + bn_slot[j]]
+      if v \= 0 & mod_dyn[mi] = 1 then do
+        if builtin_lookup(bn_name[j]) = v then v = 0
+      end
+      if v \= 0 then call dset d, mkstr(bn_name[j]), v
+    end
+  end
+  return d
+
+/* the module attribute lookup: value or 0 (no exception raised for a plain miss) */
+mod_getattr: procedure = .int
+  arg o = .int, nid = .int
+  mi = .int
+  nm = .string
+  mn = .string
+  key = .string
+  s = .string
+  v = .int
+  mi = ob_x[o % 2]
+  nm = nid_name[nid]
+  if mi > 0 then return fmod_attr(mi, nm)
+  mn = ob_s[o % 2]
+  key = mn || "." || nm
+  if pos(" " || key || " ", shadow) > 0 then do
+    v = hybrid_get(mn, nm)
+    if v \= 0 then return v
+    if unw > 0 then return 0
+  end
+  s = modattr[key]
+  if s \== "" then return s as .int
+  if mn == "typing" | mn == "__future__" then do
+    if nm == "TYPE_CHECKING" then return FALSE_OOP
+    return cl_obj[C_TYPINGALIAS]
+  end
+  if nm == "__name__" then return mkstr(mn)
+  if nm == "__doc__" then return NONE_OOP
+  if nm == "__file__" then return mkstr("<built-in>")
+  return hybrid_get(mn, nm)
+
+mod_setattr: procedure = .void
+  arg o = .int, nid = .int, v = .int
+  mi = .int
+  s = .string
+  mi = ob_x[o % 2]
+  if mi > 0 then do
+    s = scm[mod_sc[mi] || "|" || nid_name[nid]]
+    if s \== "" & mod_fb[mi] > 0 then do
+      if (s as .int) > 0 then do
+        vp[mod_fb[mi] + (s as .int)] = v
+        return
+      end
+    end
+    modx[mi || "." || nid_name[nid]] = v as .string
+    return
+  end
+  modattr[ob_s[o % 2] || "." || nid_name[nid]] = v as .string
+  return
+
+/* names of a pure Python fall-back module for a native module: the attribute or 0 */
+hybrid_get: procedure = .int
+  arg mname = .string, attr = .string
+  h = .string
+  i = .int
+  mi = .int
+  rel = .string
+  found = .int
+  h = hyb[mname]
+  if h == "" then do
+    h = "0"
+    rel = changestr(".", mname, "/")
+    found = 0
+    do i = 2 to nsyspath
+      if found = 0 then found = imp_find(syspath[i], rel)
+    end
+    if found = 1 then do
+      mi = new_module(mname, imp_file, imp_ispkg, imp_pdir)
+      hyb[mname] = mi as .string
+      call reg_module "@lib:" || mname, mod_obj[mi]
+      if module_load(mi) = 0 then do
+        hyb[mname] = "0"
+        return 0
+      end
+      h = mi as .string
+    end
+    else hyb[mname] = "0"
+  end
+  if h == "0" then return 0
+  return fmod_attr(h as .int, attr)
+
+/* absolute name for a (possibly relative) import in the running module; "" with an exception */
+resolve_name: procedure = .string
+  arg name = .string, level = .int
+  pkg = .string
+  i = .int
+  p = .int
+  if level = 0 then return name
+  pkg = mod_pkg[cur_mi]
+  if pkg == "" then do
+    call raise_exc C_IMPORTERROR, "attempted relative import with no known parent package"
+    return ""
+  end
+  do i = 2 to level
+    p = lastpos(".", pkg)
+    if p = 0 then do
+      call raise_exc C_IMPORTERROR, "attempted relative import beyond top-level package"
+      return ""
+    end
+    pkg = left(pkg, p - 1)
+  end
+  if name == "" then return pkg
+  return pkg || "." || name
+
+exec_import: procedure = .void
+  arg n = .int, fb = .int
+  full = .string
+  m = .int
+  top = .int
+  p = .int
+  full = n_s[n]
+  m = import_mod(full)
+  if m = 0 then return
+  if n_b[n] = 1 then call store n_a[n], m, fb
+  else do
+    p = pos(".", full)
+    if p = 0 then top = m
+    else top = import_mod(left(full, p - 1))
+    call store n_a[n], top, fb
+  end
+  return
+
+exec_from: procedure = .void
+  arg n = .int, fb = .int
+  full = .string
+  m = .int
+  i = .int
+  nm = .string
+  v = .int
+  r = .int
+  full = resolve_name(n_s[n], n_c[n])
+  if unw > 0 then return
+  m = import_mod(full)
+  if m = 0 then return
+  if n_d[n] = 1 then do
+    call import_star m, full
+    return
+  end
+  do i = 0 to n_b[n] - 1
+    nm = ob_s[na_const(al[n_a[n] + 2 * i]) % 2]
+    v = mod_getattr(m, nameid(nm))
+    if v = 0 then do
+      if unw > 0 then return
+      imp_quiet = 1
+      v = import_mod(full || "." || nm)
+      imp_quiet = 0
+      if unw > 0 then return
+      if v = 0 then do
+        if ob_x[m % 2] > 0 then r = raise_exc(C_IMPORTERROR, "cannot import name '" || nm || "' from '" || full || "' (" || mod_file[ob_x[m % 2]] || ")")
+        else r = raise_exc(C_IMPORTERROR, "cannot import name '" || nm || "' from '" || full || "' (unknown location)")
+        return
+      end
+    end
+    call store al[n_a[n] + 2 * i + 1], v, fb
+  end
+  return
+
+star_extra: procedure = .string
+  arg mn = .string
+  if mn == "math" then return "pi e tau inf nan"
+  if mn == "numpy" then return "pi e inf nan newaxis float64 float32 int64 int32 bool_ ndarray linalg random"
+  if mn == "string" then return "ascii_lowercase ascii_uppercase ascii_letters digits hexdigits octdigits punctuation whitespace"
+  if mn == "sys" then return "maxsize version platform stdout stderr stdin argv modules path"
+  if mn == "os" then return "sep linesep name path environ"
+  return ""
+
+import_star: procedure = .void
+  arg m = .int, full = .string
+  mi = .int
+  lst = .int
+  v = .int
+  j = .int
+  w = .string
+  pre = .string
+  nm = .string
+  s = .string
+  x = .int
+  mi = ob_x[m % 2]
+  lst = mklist(16)
+  if mi > 0 then do
+    v = fmod_attr(mi, "__all__")
+    if v \= 0 & (kind_of(v) = K_LIST | kind_of(v) = K_TUPLE) then call list_extend_from lst, v
+    else do
+      do j = 1 to nbn
+        if bn_sc[j] = mod_sc[mi] then do
+          nm = bn_name[j]
+          if left(nm, 1) \== "_" & vp[mod_fb[mi] + bn_slot[j]] \= 0 then call list_append lst, mkstr(nm)
+        end
+      end
+    end
+  end
+  else do
+    pre = full || "."
+    do j = 1 to words(bboot)
+      w = word(bboot, j)
+      if left(w, length(pre)) == pre then do
+        nm = substr(w, length(pre) + 1)
+        if pos(".", nm) = 0 then call list_append lst, mkstr(nm)
+      end
+    end
+    w = star_extra(full)
+    do j = 1 to words(w)
+      call list_append lst, mkstr(word(w, j))
+    end
+  end
+  do j = 0 to ob_n[lst % 2] - 1
+    x = sl[ob_p[lst % 2] + j]
+    if kind_of(x) = K_STR then do
+      nm = ob_s[x % 2]
+      s = scm[mod_sc[cur_mi] || "|" || nm]
+      if s == "" then s = dyn_alloc(cur_mi, nm)
+      if s \== "" then do
+        if (s as .int) > 0 then do
+          v = mod_getattr(m, nameid(nm))
+          if v \= 0 then vp[gfb + (s as .int)] = v
+          if unw > 0 then return
+        end
+      end
+    end
+  end
+  return
+
+addpaths: procedure = .void
+  arg s = .string
+  p = .int
+  q = .int
+  d = .string
+  i = .int
+  dup = .int
+  p = 1
+  do while p <= length(s)
+    q = pos(":", s, p)
+    if q = 0 then q = length(s) + 1
+    d = substr(s, p, q - p)
+    p = q + 1
+    if d \== "" then do
+      dup = 0
+      do i = 1 to nsyspath
+        if syspath[i] == d then dup = 1
+      end
+      if dup = 0 then do
+        nsyspath = nsyspath + 1
+        syspath[nsyspath] = d
+      end
+    end
+  end
+  return
+
+setup_path: procedure = .void
+  i = .int
+  l = .int
+  nsyspath = 1
+  syspath[1] = script_dir
+  call addpaths getenv("PYLIB")
+  call addpaths pypath
+  call addpaths "/home/claude/python/pylib"
+  l = mklist(nsyspath)
+  do i = 1 to nsyspath
+    call list_append l, mkstr(syspath[i])
+  end
+  modattr["sys.path"] = l as .string
+  return
+
+modname_of: procedure = .string
+  arg i = .int
+  if i = 0 then return "builtins"
+  return mod_name[i]
+
+/* ---------------------------------------------------------------------
+   os, os.path and a few sys / time functions
+   --------------------------------------------------------------------- */
+path_norm: procedure = .string
+  arg p = .string
+  isabs = .int
+  n = .int
+  i = .int
+  w = .string
+  parts = .string[]
+  np2 = .int
+  r = .string
+  isabs = 0
+  if left(p, 1) == "/" then isabs = 1
+  np2 = 0
+  n = words(translate(p, " ", "/"))
+  do i = 1 to n
+    w = word(translate(p, " ", "/"), i)
+    if w == "." then nop
+    else if w == ".." then do
+      if np2 > 0 then do
+        if parts[np2] \== ".." then np2 = np2 - 1
+        else do
+          np2 = np2 + 1
+          parts[np2] = w
+        end
+      end
+      else if isabs = 0 then do
+        np2 = np2 + 1
+        parts[np2] = w
+      end
+    end
+    else do
+      np2 = np2 + 1
+      parts[np2] = w
+    end
+  end
+  r = ""
+  do i = 1 to np2
+    if i > 1 then r = r || "/"
+    r = r || parts[i]
+  end
+  if isabs = 1 then r = "/" || r
+  if r == "" then r = "."
+  return r
+
+path_join2: procedure = .string
+  arg a = .string, b = .string
+  if left(b, 1) == "/" then return b
+  if a == "" then return b
+  if right(a, 1) == "/" then return a || b
+  return a || "/" || b
+
+bcall_os: procedure = .int
+  arg bid = .int, base = .int, na = .int, nk = .int
+  s = .string
+  t = .string
+  p = .int
+  i = .int
+  v = .int
+  z = .float
+  if bid = BI_OS_GETENV then do
+    if na < 1 then return nargs_err("getenv", na, 1, 2)
+    s = getenv(ob_s[ast[base + 1] % 2])
+    if s == "" then do
+      if na >= 2 then return ast[base + 2]
+      return NONE_OOP
+    end
+    return mkstr(s)
+  end
+  if bid = BI_OS_GETCWD then do
+    s = getenv("PWD")
+    if s == "" then s = "."
+    return mkstr(s)
+  end
+  if bid = BI_SYS_GETRECURSIONLIMIT then return mkint(900)
+  if bid = BI_TIME_TIME_NS then do
+    z = ((date("UN") as .int) * 86400) as .float
+    z = z * 1000000000.0 + ((time("US") as .int) as .float) * 1000.0
+    return float_to_int(z)
+  end
+  if bid = BI_TIME_PERF_COUNTER_NS then return mkint((time("US") as .int) * 1000)
+  /* the os.path functions take strings */
+  if na < 1 then return nargs_err("path function", na, 1, 2)
+  do i = 1 to na
+    if kind_of(ast[base + i]) \= K_STR then return raise_exc(C_TYPEERROR, "expected str, bytes or os.PathLike object, not " || type_name(ast[base + i]))
+  end
+  s = ob_s[ast[base + 1] % 2]
+  if bid = BI_OS_PATH_JOIN then do
+    do i = 2 to na
+      s = path_join2(s, ob_s[ast[base + i] % 2])
+    end
+    return mkstr(s)
+  end
+  if bid = BI_OS_PATH_EXISTS | bid = BI_OS_PATH_ISFILE | bid = BI_OS_PATH_ISDIR then do
+    if s == "" then return FALSE_OOP
+    return mkbool(file_exists(s))
+  end
+  if bid = BI_OS_PATH_BASENAME | bid = BI_OS_PATH_DIRNAME | bid = BI_OS_PATH_SPLIT then do
+    p = lastpos("/", s)
+    t = left(s, p)
+    if t \== "" & t \== copies("/", length(t)) then do
+      do while right(t, 1) == "/"
+        t = left(t, length(t) - 1)
+      end
+    end
+    if bid = BI_OS_PATH_BASENAME then return mkstr(substr(s, p + 1))
+    if bid = BI_OS_PATH_DIRNAME then return mkstr(t)
+    v = mktuple(2)
+    sl[ob_p[v % 2]] = mkstr(t)
+    sl[ob_p[v % 2] + 1] = mkstr(substr(s, p + 1))
+    return v
+  end
+  if bid = BI_OS_PATH_SPLITEXT then do
+    p = lastpos(".", s)
+    i = lastpos("/", s)
+    if p <= i + 1 then p = 0
+    v = mktuple(2)
+    if p = 0 then do
+      sl[ob_p[v % 2]] = ast[base + 1]
+      sl[ob_p[v % 2] + 1] = mkstr("")
+    end
+    else do
+      sl[ob_p[v % 2]] = mkstr(left(s, p - 1))
+      sl[ob_p[v % 2] + 1] = mkstr(substr(s, p))
+    end
+    return v
+  end
+  if bid = BI_OS_PATH_NORMPATH then return mkstr(path_norm(s))
+  if bid = BI_OS_PATH_ABSPATH then do
+    if left(s, 1) \== "/" then do
+      t = getenv("PWD")
+      if t == "" then t = "."
+      s = path_join2(t, s)
+    end
+    return mkstr(path_norm(s))
+  end
+  if bid = BI_OS_PATH_EXPANDUSER then do
+    if s == "~" | left(s, 2) == "~/" then do
+      t = getenv("HOME")
+      if t == "" then t = "/"
+      return mkstr(t || substr(s, 2))
+    end
+    return ast[base + 1]
+  end
+  return raise_exc(C_TYPEERROR, "unsupported library function")

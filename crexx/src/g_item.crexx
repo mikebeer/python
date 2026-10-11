@@ -535,6 +535,12 @@ iter_new: procedure = .int
       return it
     end
     when k = K_DICT | k = K_SET then return mkiter(IT_DKEYS, x, dd_head[ob_x[x % 2]])
+    when k = K_DVIEW then do
+      r = ob_x[x % 2]
+      if ob_n[x % 2] = 1 then return mkiter(IT_DKEYS, r, dd_head[ob_x[r % 2]])
+      if ob_n[x % 2] = 2 then return mkiter(IT_DVALS, r, dd_head[ob_x[r % 2]])
+      return mkiter(IT_DITEMS, r, dd_head[ob_x[r % 2]])
+    end
     when k = K_GEN | k = K_ITER then return x
     when k = K_INST then do
       m = cls_find(ob_c[x % 2], M___ITER__)

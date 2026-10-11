@@ -3,6 +3,11 @@
    --------------------------------------------------------------------- */
 unbound: procedure = .int
   arg n = .int
+  mx = .string
+  if n_t[n] = N_NAMEERR & cur_mi > 0 then do
+    mx = modx[cur_mi || "." || n_s[n]]
+    if mx \== "" then return mx as .int
+  end
   if n_t[n] = N_GLOBAL | n_t[n] = N_NAMEERR then return raise_exc(C_NAMEERROR, "name '" || n_s[n] || "' is not defined")
   return raise_exc(C_UNBOUNDLOCALERROR, "cannot access local variable '" || n_s[n] || "' where it is not associated with a value")
 
@@ -461,6 +466,7 @@ ev: procedure = .int
     ob_y[o % 2] = cd_obj[n_a[n]]
     return o
   end
+  if t = N_LOCALS then return ev_locals(n, fb)
   if t = N_NAMEERR then return unbound(n)
   if t = N_SLICE then return eval_slice(n, fb)
   if t = N_STARRED then return raise_exc(C_SYNTAXERROR, "can't use starred expression here")
@@ -471,10 +477,29 @@ ev: procedure = .int
 cmp_general: procedure = .int
   arg op = .int, l = .int, r = .int
   v = .int
+  m = .int
   if op <= CMP_GE then do
-    if kind_of(l) = K_ARRAY | kind_of(r) = K_ARRAY then return np_binop(30 + op, l, r)
+    if (kind_of(l) = K_ARRAY | kind_of(r) = K_ARRAY) & kind_of(l) \= K_INST & kind_of(r) \= K_INST then return np_binop(30 + op, l, r)
   end
   if op = CMP_EQ | op = CMP_NE then do
+    if kind_of(l) = K_INST then do
+      if op = CMP_EQ then m = cls_find(ob_c[l % 2], M___EQ__)
+      else m = cls_find(ob_c[l % 2], M___NE__)
+      if m > 0 then do
+        v = call2(m, l, r)
+        if v = 0 then return 0
+        if v \= NOTIMPL_OOP then return v
+      end
+    end
+    if kind_of(r) = K_INST then do
+      if op = CMP_EQ then m = cls_find(ob_c[r % 2], M___EQ__)
+      else m = cls_find(ob_c[r % 2], M___NE__)
+      if m > 0 then do
+        v = call2(m, r, l)
+        if v = 0 then return 0
+        if v \= NOTIMPL_OOP then return v
+      end
+    end
     v = py_eq(l, r)
     if unw > 0 then return 0
     if op = CMP_NE then v = 1 - v
@@ -947,29 +972,11 @@ ex: procedure = .void
     return
   end
   if t = N_IMPORT then do
-    v = mod_get(n_s[n])
-    if v = 0 then do
-      r = raise_exc(C_MODULENOTFOUNDERROR, "No module named '" || n_s[n] || "'")
-      return
-    end
-    call store n_a[n], v, fb
+    call exec_import n, fb
     return
   end
   if t = N_FROMIMPORT then do
-    v = mod_get(n_s[n])
-    if v = 0 then do
-      r = raise_exc(C_MODULENOTFOUNDERROR, "No module named '" || n_s[n] || "'")
-      return
-    end
-    do i = 0 to n_b[n] - 1
-      nm = ob_s[na_const(al[n_a[n] + 2 * i]) % 2]
-      s2 = modattr[n_s[n] || "." || nm]
-      if s2 == "" then do
-        r = raise_exc(C_IMPORTERROR, "cannot import name '" || nm || "' from '" || n_s[n] || "'")
-        return
-      end
-      call store al[n_a[n] + 2 * i + 1], s2 as .int, fb
-    end
+    call exec_from n, fb
     return
   end
   r = raise_exc(C_RUNTIMEERROR, "cannot execute node " || t)
@@ -1035,19 +1042,36 @@ exec_class: procedure = .void
   r = .int
   cobj = .int
   size = .int
+  nb = .int
+  b = .int
   cd = n_a[n]
   bc = C_OBJECT
+  bl_n = 0
   if n_c[n] > 0 then do
     bo = ev(n_c[n], fb)
     if bo = 0 then return
-    if kind_of(bo) \= K_CLASS then do
-      r = raise_exc(C_TYPEERROR, "bases must be types")
-      return
+    do i = 0 to ob_n[bo % 2] - 1
+      b = sl[ob_p[bo % 2] + i]
+      if kind_of(b) \= K_CLASS then do
+        r = raise_exc(C_TYPEERROR, "bases must be types")
+        return
+      end
+      bl_n = bl_n + 1
+      bl_a[bl_n] = ob_x[b % 2]
     end
-    bc = ob_x[bo % 2]
   end
+  if bl_n = 0 then do
+    bl_n = 1
+    bl_a[1] = C_OBJECT
+  end
+  bc = bl_a[1]
+  nb = bl_n
   c = define_class(cd_name[cd], bc)
+  if nb > 1 then do
+    if set_bases(c, nb) = 0 then return
+  end
   if (cl_flags[c] // 2) = 1 then cl_flags[c] = cl_flags[c] - 1
+  call set_btype c
   cl_dflt[c] = cl_dflt[bc]
   cobj = cl_obj[c]
   cd_obj[cd] = cobj

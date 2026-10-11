@@ -5,7 +5,11 @@
 enum { ST_NORMAL = 0, ST_BREAK, ST_CONTINUE, ST_RETURN, ST_YIELD };
 
 static int repl_echo;
-static Value find_module(Str *nm);
+static void exec_import(Frame *f, Node *n);
+static void exec_from(Frame *f, Node *n);
+static Node *compile_src(const char *src, long len, Str *gp);
+static void run_block_in(Node *blk, Str *gp);
+static Str *main_gp;
 static Value format_value(Value v, const char *spec, long speclen);
 
 static Value eval(Frame *f, Node *n);
@@ -84,7 +88,10 @@ static Value load_var_slow(Frame *f, Var *v)
     case VK_LOCAL: x = f->loc[v->slot]; break;
     case VK_CELL: x = ((Cell *)f->loc[v->slot].u.o)->v; break;
     case VK_FREE: x = f->cells[v->slot]->v; break;
-    case VK_GLOBAL: x = G[v->slot]; break;
+    case VK_GLOBAL:
+        x = G[v->slot];
+        if (x.t == T_UNSET && v->bslot >= 0) x = G[v->bslot];
+        break;
     case VK_NS: {
         Value *p = f->ns ? amap_get(&f->ns->ns, v->name) : NULL;
         if (p) return *p;
@@ -123,6 +130,7 @@ static Func *make_function(Frame *f, Node *def)
     fn->ndefs = 0;
     fn->kwdefs = NULL;
     fn->defclass = NULL;
+    fn->attrs.k = NULL; fn->attrs.v = NULL; fn->attrs.n = fn->attrs.cap = 0;
     if (fd->nfree > 0) {
         fn->cells = (Cell **)xmalloc(sizeof(Cell *) * (size_t)fd->nfree);
         for (i = 0; i < fd->nfree; i++) {
@@ -259,6 +267,9 @@ static Value make_gen(Func *fn, FuncDef *fd, Value *loc)
     g->state = (Value *)xmalloc(sizeof(Value) * (size_t)(fd->nstate + 1));
     for (i = 0; i < fd->nstate; i++) g->state[i] = mkint(0);
     g->yielded = NONE_V;
+    g->sent = NONE_V;
+    g->thrown = NONE_V;
+    g->ret = NONE_V;
     g->started = g->done = g->running = 0;
     return mkobj(g, T_GEN);
 }
@@ -297,6 +308,7 @@ static Value call_func(Func *fn, int n, Value *a, int nk, Value *kw)
     fr.gen = NULL;
     fr.ns = NULL;
     fr.resuming = 0;
+    fr.gp = fd->gpfx;
     fr.up = cur_frame;
     cur_frame = &fr;
     call_depth++;
@@ -326,6 +338,7 @@ static int gen_resume(Gen *g, Value *out)
     fr.gen = g;
     fr.ns = NULL;
     fr.resuming = g->started;
+    fr.gp = g->def->fd->gpfx;
     fr.up = cur_frame;
     g->started = 1;
     g->running = 1;
@@ -357,13 +370,41 @@ static int gen_resume(Gen *g, Value *out)
         return 1;
     }
     g->done = 1;
+    g->ret = st == ST_RETURN ? fr.ret : NONE_V;
     return 0;
 }
 
+static Value pay_ctor(Class *pc, int n, Value *a, int nk, Value *kw)
+{
+    Args x;
+    x.n = n; x.a = a; x.nk = nk; x.kw = kw;
+    return pc->ctor(&x);
+}
+/* run __init__ of instance iv (class c) */
+static void run_init(Value iv, Class *c, int n, Value *a, int nk, Value *kw)
+{
+    Value *init = class_find(c, S_init);
+    Value *base = vsp;
+    int i;
+    if (init) {
+        if (init->t == T_BUILTIN && (n > 0 || nk > 0) && init->u.o == object_init_v.u.o
+            && !(c->flags & CF_EXC) && !c->paycls) {
+            Value *nw = class_find(c, S_new);
+            if (!nw || nw->t != T_FUNC)
+                throw_new(cls_TypeError, "%.80s() takes no arguments", c->name->s);
+        }
+        vcheck(n + 8);
+        VPUSH(*init);
+        VPUSH(iv);
+        for (i = 0; i < n; i++) VPUSH(a[i]);
+        call_value(*init, n + 1, base + 1, nk, kw);
+        vsp = base;
+    }
+}
 static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
 {
     Inst *in;
-    Value iv, *init;
+    Value iv, *nw;
     Value *base = vsp;
     int i;
     if (c->ctor) {
@@ -371,18 +412,33 @@ static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
         x.n = n; x.a = a; x.nk = nk; x.kw = kw;
         return c->ctor(&x);
     }
+    nw = class_find(c, S_new);
+    if (nw && nw->t == T_FUNC) {
+        Value r;
+        vcheck(n + 8);
+        VPUSH(*nw);
+        VPUSH(mkobj(c, T_CLASS));
+        for (i = 0; i < n; i++) VPUSH(a[i]);
+        r = call_value(*nw, n + 1, base + 1, nk, kw);
+        vsp = base;
+        if (r.t == T_INST && class_isa(AS_INST(r)->cls, c)) {
+            VPUSH(r);
+            run_init(r, c, n, a, nk, kw);
+            vsp = base;
+        }
+        return r;
+    }
     in = new_inst(c);
     iv = mkobj(in, T_INST);
     VPUSH(iv);
-    init = class_find(c, S_init);
-    if (init) {
-        VPUSH(*init);
-        VPUSH(iv);
-        for (i = 0; i < n; i++) VPUSH(a[i]);
-        call_value(*init, n + 1, base + 2, nk, kw);
-    } else if (n > 0 || nk > 0) {
-        throw_new(cls_TypeError, "%.80s() takes no arguments", c->name->s);
+    if (c->paycls) {
+        if (c->paycls == cls_tuple || c->paycls == cls_str)
+            in->pay = pay_ctor(c->paycls, n, a, nk, kw);
+        else
+            in->pay = pay_ctor(c->paycls, 0, NULL, 0, NULL);
     }
+    if (c->flags & CF_EXC) amap_set(&in->a, S_args, mktuple_from(a, n));
+    run_init(iv, c, n, a, nk, kw);
     vsp = base;
     return iv;
 }
@@ -393,6 +449,9 @@ static Value call_value(Value fn, int n, Value *a, int nk, Value *kw)
     case T_FUNC: return call_func(AS_FUNC(fn), n, a, nk, kw);
     case T_BUILTIN: {
         Args x;
+        if (((Builtin *)fn.u.o)->selfpay && n > 0 && a[0].t == T_INST &&
+            AS_INST(a[0])->pay.t != T_UNSET)
+            a[0] = AS_INST(a[0])->pay;
         x.n = n; x.a = a; x.nk = nk; x.kw = kw;
         return ((Builtin *)fn.u.o)->fn(&x); }
     case T_CLASS: return call_class(AS_CLASS(fn), n, a, nk, kw);
@@ -521,8 +580,9 @@ static Value eval_call(Frame *f, Node *n)
     int i, mode = 0, np, nk = 0;
     Value *kwbase;
     Value r;
-    if (cn->kind == N_NAME && cn->var->kind == VK_GLOBAL && cn->name == intern_c("super") &&
-        n->n == 0 && G[cn->var->slot].t == T_BUILTIN) {
+    if (cn->kind == N_NAME && cn->var->kind == VK_GLOBAL && cn->name == S_super &&
+        n->n == 0 && G[cn->var->bslot >= 0 ? cn->var->bslot : cn->var->slot].t == T_BUILTIN &&
+        (cn->var->bslot < 0 || G[cn->var->slot].t == T_UNSET)) {
         Super *s;
         Value self;
         if (!f->fn || !f->fn->defclass || !f->loc || f->fn->def->fd->npos < 1)
@@ -530,7 +590,7 @@ static Value eval_call(Frame *f, Node *n)
         self = f->loc[0];
         if (self.t == T_CELL) self = ((Cell *)self.u.o)->v;
         s = (Super *)gc_alloc(sizeof(Super), T_SUPER);
-        s->start = f->fn->defclass->base ? f->fn->defclass->base : cls_object;
+        s->start = f->fn->defclass;
         s->obj = self;
         return mkobj(s, T_SUPER);
     }
@@ -743,6 +803,10 @@ static Value eval(Frame *f, Node *n)
         } else if (v->kind == VK_GLOBAL) {
             Value x = G[v->slot];
             if (x.t != T_UNSET) return x;
+            if (v->bslot >= 0) {
+                x = G[v->bslot];
+                if (x.t != T_UNSET) return x;
+            }
         }
         return load_var_slow(f, v); }
     case N_ATTR: {
@@ -791,6 +855,13 @@ static Value eval(Frame *f, Node *n)
         Value l = eval(f, n->a);
         if (py_truthy(l)) return l;
         return eval(f, n->b); }
+    case N_WALRUS: {
+        Value wv = eval(f, n->b);
+        VPUSH(wv);
+        store_var(f, n->a->var, wv);
+        vsp--;
+        return wv;
+    }
     case N_IFEXP:
         return py_truthy(eval(f, n->a)) ? eval(f, n->b) : eval(f, n->c);
     case N_CMP: {
@@ -1132,26 +1203,67 @@ static int exec_with(Frame *f, Node *n)
     return st;
 }
 
+/* create a class object; `bl` (malloc'ed, nb >= 1 entries) is owned by the class */
+static Class *make_class(Str *name, Class **bl, int nb, Str *modname)
+{
+    Class *c;
+    int i, fl = 0;
+    for (i = 0; i < nb; i++) fl |= bl[i]->flags & (CF_EXC | CF_PROPS | CF_SETATTR);
+    c = (Class *)gc_alloc(sizeof(Class), T_CLASS);
+    c->name = name;
+    c->base = bl[0];
+    c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
+    c->ctor = NULL;
+    c->flags = fl;
+    c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL;
+    c->modname = modname;
+    c->bases = bl;
+    c->nbases = nb;
+    VPUSH(mkobj(c, T_CLASS));
+    c3_build(c, bl, nb);
+    vsp--;
+    for (i = 0; i < c->nmro && !c->paycls; i++) {
+        Class *k = c->mro[i];
+        if (k == cls_list || k == cls_dict || k == cls_set || k == cls_tuple || k == cls_str)
+            c->paycls = k;
+    }
+    return c;
+}
+/* after the namespace is filled: bind methods to the class, set flags */
+static void finish_class(Class *c)
+{
+    int i;
+    for (i = 0; i < c->ns.n; i++) {
+        Value v = c->ns.v[i];
+        if (v.t == T_FUNC) AS_FUNC(v)->defclass = c;
+        else if (v.t == T_SMETH || v.t == T_CMETH || v.t == T_PROP) {
+            Prop *p = (Prop *)v.u.o;
+            if (p->get.t == T_FUNC) AS_FUNC(p->get)->defclass = c;
+            if (p->set.t == T_FUNC) AS_FUNC(p->set)->defclass = c;
+            if (v.t == T_PROP) c->flags |= CF_PROPS;
+        }
+    }
+    if (amap_get(&c->ns, S_setattr)) c->flags |= CF_SETATTR;
+    class_epoch++;
+}
 static void exec_class(Frame *f, Node *n)
 {
     FuncDef *fd = n->fd;
-    Class *c, *base = cls_object;
+    Class *c;
     Value cv, *basev = vsp;
-    int i, nbases = n->n - n->op;
+    int i, nbases = n->n - n->op, nb = 0;
     Frame cf;
     Cell **cells = NULL;
+    Class **bl;
+    bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(nbases + 1));
     for (i = 0; i < nbases; i++) {
         Value b = eval(f, n->list[i]);
         VPUSH(b);
-        if (b.t != T_CLASS) throw_new(cls_TypeError, "bases must be types");
-        if (i == 0) base = AS_CLASS(b);
+        if (b.t != T_CLASS) { free(bl); throw_new(cls_TypeError, "bases must be types"); }
+        bl[nb++] = AS_CLASS(b);
     }
-    c = (Class *)gc_alloc(sizeof(Class), T_CLASS);
-    c->name = n->name;
-    c->base = base;
-    c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
-    c->ctor = NULL;
-    c->flags = base->flags & (CF_EXC | CF_PROPS);
+    if (nb == 0) bl[nb++] = cls_object;
+    c = make_class(n->name, bl, nb, modname_of_gp(f->gp));
     cv = mkobj(c, T_CLASS);
     VPUSH(cv);
     if (fd->nfree > 0) {
@@ -1169,22 +1281,13 @@ static void exec_class(Frame *f, Node *n)
     cf.gen = NULL;
     cf.ns = c;
     cf.resuming = 0;
+    cf.gp = fd->gpfx;
     cf.up = cur_frame;
     cur_frame = &cf;
     exec_block(&cf, fd->body);
     cur_frame = cf.up;
     free(cells);
-    for (i = 0; i < c->ns.n; i++) {
-        Value v = c->ns.v[i];
-        if (v.t == T_FUNC) AS_FUNC(v)->defclass = c;
-        else if (v.t == T_SMETH || v.t == T_CMETH || v.t == T_PROP) {
-            Prop *p = (Prop *)v.u.o;
-            if (p->get.t == T_FUNC) AS_FUNC(p->get)->defclass = c;
-            if (p->set.t == T_FUNC) AS_FUNC(p->set)->defclass = c;
-            if (v.t == T_PROP) c->flags |= CF_PROPS;
-        }
-    }
-    class_epoch++;
+    finish_class(c);
     /* decorators (rare) */
     for (i = n->n - 1; i >= nbases; i--) {
         Value d = eval(f, n->list[i]);
@@ -1264,36 +1367,6 @@ static int exec_while(Frame *f, Node *n)
     return 0;
 }
 
-static void exec_import(Frame *f, Node *n)
-{
-    int i;
-    for (i = 0; i < n->n; i++) {
-        Node *it = n->list[i];
-        Value m = find_module(it->name);
-        if (m.t == T_UNSET) throw_new(cls_ImportError, "No module named '%.80s'", it->name->s);
-        store_var(f, it->b->var, m);
-    }
-}
-static void exec_from(Frame *f, Node *n)
-{
-    int i;
-    Value m = find_module(n->name);
-    if (m.t == T_UNSET) throw_new(cls_ImportError, "No module named '%.80s'", n->name->s);
-    if (n->op == 1) {
-        Module *md = (Module *)m.u.o;
-        for (i = 0; i < md->ns.n; i++)
-            if (md->ns.k[i]->s[0] != '_')
-                set_global(md->ns.k[i], md->ns.v[i]);
-        return;
-    }
-    for (i = 0; i < n->n; i++) {
-        Node *it = n->list[i];
-        Value *p = amap_get(&((Module *)m.u.o)->ns, it->name);
-        if (!p) throw_new(cls_ImportError, "cannot import name '%.80s' from '%.80s'", it->name->s, n->name->s);
-        store_var(f, it->b->var, *p);
-    }
-}
-
 static void exec_aug(Frame *f, Node *n)
 {
     Node *t = n->a;
@@ -1309,7 +1382,7 @@ static void exec_aug(Frame *f, Node *n)
             long i, m = s->n;
             for (i = 0; i < m; i++) list_push(l, s->a[i]);
             r = cur;
-        } else r = binop(n->op, cur, rhs);
+        } else r = inplace_binop(n->op, cur, rhs);
         if (cur.t == T_ND && r.t == T_ND && n->op != B_MATMUL) { nd_assign_all(cur, r); r = cur; }
         store_var(f, t->var, r);
         break; }
@@ -1320,7 +1393,7 @@ static void exec_aug(Frame *f, Node *n)
         VPUSH(cur);
         rhs = eval(f, n->b);
         VPUSH(rhs);
-        r = binop(n->op, cur, rhs);
+        r = inplace_binop(n->op, cur, rhs);
         VPUSH(r);
         set_attr(o, t->name, r);
         break; }
@@ -1333,7 +1406,7 @@ static void exec_aug(Frame *f, Node *n)
         VPUSH(cur);
         rhs = eval(f, n->b);
         VPUSH(rhs);
-        r = binop(n->op, cur, rhs);
+        r = inplace_binop(n->op, cur, rhs);
         VPUSH(r);
         setitem(o, idx, r);
         break; }
@@ -1505,7 +1578,21 @@ static int exec(Frame *f, Node *n)
     case S_WITH: return exec_with(f, n);
     case S_BLOCK: return exec_block(f, n);
     case S_YIELD:
-        if (f->resuming) { f->resuming = 0; return 0; }
+        if (f->resuming) {
+            Gen *g = f->gen;
+            f->resuming = 0;
+            if (g->thrown.t == T_INST) {
+                Value e = g->thrown;
+                g->thrown = NONE_V;
+                throw_val(e);
+            }
+            if (n->b) {
+                Value sv = g->sent;
+                g->sent = NONE_V;
+                assign_target(f, n->b, sv);
+            }
+            return 0;
+        }
         f->gen->yielded = n->a ? eval(f, n->a) : NONE_V;
         return ST_YIELD;
     case S_YIELDFROM: return exec_yieldfrom(f, n);
@@ -1549,20 +1636,8 @@ static void print_exception(Value exc)
 
 static void run_body(const char *src, long len)
 {
-    Node *blk;
-    Frame fr;
-    gc_perm = 1;
-    lex_source(src, len);
-    mod_scope = scope_new(SC_MOD, NULL);
-    cur_scope = mod_scope;
-    blk = parse_module();
-    resolve_scope(mod_scope);
-    gc_perm = 0;
-    fr.loc = NULL; fr.cells = NULL; fr.fn = NULL; fr.ret = NONE_V; fr.gen = NULL;
-    fr.ns = NULL; fr.resuming = 0; fr.up = NULL;
-    cur_frame = &fr;
-    exec_block(&fr, blk);
-    cur_frame = NULL;
+    Node *blk = compile_src(src, len, main_gp);
+    run_block_in(blk, main_gp);
 }
 
 /* returns 0 on success, 1 on an uncaught exception (already reported) */

@@ -1,0 +1,24 @@
+init pkg pkg
+load consts pkg.consts
+init sub pkg.sub
+main name: __main__
+pkg pkg.util pkg.sub.deep pkg.sub
+5 12.56636 ('pkg.util', 'consts')
+(1, 2) 3.14159 consts
+_private not exported
+True 1 True True
+True
+Counter(1) Counter(2) 2
+(11, 20, 3.14159, 'consts', 'sibling')
+['NAME', 'PI', 'VERSION', 'names', 'run', 'sibling', 'twice', 'util']
+True sibling
+['Counter', 'VERSION', 'add', 'consts']
+['NAME', 'PI', 'VERSION']
+b-value a-value
+2 True
+ImportError: ModuleNotFoundError
+ImportError: ImportError
+ImportError: ModuleNotFoundError
+('consts', 42)
+module True False
+running as script

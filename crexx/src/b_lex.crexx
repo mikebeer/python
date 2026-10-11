@@ -305,6 +305,8 @@ lex_string: procedure = .void
   c = .string
   n = .int
   endp = .int
+  depth = .int
+  k = .int
   quote = substr(tx, tp, 1)
   trip = 0
   if substr(tx, tp + 1, 2) == quote || quote then do
@@ -314,11 +316,35 @@ lex_string: procedure = .void
   else q = tp + 1
   p = q
   endp = 0
+  depth = 0
   do while p <= tlen
     c = substr(tx, p, 1)
     if c == "\" then do
       p = p + 2
       iterate
+    end
+    if isf = 1 & trip = 0 then do
+      if c == "{" then do
+        if depth = 0 & substr(tx, p + 1, 1) == "{" then do
+          p = p + 2
+          iterate
+        end
+        depth = depth + 1
+      end
+      else if c == "}" then do
+        if depth > 0 then depth = depth - 1
+        else if substr(tx, p + 1, 1) == "}" then do
+          p = p + 2
+          iterate
+        end
+      end
+      else if c == quote & depth > 0 then do
+        k = pos(quote, tx, p + 1)
+        if k > 0 then do
+          p = k + 1
+          iterate
+        end
+      end
     end
     if c == quote then do
       if trip = 0 then do

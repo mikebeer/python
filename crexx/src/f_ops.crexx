@@ -247,7 +247,7 @@ arith: procedure = .int
   kx = kind_of(x)
   ky = kind_of(y)
   if numkind(x) > 0 & numkind(y) > 0 then return numarith(op, x, y)
-  if kx = K_ARRAY | ky = K_ARRAY then return np_binop(op, x, y)
+  if (kx = K_ARRAY | ky = K_ARRAY) & kx \= K_INST & ky \= K_INST & kx \= K_STR then return np_binop(op, x, y)
   if kx = K_INST | ky = K_INST then do
     if kx = K_INST then do
       m = cls_find(ob_c[x % 2], opd[op])
@@ -266,6 +266,21 @@ arith: procedure = .int
       end
     end
     return err_binop(op_sym(op), x, y)
+  end
+  if kx = K_DVIEW | ky = K_DVIEW then do
+    if op = O_BITOR | op = O_BITAND | op = O_SUB | op = O_BITXOR then do
+      if kx = K_DVIEW then do
+        if ob_n[x % 2] = 2 then return err_binop(op_sym(op), x, y)
+      end
+      if ky = K_DVIEW then do
+        if ob_n[y % 2] = 2 then return err_binop(op_sym(op), x, y)
+      end
+      o = as_set(x)
+      if o = 0 then return 0
+      r = as_set(y)
+      if r = 0 then return 0
+      return set_op(op, o, r)
+    end
   end
   select
     when op = O_ADD then do
@@ -306,6 +321,21 @@ arith: procedure = .int
     otherwise nop
   end
   return err_binop(op_sym(op), x, y)
+
+/* x as a set object: sets, key / item views and other iterables (0 with an exception) */
+as_set: procedure = .int
+  arg x = .int
+  l = .int
+  o = .int
+  i = .int
+  if kind_of(x) = K_SET then return x
+  l = iter_list(x)
+  if l = 0 then return 0
+  o = dict_new(K_SET)
+  do i = 0 to ob_n[l % 2] - 1
+    call dset o, sl[ob_p[l % 2] + i], TRUE_OOP
+  end
+  return o
 
 seq_repeat: procedure = .int
   arg x = .int, n = .int
@@ -417,7 +447,7 @@ unary: procedure = .int
   k = numkind(x)
   if op = 1 then do
     if k = 1 then return mkint(0 - ival(x))
-    if k = 3 then return mkfloat(0.0 - ob_f[x % 2])
+    if k = 3 then return mkfloat(fneg(ob_f[x % 2]))
     if k = 2 then return big_norm(sneg(ob_s[x % 2]))
     if kind_of(x) = K_INST then do
       m = cls_find(ob_c[x % 2], M___NEG__)
@@ -428,6 +458,10 @@ unary: procedure = .int
   if op = 2 then do
     if k = 1 then return mkint(ival(x))
     if k > 0 then return x
+    if kind_of(x) = K_INST then do
+      m = cls_find(ob_c[x % 2], M___POS__)
+      if m > 0 then return call1(m, x)
+    end
     return raise_exc(C_TYPEERROR, "bad operand type for unary +: '" || type_name(x) || "'")
   end
   if k = 1 then do
@@ -436,6 +470,10 @@ unary: procedure = .int
     return mkint(r)
   end
   if k = 2 then return big_norm(ssub(sneg(ob_s[x % 2]), "1"))
+  if kind_of(x) = K_INST then do
+    m = cls_find(ob_c[x % 2], M___INVERT__)
+    if m > 0 then return call1(m, x)
+  end
   return raise_exc(C_TYPEERROR, "bad operand type for unary ~: '" || type_name(x) || "'")
 
 /* numeric comparison: -1, 0, 1 or 2 (unordered) */
@@ -494,6 +532,26 @@ py_eq: procedure = .int
   end
   if kx = K_STR & ky = K_STR then do
     if ob_s[x % 2] == ob_s[y % 2] then return 1
+    return 0
+  end
+  if kx = K_DVIEW | ky = K_DVIEW then do
+    if kx = K_DVIEW then do
+      if ob_n[x % 2] = 2 then return 0
+    end
+    if ky = K_DVIEW then do
+      if ob_n[y % 2] = 2 then return 0
+    end
+    if kx = K_DVIEW & ky = K_DVIEW | kx = K_SET | ky = K_SET then do
+      m = as_set(x)
+      if m = 0 then return 0
+      r = as_set(y)
+      if r = 0 then return 0
+      return py_eq(m, r)
+    end
+    return 0
+  end
+  if kx = K_SLICE & ky = K_SLICE then do
+    if py_eq(ob_n[x % 2], ob_n[y % 2]) = 1 & py_eq(ob_x[x % 2], ob_x[y % 2]) = 1 & py_eq(ob_y[x % 2], ob_y[y % 2]) = 1 then return 1
     return 0
   end
   if kx = K_INST then do
@@ -704,6 +762,7 @@ py_contains: procedure = .int
   a = .int
   b = .int
   st = .int
+  b = ob_x[c % 2]
   k = kind_of(c)
   select
     when k = K_STR then do
@@ -730,6 +789,29 @@ py_contains: procedure = .int
       n = ob_n[c % 2]
       do i = 0 to n - 1
         if py_eq(np_scalar(c, i), x) = 1 then return 1
+      end
+      return 0
+    end
+    when k = K_DVIEW then do
+      n = ob_n[c % 2]
+      b = ob_x[ob_x[c % 2] % 2]
+      if n = 1 then do
+        if dict_find(b, hashkey(x)) > 0 then return 1
+        return 0
+      end
+      e = dd_head[b]
+      do while e > 0
+        if de_live[e] = 1 then do
+          if n = 2 then do
+            if py_eq(de_val[e], x) = 1 then return 1
+          end
+          else if kind_of(x) = K_TUPLE then do
+            if ob_n[x % 2] = 2 then do
+              if py_eq(de_key[e], sl[ob_p[x % 2]]) = 1 & py_eq(de_val[e], sl[ob_p[x % 2] + 1]) = 1 then return 1
+            end
+          end
+        end
+        e = de_next[e]
       end
       return 0
     end
@@ -887,6 +969,16 @@ repr_of: procedure = .string
       end
       return s || "}"
     end
+    when k = K_DVIEW then do
+      r = iter_list(x)
+      if r = 0 then return ""
+      if ob_n[x % 2] = 1 then return "dict_keys(" || repr_of(r) || ")"
+      if ob_n[x % 2] = 2 then return "dict_values(" || repr_of(r) || ")"
+      return "dict_items(" || repr_of(r) || ")"
+    end
+    when k = K_SLICE then do
+      return "slice(" || repr_of(ob_n[x % 2]) || ", " || repr_of(ob_x[x % 2]) || ", " || repr_of(ob_y[x % 2]) || ")"
+    end
     when k = K_RANGE then do
       s = "range(" || ob_n[x % 2] || ", " || ob_x[x % 2]
       if ob_y[x % 2] \= 1 then s = s || ", " || ob_y[x % 2]
@@ -897,7 +989,7 @@ repr_of: procedure = .string
     when k = K_CLASS then do
       c = ob_x[x % 2]
       if cl_flags[c] // 2 = 1 then return "<class '" || cl_name[c] || "'>"
-      return "<class '__main__." || cl_name[c] || "'>"
+      return "<class '" || modname_of(cl_mod[c]) || "." || cl_name[c] || "'>"
     end
     when k = K_MODULE then return "<module '" || ob_s[x % 2] || "'>"
     when k = K_BMETH then return "<bound method " || fd_name[ob_x[ob_x[x % 2] % 2]] || " of " || repr_of(ob_y[x % 2]) || ">"
@@ -917,12 +1009,16 @@ repr_of: procedure = .string
         end
         return ob_s[r % 2]
       end
-      if cls_issub(ob_c[x % 2], C_BASEEXCEPTION) = 1 then return exc_repr(x)
-      return "<__main__." || cl_name[ob_c[x % 2]] || " object at 0x" || right(d2x(x * 8), 12, "0") || ">"
+      return inst_repr0(x)
     end
     otherwise return "<object at 0x" || right(d2x(x * 8), 12, "0") || ">"
   end
   return "?"
+
+inst_repr0: procedure = .string
+  arg x = .int
+  if cls_issub(ob_c[x % 2], C_BASEEXCEPTION) = 1 then return exc_repr(x)
+  return "<" || modname_of(cl_mod[ob_c[x % 2]]) || "." || cl_name[ob_c[x % 2]] || " object at 0x" || right(d2x(x * 8), 12, "0") || ">"
 
 exc_args: procedure = .int
   arg x = .int

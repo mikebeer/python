@@ -111,6 +111,10 @@ bind_name: procedure = .int
     sl0 = sc_n[cursc]
     sc_n[cursc] = sl0 + 1
     scm[key] = sl0 as .string
+    nbn = nbn + 1
+    bn_sc[nbn] = cursc
+    bn_name[nbn] = name
+    bn_slot[nbn] = sl0
     if sc_kind[cursc] = SK_CLASS then do
       ncv = ncv + 1
       cv_name[ncv] = name
@@ -175,7 +179,24 @@ scope_end: procedure = .void
         end
         else do
           b = builtin_lookup(name)
-          if b > 0 then do
+          if parse_dyn = 1 then do
+            slot = sc_n[sc]
+            sc_n[sc] = slot + 1
+            scm[sc || "|" || name] = slot as .string
+            nbn = nbn + 1
+            bn_sc[nbn] = sc
+            bn_name[nbn] = name
+            bn_slot[nbn] = slot
+            n_t[n] = N_GLOBAL
+            n_a[n] = slot
+            if b > 0 then do
+              ndyn = ndyn + 1
+              dyn_mi[ndyn] = parse_mi
+              dyn_slot[ndyn] = slot
+              dyn_val[ndyn] = b
+            end
+          end
+          else if b > 0 then do
             n_t[n] = N_CONST
             n_a[n] = b
           end
@@ -185,11 +206,15 @@ scope_end: procedure = .void
       end
       else if slot = -1 then do
         /* declared global: module slot (create when needed) */
-        v = scm["1|" || name]
+        v = scm[cur_msc || "|" || name]
         if v == "" then do
-          slot = sc_n[1]
-          sc_n[1] = slot + 1
-          scm["1|" || name] = slot as .string
+          slot = sc_n[cur_msc]
+          sc_n[cur_msc] = slot + 1
+          scm[cur_msc || "|" || name] = slot as .string
+          nbn = nbn + 1
+          bn_sc[nbn] = cur_msc
+          bn_name[nbn] = name
+          bn_slot[nbn] = slot
         end
         else slot = v as .int
         n_t[n] = N_GLOBAL
@@ -401,7 +426,7 @@ p_factor: procedure = .int
     if n_t[x] = N_CONST then do
       if ob_k[n_a[x] % 2] = K_FLOAT then do
         f = ob_f[n_a[x] % 2]
-        return mkc(mkfloat(0.0 - f))
+        return mkc(mkfloat(fneg(f)))
       end
     end
     return mk(N_UNARY, x, 0, 1)
@@ -468,6 +493,17 @@ p_atomexpr: procedure = .int
   end
   return e
 
+/* 1 when the name is not bound in any enclosing scope seen so far */
+name_free: procedure = .int
+  arg nm = .string
+  s = .int
+  s = cursc
+  do while s > 0
+    if scm[s || "|" || nm] \== "" then return 0
+    s = sc_par[s]
+  end
+  return 1
+
 p_call: procedure = .int
   arg f = .int
   base = .int
@@ -524,6 +560,30 @@ p_call: procedure = .int
   end
   call expect ")"
   cnt = psp - base
+  if n_t[f] = N_NAME & flags = 0 then do
+    nm = n_s[f]
+    if cnt = 0 & (nm == "locals" | nm == "vars" | nm == "dir") then do
+      if name_free(nm) = 1 then do
+        if rf_node[nrf] = f then rf_sc[nrf] = 0
+        a = 1
+        if nm == "vars" then a = 2
+        if nm == "dir" then a = 3
+        return mk(N_LOCALS, cursc, a, 0)
+      end
+    end
+    if cnt = 1 & (nm == "eval" | nm == "exec") then do
+      if name_free(nm) = 1 then do
+        psp = psp + 1
+        ps[psp] = mkc(NONE_OOP)
+        psp = psp + 1
+        ps[psp] = mk(N_LOCALS, cursc, 1, 0)
+        psp = psp + 1
+        if sc_kind[cursc] = SK_MODULE then ps[psp] = mkc(mkint(1))
+        else ps[psp] = mkc(mkint(0))
+        cnt = 4
+      end
+    end
+  end
   st = plist(base)
   n = mk(N_CALL, f, st, cnt)
   n_d[n] = flags
@@ -1076,6 +1136,7 @@ p_comp: procedure = .int
   par = cursc
   nfd = nfd + 1
   fd = nfd
+  fd_mod[fd] = parse_mi
   sc = scope_push(SK_COMP)
   sc_id[sc] = fd
   dmy = bind_name(".0")
@@ -1283,6 +1344,7 @@ p_lambda: procedure = .int
   call expect ":"
   nfd = nfd + 1
   fd = nfd
+  fd_mod[fd] = parse_mi
   sc = scope_push(SK_FUNC)
   sc_id[sc] = fd
   call setup_params fd, base
@@ -1668,6 +1730,7 @@ p_def: procedure = .int
   call expect ":"
   nfd = nfd + 1
   fd = nfd
+  fd_mod[fd] = parse_mi
   sc = scope_push(SK_FUNC)
   sc_id[sc] = fd
   call setup_params fd, base
@@ -1694,19 +1757,32 @@ p_class: procedure = .int
   basen = .int
   nb2 = .int
   i = .int
+  base = .int
+  cnt = .int
+  st = .int
   tpp = tpp + 1
   name = expect_name()
   tn = mkname(name)
   dmy = bind_name(name)
   basen = 0
   if accept("(") = 1 then do
-    if at(")") = 0 then do
-      basen = p_test()
-      do while accept(",") = 1
-        if at(")") = 0 then dmy = p_test()
+    base = psp
+    do while at(")") = 0 & tk_t[tpp] \= T_EOF
+      if tk_t[tpp] = T_NAME & tk_t[tpp + 1] = T_OP & tk_s[tpp + 1] == "=" then do
+        tpp = tpp + 2
+        dmy = p_test()
       end
+      else do
+        dmy = p_test()
+        psp = psp + 1
+        ps[psp] = dmy
+      end
+      if accept(",") = 0 then leave
     end
     call expect ")"
+    cnt = psp - base
+    st = plist(base)
+    if cnt > 0 then basen = mk(N_TUPLE, st, cnt, 0)
   end
   call expect ":"
   ncd = ncd + 1
@@ -1899,16 +1975,21 @@ p_import: procedure = .int
   cnt = .int
   st = .int
   dmy = .int
+  hasalias = .int
   tpp = tpp + 1
   base = psp
   do forever
     full = dotted_name()
     alias = full
+    hasalias = 0
     if pos(".", full) > 0 then alias = left(full, pos(".", full) - 1)
-    if accept("as") = 1 then alias = expect_name()
+    if accept("as") = 1 then do
+      alias = expect_name()
+      hasalias = 1
+    end
     tn = mkname(alias)
     dmy = bind_name(alias)
-    n = mk(N_IMPORT, tn, 0, 0)
+    n = mk(N_IMPORT, tn, hasalias, 0)
     n_s[n] = full
     psp = psp + 1
     ps[psp] = n
@@ -1934,16 +2015,31 @@ p_from: procedure = .int
   st = .int
   dmy = .int
   paren = .int
+  level = .int
   tpp = tpp + 1
-  full = dotted_name()
+  level = 0
+  do forever
+    if at(".") = 1 then do
+      level = level + 1
+      tpp = tpp + 1
+    end
+    else if at("...") = 1 then do
+      level = level + 3
+      tpp = tpp + 1
+    end
+    else leave
+  end
+  full = ""
+  if at("import") = 0 then full = dotted_name()
   call expect "import"
   paren = accept("(")
   base = psp
   if at("*") = 1 then do
     tpp = tpp + 1
-    n = mk(N_FROMIMPORT, 0, 0, 0)
+    n = mk(N_FROMIMPORT, 0, 0, level)
     n_s[n] = full
     n_d[n] = 1
+    parse_dyn = 1
     return n
   end
   do forever
@@ -1962,6 +2058,6 @@ p_from: procedure = .int
   if paren = 1 then call expect ")"
   cnt = (psp - base) % 2
   st = plist(base)
-  n = mk(N_FROMIMPORT, st, cnt, 0)
+  n = mk(N_FROMIMPORT, st, cnt, level)
   n_s[n] = full
   return n

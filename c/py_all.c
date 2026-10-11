@@ -47,7 +47,7 @@ enum {
     T_UNSET = 0, T_NONE, T_BOOL, T_INT, T_FLOAT,
     T_STR, T_BIG, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_FUNC, T_BUILTIN,
     T_CLASS, T_INST, T_BOUND, T_GEN, T_ITER, T_CELL, T_MODULE, T_PROP,
-    T_SMETH, T_CMETH, T_SUPER, T_FILE, T_ND, T_SLICE, T_NTYPES
+    T_SMETH, T_CMETH, T_SUPER, T_FILE, T_ND, T_SLICE, T_DVIEW, T_BYTES, T_NTYPES
 };
 #define IS_HEAP(t) ((t) >= T_STR)
 
@@ -117,12 +117,19 @@ typedef struct Class {
     AMap ns;
     BFn ctor;
     int flags;
+    struct Class **mro;  /* method resolution order (user classes), NULL = follow base */
+    int nmro;
+    struct Class **bases; /* all direct bases (user classes) */
+    int nbases;
+    struct Class *paycls; /* native base type (list dict set tuple str) holding the payload */
+    Str *modname;        /* defining module, NULL for builtins */
 } Class;
 #define CF_EXC 1
 #define CF_PROPS 2
 #define CF_BUILTIN 4
+#define CF_SETATTR 8
 
-typedef struct Inst { Hdr h; Class *cls; AMap a; } Inst;
+typedef struct Inst { Hdr h; Class *cls; AMap a; Value pay; } Inst;
 
 typedef struct Cell { Hdr h; Value v; } Cell;
 
@@ -135,11 +142,18 @@ typedef struct Func {
     Value *kwdefs;
     Class *defclass;
     Str *name;
+    AMap attrs;          /* function attributes (f.x = 1) */
 } Func;
 
-typedef struct Builtin { Hdr h; BFn fn; const char *name; Str *sname; } Builtin;
+typedef struct Builtin { Hdr h; BFn fn; const char *name; Str *sname; int selfpay; } Builtin;
 typedef struct Bound { Hdr h; Value self; Value fn; } Bound;
-typedef struct Module { Hdr h; Str *name; AMap ns; } Module;
+typedef struct Module {
+    Hdr h;
+    Str *name;
+    AMap ns;
+    Str *gp;             /* global name prefix ("pkg.mod.") for modules written in Python */
+    struct Dict *gmap;   /* attribute name -> global slot cache */
+} Module;
 typedef struct Range { Hdr h; long start, stop, step; } Range;
 #define ND_MAXD 8
 enum { ND_BOOL = 0, ND_INT = 1, ND_FLOAT = 2 };
@@ -152,7 +166,8 @@ typedef struct Nd {
     double *dv;          /* float data */
 } Nd;
 #define AS_ND(v) ((Nd *)(v).u.o)
-typedef struct Prop { Hdr h; Value get, set; } Prop;
+typedef struct Prop { Hdr h; Value get, set, del; } Prop;
+typedef struct DView { Hdr h; Value d; int what; } DView;   /* what: 0 keys 1 values 2 items */
 typedef struct Super { Hdr h; Class *start; Value obj; } Super;
 typedef struct File { Hdr h; FILE *fp; int closed; int out; } File;
 
@@ -166,11 +181,15 @@ typedef struct Gen {
     Value *state;
     int nstate;
     Value yielded;
+    Value sent;          /* value passed in by send() */
+    Value thrown;        /* exception to raise at the yield point (throw()) */
+    Value ret;           /* return value (StopIteration.value) */
     int started, done, running;
 } Gen;
 
 enum { IK_LIST, IK_TUPLE, IK_STR, IK_RANGE, IK_DICT, IK_DVALS, IK_DITEMS, IK_SET,
-       IK_ENUM, IK_ZIP, IK_MAP, IK_FILTER, IK_REV, IK_FILE, IK_CALL, IK_LISTREV, IK_ND };
+       IK_ENUM, IK_ZIP, IK_MAP, IK_FILTER, IK_REV, IK_FILE, IK_CALL, IK_LISTREV, IK_ND, IK_BYTES,
+       IK_CALLSENT };
 typedef struct Iter {
     Hdr h;
     int kind;
@@ -184,6 +203,7 @@ typedef struct Var {
     int kind;
     int slot;
     unsigned char defined, isglobal, isnonlocal, isparam;
+    int bslot;           /* builtin fallback slot for globals of modules, -1 = none */
     struct Var *src;     /* free variable: variable in the parent scope */
     struct Var *fb;      /* class namespace variable: fallback */
 } Var;
@@ -217,6 +237,8 @@ typedef struct Node {
     Class *ccls;         /* attribute inline cache */
     int cepoch;
     Value cval;
+    int level;           /* relative import level */
+    Str *pfx;            /* import statements: global prefix of the importing module */
 } Node;
 
 typedef struct FuncDef {
@@ -235,6 +257,7 @@ typedef struct FuncDef {
     Var **fv;
     int *cellslots; int ncells;
     int line;
+    Str *gpfx;           /* global name prefix of the module this was compiled in */
 } FuncDef;
 
 /* ---- interpreter state ------------------------------------------------ */
@@ -246,6 +269,7 @@ typedef struct Frame {
     Gen *gen;
     Class *ns;           /* class body being executed */
     int resuming;
+    Str *gp;             /* global prefix of the module this frame runs in */
     struct Frame *up;
 } Frame;
 
@@ -257,7 +281,9 @@ typedef struct Handler {
     Frame *frame;
 } Handler;
 
-static Value NONE_V, TRUE_V, FALSE_V, UNSET_V;
+static Value NONE_V, TRUE_V, FALSE_V, UNSET_V, NotImpl_V, Ellipsis_V;
+static Value object_init_v, obj_str_v;
+#define IS_NOTIMPL(v) ((v).t == T_INST && (v).u.o == NotImpl_V.u.o)
 static Value *vstack, *vsp, *vlimit;
 static Handler *cur_handler;
 static Frame *cur_frame;
@@ -287,13 +313,13 @@ static long nglobals, gcap;
 static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, *cls_list,
     *cls_tuple, *cls_dict, *cls_set, *cls_range, *cls_none, *cls_func, *cls_builtin,
     *cls_method, *cls_gen, *cls_module, *cls_iter, *cls_prop, *cls_file, *cls_cell,
-    *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice;
+    *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice, *cls_dview[3], *cls_notimpl, *cls_bytes;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError, *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError, *cls_KeyError, *cls_ValueError,
     *cls_TypeError, *cls_NameError, *cls_UnboundLocalError, *cls_AttributeError,
     *cls_RuntimeError, *cls_RecursionError, *cls_NotImplementedError, *cls_StopIteration,
     *cls_AssertionError, *cls_SystemExit, *cls_ImportError, *cls_OSError, *cls_EOFError,
-    *cls_SyntaxError, *cls_KeyboardInterrupt, *cls_GeneratorExit;
+    *cls_SyntaxError, *cls_KeyboardInterrupt, *cls_GeneratorExit, *cls_FileNotFoundError;
 
 /* interned names used by the runtime */
 static Str *S_init, *S_str, *S_repr, *S_eq, *S_ne, *S_lt, *S_le, *S_gt, *S_ge, *S_add, *S_sub,
@@ -301,7 +327,8 @@ static Str *S_init, *S_str, *S_repr, *S_eq, *S_ne, *S_lt, *S_le, *S_gt, *S_ge, *
     *S_call, *S_bool, *S_hash, *S_enter, *S_exit, *S_name, *S_class, *S_args, *S_truediv,
     *S_floordiv, *S_mod, *S_pow, *S_radd, *S_rsub, *S_rmul, *S_abs, *S_int, *S_float,
     *S_index, *S_pos, *S_invert, *S_and, *S_or, *S_xor, *S_lshift, *S_rshift, *S_dict,
-    *S_mro, *S_doc, *S_setter, *S_main, *S_getattr, *S_format, *S_self, *S_super;
+    *S_mro, *S_doc, *S_setter, *S_main, *S_getattr, *S_format, *S_self, *S_super, *S_setattr,
+    *S_new, *S_module, *S_reversed;
 
 static unsigned char ch_digit[256], ch_alpha[256], ch_alnum[256], ch_space[256],
     ch_upper[256], ch_lower[256], ch_hex[256];
@@ -439,6 +466,15 @@ static Str *str_new(const char *s, long n)
 static Value mkstr(const char *s, long n)
 {
     return mkobj(str_new(s, n), T_STR);
+}
+static Value mkbytes(const char *s, long n)
+{
+    Str *r = (Str *)gc_alloc(sizeof(Str) + (size_t)n, T_BYTES);
+    r->len = n;
+    r->hash = 0;
+    if (n > 0) memcpy(r->s, s, (size_t)n);
+    r->s[n] = 0;
+    return mkobj(r, T_BYTES);
 }
 static Value mkcstr(const char *s)
 {
@@ -771,7 +807,7 @@ static void gc_mark_amap(AMap *m)
 static long gc_obj_size(Hdr *h)
 {
     switch (h->type) {
-    case T_STR: return (long)sizeof(Str) + ((Str *)h)->len;
+    case T_STR: case T_BYTES: return (long)sizeof(Str) + ((Str *)h)->len;
     case T_BIG: return (long)sizeof(Big) + 2L * ((Big *)h)->n;
     case T_LIST: case T_TUPLE: case T_SLICE:
         return (long)sizeof(List) + (long)sizeof(Value) * ((List *)h)->cap;
@@ -801,11 +837,15 @@ static void gc_scan(Hdr *h)
         break; }
     case T_CLASS: {
         Class *c = (Class *)h;
+        int k;
         gc_pushp(c->name, T_STR); gc_pushp(c->base, T_CLASS); gc_mark_amap(&c->ns);
+        for (k = 0; k < c->nmro; k++) gc_pushp(c->mro[k], T_CLASS);
+        for (k = 0; k < c->nbases; k++) gc_pushp(c->bases[k], T_CLASS);
+        gc_pushp(c->paycls, T_CLASS); gc_pushp(c->modname, T_STR);
         break; }
     case T_INST: {
         Inst *n = (Inst *)h;
-        gc_pushp(n->cls, T_CLASS); gc_mark_amap(&n->a);
+        gc_pushp(n->cls, T_CLASS); gc_mark_amap(&n->a); gc_push(n->pay);
         break; }
     case T_FUNC: {
         Func *f = (Func *)h;
@@ -814,15 +854,19 @@ static void gc_scan(Hdr *h)
         for (k = 0; k < f->ndefs; k++) gc_push(f->defs[k]);
         for (k = 0; f->kwdefs && k < f->def->fd->nkwonly; k++) gc_push(f->kwdefs[k]);
         gc_pushp(f->defclass, T_CLASS); gc_pushp(f->name, T_STR);
+        gc_mark_amap(&f->attrs);
         break; }
     case T_BOUND: {
         Bound *b = (Bound *)h;
         gc_push(b->self); gc_push(b->fn);
         break; }
     case T_CELL: gc_push(((Cell *)h)->v); break;
-    case T_MODULE: gc_pushp(((Module *)h)->name, T_STR); gc_mark_amap(&((Module *)h)->ns); break;
+    case T_MODULE:
+        gc_pushp(((Module *)h)->name, T_STR); gc_mark_amap(&((Module *)h)->ns);
+        gc_pushp(((Module *)h)->gp, T_STR); gc_pushp(((Module *)h)->gmap, T_DICT);
+        break;
     case T_PROP: case T_SMETH: case T_CMETH:
-        gc_push(((Prop *)h)->get); gc_push(((Prop *)h)->set);
+        gc_push(((Prop *)h)->get); gc_push(((Prop *)h)->set); gc_push(((Prop *)h)->del);
         break;
     case T_SUPER: gc_pushp(((Super *)h)->start, T_CLASS); gc_push(((Super *)h)->obj); break;
     case T_GEN: {
@@ -831,7 +875,7 @@ static void gc_scan(Hdr *h)
         for (k = 0; k < g->nloc; k++) gc_push(g->loc[k]);
         for (k = 0; k < g->nstate; k++) gc_push(g->state[k]);
         for (k = 0; g->cells && k < g->def->fd->nfree; k++) gc_pushp(g->cells[k], T_CELL);
-        gc_push(g->yielded);
+        gc_push(g->yielded); gc_push(g->sent); gc_push(g->thrown); gc_push(g->ret);
         gc_pushp(g->fn, T_FUNC);
         break; }
     case T_ITER: {
@@ -839,6 +883,7 @@ static void gc_scan(Hdr *h)
         gc_push(t->a); gc_push(t->b); gc_push(t->c);
         break; }
     case T_BUILTIN: gc_pushp(((Builtin *)h)->sname, T_STR); break;
+    case T_DVIEW: gc_push(((DView *)h)->d); break;
     default: break;
     }
 }
@@ -848,9 +893,11 @@ static void gc_free_obj(Hdr *h)
     case T_LIST: case T_TUPLE: case T_SLICE: free(((List *)h)->a); break;
     case T_ND: free(((Nd *)h)->iv); free(((Nd *)h)->dv); break;
     case T_DICT: case T_SET: free(((Dict *)h)->e); free(((Dict *)h)->idx); break;
-    case T_CLASS: free(((Class *)h)->ns.k); free(((Class *)h)->ns.v); break;
+    case T_CLASS: free(((Class *)h)->ns.k); free(((Class *)h)->ns.v);
+        free(((Class *)h)->mro); free(((Class *)h)->bases); break;
     case T_INST: free(((Inst *)h)->a.k); free(((Inst *)h)->a.v); break;
     case T_FUNC: free(((Func *)h)->cells); free(((Func *)h)->defs); free(((Func *)h)->kwdefs);
+        free(((Func *)h)->attrs.k); free(((Func *)h)->attrs.v);
         break;
     case T_MODULE: free(((Module *)h)->ns.k); free(((Module *)h)->ns.v); break;
     case T_GEN: free(((Gen *)h)->loc); free(((Gen *)h)->state); free(((Gen *)h)->cells); break;
@@ -1507,7 +1554,7 @@ static int parse_float(const char *s, long n, double *out)
 enum {
     TK_EOF = 1000, TK_NEWLINE, TK_INDENT, TK_DEDENT, TK_NAME, TK_NUM, TK_FLOAT, TK_STR,
     TK_FSTR, TK_KW, TK_EQ, TK_NE, TK_LE, TK_GE, TK_POW, TK_FDIV, TK_LSH, TK_RSH,
-    TK_ARROW, TK_ELLIPSIS, TK_AUG
+    TK_ARROW, TK_ELLIPSIS, TK_AUG, TK_WALRUS
 };
 enum {
     B_NONE = 0, B_ADD, B_SUB, B_MUL, B_DIV, B_FDIV, B_MOD, B_POW, B_AND, B_OR, B_XOR,
@@ -1781,11 +1828,12 @@ static void lex_source(const char *src, long len)
         }
         if (c == '"' || c == '\'' || ch_alpha[c]) {
             long st = pos;
-            int fl = 0, rw = 0, q, triple = 0;
+            int fl = 0, rw = 0, q, triple = 0, isb = 0;
             long bs, be;
             while (pos < len && src[pos] != '"' && src[pos] != '\'') {
                 if (src[pos] == 'f' || src[pos] == 'F') fl = 1;
                 if (src[pos] == 'r' || src[pos] == 'R') rw = 1;
+                if (src[pos] == 'b' || src[pos] == 'B') isb = 1;
                 pos++;
             }
             q = src[pos];
@@ -1794,6 +1842,37 @@ static void lex_source(const char *src, long len)
             bs = pos;
             for (;;) {
                 if (pos >= len) syntax_error(line, "unterminated string literal");
+                if (fl && !rw && src[pos] == '{' && pos + 1 < len && src[pos + 1] == '{') { pos += 2; continue; }
+                if (fl && src[pos] == '{') {
+                    /* replacement field: quotes inside may be nested strings (PEP 701) */
+                    int d = 1, pd = 0, inspec = 0;
+                    pos++;
+                    while (pos < len && d > 0) {
+                        int ch = (unsigned char)src[pos];
+                        if (!inspec && (ch == '\'' || ch == '"')) {
+                            int q2 = ch, tr2 = 0;
+                            if (pos + 2 < len && src[pos + 1] == q2 && src[pos + 2] == q2) tr2 = 1;
+                            pos += tr2 ? 3 : 1;
+                            while (pos < len) {
+                                if (src[pos] == '\\') { pos += 2; continue; }
+                                if (src[pos] == '\n') line++;
+                                if (src[pos] == q2 && (!tr2 || (pos + 2 < len && src[pos + 1] == q2 &&
+                                                                 src[pos + 2] == q2))) break;
+                                pos++;
+                            }
+                            pos += tr2 ? 3 : 1;
+                            continue;
+                        }
+                        if (ch == '\n') line++;
+                        if (!inspec && (ch == '(' || ch == '[')) pd++;
+                        else if (!inspec && (ch == ')' || ch == ']')) pd--;
+                        else if (ch == '{') { d++; if (inspec) { /* nested field in a spec */ } }
+                        else if (ch == '}') d--;
+                        else if (ch == ':' && d == 1 && pd == 0 && !inspec) inspec = 1;
+                        pos++;
+                    }
+                    continue;
+                }
                 if (src[pos] == '\\' && pos + 1 < len) {
                     if (src[pos + 1] == '\n') line++;
                     pos += 2;
@@ -1815,6 +1894,7 @@ static void lex_source(const char *src, long len)
             (void)st;
             t = tok_new(fl ? TK_FSTR : TK_STR, line);
             t->raw = rw;
+            t->op = isb;
             if (fl) {
                 t->s = str_new(src + bs, be - bs);
             } else if (rw) {
@@ -1836,7 +1916,7 @@ static void lex_source(const char *src, long len)
                 "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "@=", ":=", NULL };
             static const int ttype[] = { TK_EQ, TK_NE, TK_LE, TK_GE, TK_POW, TK_FDIV, TK_LSH,
                 TK_RSH, TK_ARROW, TK_AUG, TK_AUG, TK_AUG, TK_AUG, TK_AUG, TK_AUG, TK_AUG,
-                TK_AUG, TK_AUG, ':' };
+                TK_AUG, TK_AUG, TK_WALRUS };
             static const int tbop2[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, B_ADD, B_SUB, B_MUL, B_DIV,
                 B_MOD, B_AND, B_OR, B_XOR, B_MATMUL, 0 };
             int k, found = 0;
@@ -1873,7 +1953,7 @@ static void lex_source(const char *src, long len)
 enum {
     N_CONST = 1, N_NAME, N_ATTR, N_SUBSCR, N_SLICE, N_CALL, N_BINOP, N_UNARY, N_AND, N_OR,
     N_NOT, N_CMP, N_IFEXP, N_LIST, N_TUPLE, N_DICT, N_SET, N_LAMBDA, N_COMP, N_FSTR, N_FPART,
-    N_STAR, N_DSTAR, N_KW,
+    N_STAR, N_DSTAR, N_KW, N_WALRUS,
     S_EXPR, S_ASSIGN, S_AUG, S_IF, S_WHILE, S_FOR, S_BREAK, S_CONTINUE, S_RETURN, S_PASS,
     S_DEF, S_CLASS, S_TRY, S_EXCEPT, S_RAISE, S_ASSERT, S_DEL, S_IMPORT, S_FROM, S_WITH,
     S_BLOCK, S_YIELD, S_YIELDFROM, S_LISTAPP, S_SETADD, S_DICTSET, S_NOP
@@ -1881,6 +1961,7 @@ enum {
 enum { C_LT = 1, C_LE, C_GT, C_GE, C_EQ, C_NE, C_IN, C_NOTIN, C_IS, C_ISNOT };
 
 static int pp;
+static Str *cur_gpfx;    /* global name prefix of the module being compiled */
 static Scope *cur_scope;
 static Scope *mod_scope;
 
@@ -2236,6 +2317,24 @@ static Node *parse_test(void)
     Node *e;
     if (atkw(KW_LAMBDA)) return parse_lambda();
     e = parse_or();
+    if (at(TK_WALRUS)) {
+        Node *w = mk(N_WALRUS);
+        Scope *cs = cur_scope;
+        if (e->kind != N_NAME) perr("cannot use assignment expressions with expression");
+        pp++;
+        /* inside a comprehension the target binds in the enclosing function/module */
+        while (cs->kind == SC_FUNC && cs->parent && cs->fd &&
+               (cs->fd->name == intern_c("<comp>") || cs->fd->name == intern_c("<genexpr>")))
+            cs = cs->parent;
+        if (cs != cur_scope) {
+            Var *ov = scope_var(cs, e->name);
+            if (cs->kind == SC_MOD) e->var->isglobal = 1;
+            else { ov->defined = 1; e->var->isnonlocal = 1; }
+        } else e->var->defined = 1;
+        w->a = e;
+        w->b = parse_test();
+        return w;
+    }
     if (atkw(KW_IF)) {
         Node *n = mk(N_IFEXP);
         pp++;
@@ -2706,9 +2805,17 @@ static Node *parse_atom(void)
         }
         if (!anyf) {
             Buf b;
+            int isb = TOK.op;
             buf_init(&b);
             while (pp < i) { buf_addn(&b, TOK.s->s, TOK.s->len); pp++; }
-            n = mk_const(perm_str(b.s, b.n), line);
+            if (isb) {
+                int sp = gc_perm;
+                Value bv;
+                gc_perm = 1;
+                bv = mkbytes(b.s, b.n);
+                gc_perm = sp;
+                n = mk_const(bv, line);
+            } else n = mk_const(perm_str(b.s, b.n), line);
             buf_free(&b);
             return n;
         } else {
@@ -2733,7 +2840,7 @@ static Node *parse_atom(void)
         if (TOK.kw == KW_FALSE) { pp++; return mk_const(FALSE_V, line); }
         if (TOK.kw == KW_LAMBDA) return parse_lambda();
     }
-    if (t == TK_ELLIPSIS) { pp++; return mk_const(NONE_V, line); }
+    if (t == TK_ELLIPSIS) { pp++; return mk_const(Ellipsis_V, line); }
     if (t == '(') {
         pp++;
         if (at(')')) { pp++; return node_new(N_TUPLE, line); }
@@ -2980,6 +3087,7 @@ static Node *parse_import(void)
     int line = TOK.line;
     if (atkw(KW_IMPORT)) {
         Node *n = node_new(S_IMPORT, line);
+        n->pfx = cur_gpfx;
         pp++;
         do {
             Node *it = mk(N_NAME);
@@ -3015,11 +3123,18 @@ static Node *parse_import(void)
         int paren;
         pp++;
         buf_init(&b);
-        while (at('.')) pp++;
-        if (!at(TK_NAME)) perr("expected module name");
-        buf_add(&b, TOK.s->s); pp++;
-        while (at('.')) { pp++; buf_addc(&b, '.'); buf_add(&b, TOK.s->s); pp++; }
-        n->name = intern(b.s, b.n);
+        n->pfx = cur_gpfx;
+        while (at('.') || at(TK_ELLIPSIS)) { n->level += at('.') ? 1 : 3; pp++; }
+        if (at(TK_NAME)) {
+            buf_add(&b, TOK.s->s); pp++;
+            while (at('.')) {
+                pp++;
+                buf_addc(&b, '.');
+                if (!at(TK_NAME)) perr("expected name");
+                buf_add(&b, TOK.s->s); pp++;
+            }
+            n->name = intern(b.s, b.n);
+        } else if (n->level == 0) perr("expected module name");
         buf_free(&b);
         expect_kw(KW_IMPORT, "import");
         if (at('*')) { pp++; n->op = 1; return n; }
@@ -3040,6 +3155,23 @@ static Node *parse_import(void)
         if (paren) expect(')', ")");
         return n;
     }
+}
+
+static Node *parse_yield_stmt(int line)
+{
+    Node *n;
+    pp++;
+    check_yield_scope();
+    if (accept_kw(KW_FROM)) {
+        n = node_new(S_YIELDFROM, line);
+        n->a = parse_test();
+    } else {
+        n = node_new(S_YIELD, line);
+        if (!at(TK_NEWLINE) && !at(';') && !at(TK_EOF) && !at(TK_DEDENT) && !at(')'))
+            n->a = parse_testlist(1);
+    }
+    n->sidx = cur_scope->nstate++;
+    return n;
 }
 
 static Node *parse_simple(void)
@@ -3095,18 +3227,7 @@ static Node *parse_simple(void)
         case KW_IMPORT: case KW_FROM:
             return parse_import();
         case KW_YIELD:
-            pp++;
-            check_yield_scope();
-            if (accept_kw(KW_FROM)) {
-                n = node_new(S_YIELDFROM, line);
-                n->a = parse_test();
-            } else {
-                n = node_new(S_YIELD, line);
-                if (!at(TK_NEWLINE) && !at(';') && !at(TK_EOF) && !at(TK_DEDENT))
-                    n->a = parse_testlist(1);
-            }
-            n->sidx = cur_scope->nstate++;
-            return n;
+            return parse_yield_stmt(line);
         default: break;
         }
     }
@@ -3119,7 +3240,14 @@ static Node *parse_simple(void)
             while (accept('=')) {
                 to_target(val, line);
                 node_add(as, val);
-                if (atkw(KW_YIELD)) perr("yield in assignment is not supported");
+                if (atkw(KW_YIELD)) {
+                    Node *y;
+                    if (as->n != 1) perr("yield in chained assignment is not supported");
+                    y = parse_yield_stmt(line);
+                    if (y->kind != S_YIELD) perr("'yield from' in assignment is not supported");
+                    y->b = as->list[0];
+                    return y;
+                }
                 val = parse_testlist(1);
             }
             as->a = val;
@@ -3328,18 +3456,49 @@ static Node *parse_module(void)
 /* =========================================================================
    p4_res.c   scope resolution: locals, cells, free variables, globals
    ========================================================================= */
+static long *gtab;       /* open addressing hash: global index + 1, 0 = empty */
+static long gtabsz;
+
+static void gtab_insert(Str *nm, long idx)
+{
+    long k = (long)(nm->hash % (unsigned long)gtabsz);
+    while (gtab[k]) k = (k + 1) % gtabsz;
+    gtab[k] = idx + 1;
+}
+static long global_find(Str *nm)
+{
+    long k;
+    if (!gtab) return -1;
+    k = (long)(nm->hash % (unsigned long)gtabsz);
+    while (gtab[k]) {
+        if (gnames[gtab[k] - 1] == nm) return gtab[k] - 1;
+        k = (k + 1) % gtabsz;
+    }
+    return -1;
+}
 static long global_index(Str *nm)
 {
     long i;
-    for (i = 0; i < nglobals; i++)
-        if (gnames[i] == nm) return i;
+    if (nm->hash == 0) str_hash(nm);
+    i = global_find(nm);
+    if (i >= 0) return i;
     if (nglobals >= gcap) {
         gcap = gcap ? gcap * 2 : 256;
         gnames = (Str **)xrealloc(gnames, sizeof(Str *) * (size_t)gcap);
         G = (Value *)xrealloc(G, sizeof(Value) * (size_t)gcap);
     }
+    if (!gtab || (nglobals + 1) * 2 > gtabsz) {
+        long j;
+        free(gtab);
+        gtabsz = gtabsz ? gtabsz * 2 : 1024;
+        while ((nglobals + 1) * 2 > gtabsz) gtabsz *= 2;
+        gtab = (long *)xmalloc(sizeof(long) * (size_t)gtabsz);
+        for (j = 0; j < gtabsz; j++) gtab[j] = 0;
+        for (j = 0; j < nglobals; j++) gtab_insert(gnames[j], j);
+    }
     gnames[nglobals] = nm;
     G[nglobals] = UNSET_V;
+    gtab_insert(nm, nglobals);
     return nglobals++;
 }
 
@@ -3347,6 +3506,26 @@ static void set_global(Str *nm, Value v)
 {
     long i = global_index(nm);
     G[i] = v;
+}
+
+/* the global name `nm` of the module with prefix `pfx` ("a.b."); NULL prefix = builtins */
+static Str *prefixed(Str *pfx, Str *nm)
+{
+    Buf b;
+    Str *r;
+    if (!pfx) return nm;
+    buf_init(&b);
+    buf_addn(&b, pfx->s, pfx->len);
+    buf_addn(&b, nm->s, nm->len);
+    r = intern(b.s, b.n);
+    buf_free(&b);
+    return r;
+}
+static void setup_global(Var *v)
+{
+    v->kind = VK_GLOBAL;
+    v->slot = (int)global_index(prefixed(cur_gpfx, v->name));
+    v->bslot = cur_gpfx ? (int)global_index(v->name) : -1;
 }
 
 static void add_free(Scope *s, Var *v)
@@ -3395,8 +3574,7 @@ static void resolve_var(Scope *s, Var *v)
 {
     Var *src;
     if (s->kind == SC_MOD || v->isglobal) {
-        v->kind = VK_GLOBAL;
-        v->slot = (int)global_index(v->name);
+        setup_global(v);
         return;
     }
     if (v->isnonlocal) {
@@ -3418,8 +3596,7 @@ static void resolve_var(Scope *s, Var *v)
                 if (ex) { free(fb); fb = ex; }
                 else { fb->kind = VK_FREE; fb->src = src; add_free(s, fb); }
             } else {
-                fb->kind = VK_GLOBAL;
-                fb->slot = (int)global_index(v->name);
+                setup_global(fb);
             }
             v->fb = fb;
         }
@@ -3436,8 +3613,7 @@ static void resolve_var(Scope *s, Var *v)
             add_free(s, v);
         }
     } else {
-        v->kind = VK_GLOBAL;
-        v->slot = (int)global_index(v->name);
+        setup_global(v);
     }
 }
 
@@ -3463,6 +3639,7 @@ static void resolve_scope(Scope *s)
         fd->nfree = s->nfree;
         fd->fv = s->freevars;
         fd->nstate = s->nstate;
+        fd->gpfx = cur_gpfx;
         fd->ncells = nc;
         fd->cellslots = (int *)xmalloc(sizeof(int) * (size_t)(nc + 1));
         for (i = 0; i < s->nvars; i++)
@@ -3503,11 +3680,26 @@ static Class *class_of(Value v)
     case T_CELL: return cls_cell;
     case T_ND: return cls_ndarray;
     case T_SLICE: return cls_slice;
+    case T_DVIEW: return cls_dview[((DView *)v.u.o)->what];
+    case T_BYTES: return cls_bytes;
     default: return cls_object;
     }
 }
+static Str *modname_of_gp(Str *gp)
+{
+    if (!gp) return NULL;
+    return intern(gp->s, gp->len > 0 ? gp->len - 1 : 0);
+}
 static Value *class_find(Class *c, Str *nm)
 {
+    if (c->mro) {
+        int i;
+        for (i = 0; i < c->nmro; i++) {
+            Value *p = amap_get(&c->mro[i]->ns, nm);
+            if (p) return p;
+        }
+        return NULL;
+    }
     while (c) {
         Value *p = amap_get(&c->ns, nm);
         if (p) return p;
@@ -3517,11 +3709,46 @@ static Value *class_find(Class *c, Str *nm)
 }
 static int class_isa(Class *c, Class *base)
 {
+    if (c->mro) {
+        int i;
+        for (i = 0; i < c->nmro; i++)
+            if (c->mro[i] == base) return 1;
+        return 0;
+    }
     while (c) {
         if (c == base) return 1;
         c = c->base;
     }
     return 0;
+}
+/* find nm in the MRO of `type` strictly after class `after` (for super()) */
+static Value *class_find_after(Class *type, Class *after, Str *nm)
+{
+    Class *k;
+    int i;
+    if (type->mro) {
+        for (i = 0; i < type->nmro; i++) {
+            if (type->mro[i] == after) {
+                for (i++; i < type->nmro; i++) {
+                    Value *p = amap_get(&type->mro[i]->ns, nm);
+                    if (p) return p;
+                }
+                return NULL;
+            }
+        }
+        return NULL;
+    }
+    for (k = type; k && k != after; k = k->base) { }
+    if (!k) return NULL;
+    for (k = k->base; k; k = k->base) {
+        Value *p = amap_get(&k->ns, nm);
+        if (p) return p;
+    }
+    return NULL;
+}
+static Value unpay(Value v)
+{
+    return (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET) ? AS_INST(v)->pay : v;
 }
 static const char *type_name(Value v)
 {
@@ -3532,6 +3759,7 @@ static Inst *new_inst(Class *c)
     Inst *in = (Inst *)gc_alloc(sizeof(Inst), T_INST);
     in->cls = c;
     in->a.k = NULL; in->a.v = NULL; in->a.n = in->a.cap = 0;
+    in->pay = UNSET_V;
     return in;
 }
 static Value new_bound(Value self, Value fn)
@@ -3596,7 +3824,7 @@ static long range_len(Range *r)
 static Value mk_prop(int type, Value g, Value s)
 {
     Prop *p = (Prop *)gc_alloc(sizeof(Prop), type);
-    p->get = g; p->set = s;
+    p->get = g; p->set = s; p->del = UNSET_V;
     return mkobj(p, type);
 }
 
@@ -3608,11 +3836,12 @@ static int py_truthy(Value v)
     case T_NONE: return 0;
     case T_BOOL: case T_INT: return v.u.i != 0;
     case T_FLOAT: return v.u.d != 0;
-    case T_STR: return AS_STR(v)->len != 0;
+    case T_STR: case T_BYTES: return AS_STR(v)->len != 0;
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n != 0;
     case T_DICT: case T_SET: return AS_DICT(v)->n != 0;
     case T_RANGE: return range_len((Range *)v.u.o) != 0;
     case T_ND: return nd_truthy(v);
+    case T_DVIEW: return AS_DICT(((DView *)v.u.o)->d)->n != 0;
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_bool);
         if (m) return py_truthy(call1(*m, v));
@@ -3625,11 +3854,12 @@ static int py_truthy(Value v)
 static long py_len(Value v)
 {
     switch (v.t) {
-    case T_STR: return AS_STR(v)->len;
+    case T_STR: case T_BYTES: return AS_STR(v)->len;
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n;
     case T_DICT: case T_SET: return AS_DICT(v)->n;
     case T_RANGE: return range_len((Range *)v.u.o);
     case T_ND: return nd_len(v);
+    case T_DVIEW: return AS_DICT(((DView *)v.u.o)->d)->n;
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_len);
         if (m) {
@@ -3666,6 +3896,32 @@ static long need_long(Value v, const char *what)
     return 0;
 }
 
+/* ---- dict views ------------------------------------------------------- */
+static Value mkdview(Value d, int what)
+{
+    DView *v = (DView *)gc_alloc(sizeof(DView), T_DVIEW);
+    v->d = d;
+    v->what = what;
+    return mkobj(v, T_DVIEW);
+}
+/* snapshot of a dict view as a set (keys and items only) */
+static Value dview_set(Value v)
+{
+    DView *dv = (DView *)v.u.o;
+    Dict *d = AS_DICT(dv->d), *r = dict_new_t(T_SET);
+    Value rv = mkobj(r, T_SET);
+    long i;
+    VPUSH(rv);
+    for (i = 0; i < d->used; i++) {
+        if (d->e[i].k.t == T_UNSET) continue;
+        if (dv->what == 0) set_add(r, d->e[i].k);
+        else if (dv->what == 2) set_add(r, mktuple2(d->e[i].k, d->e[i].v));
+        else set_add(r, d->e[i].v);
+    }
+    vsp--;
+    return rv;
+}
+
 /* ---- equality --------------------------------------------------------- */
 static int num_eq(Value a, Value b)
 {
@@ -3675,13 +3931,27 @@ static int num_eq(Value a, Value b)
 static int py_eq(Value a, Value b)
 {
     if (is_num(a) && is_num(b)) return num_eq(a, b);
+    if (a.t == T_DVIEW || b.t == T_DVIEW) {
+        Value x = a, y = b;
+        int r;
+        Value *base = vsp;
+        if ((a.t == T_DVIEW && ((DView *)a.u.o)->what == 1) ||
+            (b.t == T_DVIEW && ((DView *)b.u.o)->what == 1)) return a.t == b.t && a.u.o == b.u.o;
+        if (a.t == T_DVIEW) x = dview_set(a);
+        VPUSH(x);
+        if (b.t == T_DVIEW) y = dview_set(b);
+        if (x.t != T_SET || y.t != T_SET) { vsp = base; return 0; }
+        r = py_eq(x, y);
+        vsp = base;
+        return r;
+    }
     if (a.t != b.t) {
         if (a.t == T_INST || b.t == T_INST) goto inst;
         return 0;
     }
     switch (a.t) {
     case T_NONE: return 1;
-    case T_STR:
+    case T_STR: case T_BYTES:
         return a.u.o == b.u.o || (AS_STR(a)->len == AS_STR(b)->len &&
             memcmp(AS_STR(a)->s, AS_STR(b)->s, (size_t)AS_STR(a)->len) == 0);
     case T_LIST: case T_TUPLE: {
@@ -3725,11 +3995,17 @@ static int py_eq(Value a, Value b)
 inst:
     if (a.t == T_INST) {
         Value *m = class_find(AS_INST(a)->cls, S_eq);
-        if (m) return py_truthy(call2(*m, a, b));
+        if (m) {
+            Value r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) return py_truthy(r);
+        }
     }
     if (b.t == T_INST) {
         Value *m = class_find(AS_INST(b)->cls, S_eq);
-        if (m) return py_truthy(call2(*m, b, a));
+        if (m) {
+            Value r = call2(*m, b, a);
+            if (!IS_NOTIMPL(r)) return py_truthy(r);
+        }
     }
     return a.t == b.t && a.u.o == b.u.o;
 }
@@ -3750,7 +4026,7 @@ static unsigned long py_hash(Value v)
             for (i = 0; i < sizeof(double); i++) h = h * 31 + p[i];
             return h;
         } }
-    case T_STR: return str_hash(AS_STR(v));
+    case T_STR: case T_BYTES: return str_hash(AS_STR(v));
     case T_TUPLE: {
         List *l = AS_LIST(v);
         unsigned long h = 0x345678UL;
@@ -3778,7 +4054,7 @@ static unsigned long py_hash(Value v)
 /* ---- ordering --------------------------------------------------------- */
 static int cmp3(Value a, Value b, int *ok);
 static int rich_lt_hook(Value a, Value b);
-static Value propsetter_fn, obj_eq_v, obj_ne_v, obj_hash_v;
+static Value propdeleter_fn, propgetter_fn, propsetter_fn, obj_eq_v, obj_ne_v, obj_hash_v;
 static Str **op_names(int op, int rev)
 {
     static Str *fwd[11], *bwd[11];
@@ -3808,7 +4084,7 @@ static int cmp3(Value a, Value b, int *ok)
         }
         return int_cmp(a, b);
     }
-    if (a.t == T_STR && b.t == T_STR) {
+    if ((a.t == T_STR && b.t == T_STR) || (a.t == T_BYTES && b.t == T_BYTES)) {
         Str *x = AS_STR(a), *y = AS_STR(b);
         long n = x->len < y->len ? x->len : y->len;
         int c = memcmp(x->s, y->s, (size_t)n);
@@ -3838,17 +4114,26 @@ static int rich_cmp(int op, Value a, Value b)
     if (op == C_NE) {
         if (a.t == T_INST) {
             Value *m = class_find(AS_INST(a)->cls, S_ne);
-            if (m) return py_truthy(call2(*m, a, b));
+            if (m) {
+                Value r = call2(*m, a, b);
+                if (!IS_NOTIMPL(r)) return py_truthy(r);
+            }
         }
         return !py_eq(a, b);
     }
     if (a.t == T_INST) {
         Value *m = class_find(AS_INST(a)->cls, *op_names(op, 0));
-        if (m) return py_truthy(call2(*m, a, b));
+        if (m) {
+            Value r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) return py_truthy(r);
+        }
     }
     if (b.t == T_INST) {
         Value *m = class_find(AS_INST(b)->cls, *op_names(op, 1));
-        if (m) return py_truthy(call2(*m, b, a));
+        if (m) {
+            Value r = call2(*m, b, a);
+            if (!IS_NOTIMPL(r)) return py_truthy(r);
+        }
     }
     if (a.t == T_FLOAT || b.t == T_FLOAT) {
         if (is_num(a) && is_num(b)) {
@@ -3858,6 +4143,16 @@ static int rich_cmp(int op, Value a, Value b)
             case C_GT: return x > y; default: return x >= y;
             }
         }
+    }
+    if ((a.t == T_DVIEW || b.t == T_DVIEW) && (a.t == T_SET || b.t == T_SET || (a.t == T_DVIEW && b.t == T_DVIEW))) {
+        Value *base = vsp;
+        if (a.t == T_DVIEW) a = dview_set(a);
+        VPUSH(a);
+        if (b.t == T_DVIEW) b = dview_set(b);
+        VPUSH(b);
+        op = rich_cmp(op, a, b);
+        vsp = base;
+        return op;
     }
     if (a.t == T_SET && b.t == T_SET) {
         Dict *x = AS_DICT(a), *y = AS_DICT(b);
@@ -3926,6 +4221,24 @@ static void repr_buf(Value v, Buf *b, int depth)
     case T_INT: case T_BIG: int_str(v, b); break;
     case T_FLOAT: float_repr(v.u.d, t); buf_add(b, t); break;
     case T_STR: repr_str_lit(AS_STR(v), b); break;
+    case T_BYTES: {
+        Str *bs = AS_STR(v);
+        int q = '\'';
+        char tt[8];
+        if (memchr(bs->s, '\'', (size_t)bs->len) && !memchr(bs->s, '"', (size_t)bs->len)) q = '"';
+        buf_addc(b, 'b');
+        buf_addc(b, q);
+        for (i = 0; i < bs->len; i++) {
+            int c = (unsigned char)bs->s[i];
+            if (c == q || c == '\\') { buf_addc(b, '\\'); buf_addc(b, c); }
+            else if (c == '\n') buf_add(b, "\\n");
+            else if (c == '\t') buf_add(b, "\\t");
+            else if (c == '\r') buf_add(b, "\\r");
+            else if (c < 32 || c >= 127) { sprintf(tt, "\\x%02x", c); buf_add(b, tt); }
+            else buf_addc(b, c);
+        }
+        buf_addc(b, q);
+        break; }
     case T_LIST: case T_TUPLE: {
         List *l = AS_LIST(v);
         buf_addc(b, v.t == T_LIST ? '[' : '(');
@@ -4022,7 +4335,32 @@ static void repr_buf(Value v, Buf *b, int depth)
         break;
     case T_FILE: buf_add(b, "<_io.TextIOWrapper>"); break;
     case T_ND: nd_format(v, b, 1); break;
-    case T_SLICE: buf_add(b, "slice(...)"); break;
+    case T_SLICE: {
+        List *sl = AS_LIST(v);
+        buf_add(b, "slice(");
+        repr_buf(sl->a[0], b, depth + 1); buf_add(b, ", ");
+        repr_buf(sl->a[1], b, depth + 1); buf_add(b, ", ");
+        repr_buf(sl->a[2], b, depth + 1); buf_addc(b, ')');
+        break; }
+    case T_DVIEW: {
+        DView *dv = (DView *)v.u.o;
+        Dict *d = AS_DICT(dv->d);
+        int first = 1;
+        buf_add(b, dv->what == 0 ? "dict_keys([" : (dv->what == 1 ? "dict_values([" : "dict_items(["));
+        for (i = 0; i < d->used; i++) {
+            if (d->e[i].k.t == T_UNSET) continue;
+            if (!first) buf_add(b, ", ");
+            first = 0;
+            if (dv->what == 0) repr_buf(d->e[i].k, b, depth + 1);
+            else if (dv->what == 1) repr_buf(d->e[i].v, b, depth + 1);
+            else {
+                buf_addc(b, '(');
+                repr_buf(d->e[i].k, b, depth + 1); buf_add(b, ", ");
+                repr_buf(d->e[i].v, b, depth + 1); buf_addc(b, ')');
+            }
+        }
+        buf_add(b, "])");
+        break; }
     default:
         sprintf(t, "<object at 0x%lx>", (unsigned long)(size_t)v.u.o);
         buf_add(b, t);
@@ -4061,6 +4399,10 @@ static void str_buf(Value v, Buf *b)
     if (v.t == T_INST) {
         Inst *in = AS_INST(v);
         Value *m = class_find(in->cls, S_str);
+        if (m && m->t == T_BUILTIN && m->u.o == obj_str_v.u.o && in->pay.t == T_STR) {
+            buf_addn(b, AS_STR(in->pay)->s, AS_STR(in->pay)->len);
+            return;
+        }
         if (m) {
             Value r = call1(*m, v);
             if (r.t != T_STR) throw_new(cls_TypeError, "__str__ returned non-string (type %.40s)", type_name(r));
@@ -4097,6 +4439,19 @@ static void attr_error(Value o, Str *nm)
                   ((Module *)o.u.o)->name->s, nm->s);
     throw_new(cls_AttributeError, "'%.60s' object has no attribute '%.60s'", type_name(o), nm->s);
 }
+/* global slot of attribute `nm` of a module written in Python (-1 if none and !create) */
+static long module_slot(Module *m, Str *nm, int create)
+{
+    Value r;
+    long gi;
+    if (m->gmap && dict_get(m->gmap, mkobj(nm, T_STR), &r)) return r.u.i;
+    gi = create ? global_index(prefixed(m->gp, nm)) : global_find(prefixed(m->gp, nm));
+    if (gi >= 0) {
+        if (!m->gmap) m->gmap = dict_new();
+        dict_set(m->gmap, mkobj(nm, T_STR), mkint(gi));
+    }
+    return gi;
+}
 static Value bind_class_attr(Value o, Value *cv, Class *owner_for_cls)
 {
     switch (cv->t) {
@@ -4115,11 +4470,81 @@ static Value class_mro_tuple(Class *c)
     List *t;
     Class *k;
     long n = 0;
+    if (c->mro) {
+        int i;
+        t = tuple_new(c->nmro);
+        for (i = 0; i < c->nmro; i++) t->a[i] = mkobj(c->mro[i], T_CLASS);
+        return mkobj(t, T_TUPLE);
+    }
     for (k = c; k; k = k->base) n++;
     t = tuple_new(n);
     n = 0;
     for (k = c; k; k = k->base) t->a[n++] = mkobj(k, T_CLASS);
     return mkobj(t, T_TUPLE);
+}
+
+/* C3 linearisation: returns a malloc'ed array of *n classes */
+typedef struct MSeq { Class **a; int n, pos; } MSeq;
+static Class **class_mro_array(Class *c, int *n)
+{
+    Class **r;
+    int i;
+    if (c->mro) {
+        r = (Class **)xmalloc(sizeof(Class *) * (size_t)(c->nmro + 1));
+        for (i = 0; i < c->nmro; i++) r[i] = c->mro[i];
+        *n = c->nmro;
+        return r;
+    }
+    {
+        Class *k;
+        int cnt = 0;
+        for (k = c; k; k = k->base) cnt++;
+        r = (Class **)xmalloc(sizeof(Class *) * (size_t)(cnt + 1));
+        cnt = 0;
+        for (k = c; k; k = k->base) r[cnt++] = k;
+        *n = cnt;
+    }
+    return r;
+}
+static void c3_build(Class *c, Class **bases, int nb)
+{
+    MSeq *sq = (MSeq *)xmalloc(sizeof(MSeq) * (size_t)(nb + 1));
+    Class **res = (Class **)xmalloc(sizeof(Class *) * 64);
+    int nres = 0, rcap = 64, i, j, k, remaining;
+    res[nres++] = c;
+    for (i = 0; i < nb; i++) { sq[i].a = class_mro_array(bases[i], &sq[i].n); sq[i].pos = 0; }
+    sq[nb].a = (Class **)xmalloc(sizeof(Class *) * (size_t)(nb + 1));
+    for (i = 0; i < nb; i++) sq[nb].a[i] = bases[i];
+    sq[nb].n = nb; sq[nb].pos = 0;
+    for (;;) {
+        Class *cand = NULL;
+        remaining = 0;
+        for (i = 0; i <= nb; i++) if (sq[i].pos < sq[i].n) remaining = 1;
+        if (!remaining) break;
+        for (i = 0; i <= nb && !cand; i++) {
+            Class *t;
+            int ok = 1;
+            if (sq[i].pos >= sq[i].n) continue;
+            t = sq[i].a[sq[i].pos];
+            for (j = 0; j <= nb && ok; j++)
+                for (k = sq[j].pos + 1; k < sq[j].n; k++)
+                    if (sq[j].a[k] == t) { ok = 0; break; }
+            if (ok) cand = t;
+        }
+        if (!cand) {
+            for (i = 0; i <= nb; i++) free(sq[i].a);
+            free(sq); free(res);
+            throw_new(cls_TypeError, "Cannot create a consistent method resolution order (MRO) for bases");
+        }
+        if (nres >= rcap) { rcap *= 2; res = (Class **)xrealloc(res, sizeof(Class *) * (size_t)rcap); }
+        res[nres++] = cand;
+        for (i = 0; i <= nb; i++)
+            if (sq[i].pos < sq[i].n && sq[i].a[sq[i].pos] == cand) sq[i].pos++;
+    }
+    for (i = 0; i <= nb; i++) free(sq[i].a);
+    free(sq);
+    c->mro = res;
+    c->nmro = nres;
 }
 static Value get_attr(Value o, Str *nm)
 {
@@ -4153,24 +4578,54 @@ static Value get_attr(Value o, Str *nm)
             return *p;
         }
         if (nm == S_name) return mkobj(c->name, T_STR);
+        if (nm == S_dict) {
+            Dict *d = dict_new();
+            int k;
+            Value dv = mkobj(d, T_DICT);
+            VPUSH(dv);
+            for (k = 0; k < c->ns.n; k++) dict_set(d, mkobj(c->ns.k[k], T_STR), c->ns.v[k]);
+            vsp--;
+            return dv;
+        }
+        if (nm == intern_c("__qualname__")) return mkobj(c->name, T_STR);
+        if (nm == S_module) return c->modname ? mkobj(c->modname, T_STR) : mkcstr("builtins");
         if (nm == S_mro) return class_mro_tuple(c);
         if (nm == S_doc) return NONE_V;
         if (nm == S_class) return mkobj(cls_type, T_CLASS);
         if (nm == intern_c("__bases__")) {
             Value bv[1];
+            int k;
+            List *bt;
+            if (c->nbases > 0) {
+                bt = tuple_new(c->nbases);
+                for (k = 0; k < c->nbases; k++) bt->a[k] = mkobj(c->bases[k], T_CLASS);
+                return mkobj(bt, T_TUPLE);
+            }
             if (!c->base) return mktuple_from(bv, 0);
             bv[0] = mkobj(c->base, T_CLASS);
             return mktuple_from(bv, 1);
         }
         break; }
-    case T_MODULE:
-        p = amap_get(&((Module *)o.u.o)->ns, nm);
-        if (p) return *p;
-        if (nm == S_name) return mkobj(((Module *)o.u.o)->name, T_STR);
-        break;
+    case T_MODULE: {
+        Module *md = (Module *)o.u.o;
+        if (md->gp) {
+            long gi = module_slot(md, nm, 0);
+            if (gi >= 0 && G[gi].t != T_UNSET) return G[gi];
+        } else {
+            p = amap_get(&md->ns, nm);
+            if (p) return *p;
+        }
+        if (nm == S_name) return mkobj(md->name, T_STR);
+        break; }
+    case T_SLICE: {
+        List *sl = AS_LIST(o);
+        if (nm == intern_c("start")) return sl->a[0];
+        if (nm == intern_c("stop")) return sl->a[1];
+        if (nm == intern_c("step")) return sl->a[2];
+        break; }
     case T_SUPER: {
         Super *s = (Super *)o.u.o;
-        p = class_find(s->start, nm);
+        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start, nm);
         if (p) {
             if (s->obj.t == T_CLASS) {
                 if (p->t == T_CMETH) return new_bound(s->obj, ((Prop *)p->u.o)->get);
@@ -4184,8 +4639,24 @@ static Value get_attr(Value o, Str *nm)
         if (nm == S_hash) return new_bound(s->obj, obj_hash_v);
         break; }
     case T_FUNC:
-        if (nm == S_name) return mkobj(AS_FUNC(o)->name, T_STR);
+        p = amap_get(&AS_FUNC(o)->attrs, nm);
+        if (p) return *p;
+        if (nm == S_dict) {
+            Dict *d = dict_new();
+            int k;
+            Value dv = mkobj(d, T_DICT);
+            VPUSH(dv);
+            for (k = 0; k < AS_FUNC(o)->attrs.n; k++)
+                dict_set(d, mkobj(AS_FUNC(o)->attrs.k[k], T_STR), AS_FUNC(o)->attrs.v[k]);
+            vsp--;
+            return dv;
+        }
+        if (nm == S_name || nm == intern_c("__qualname__")) return mkobj(AS_FUNC(o)->name, T_STR);
         if (nm == S_doc) return NONE_V;
+        if (nm == S_module) {
+            Str *mn = modname_of_gp(AS_FUNC(o)->def->fd->gpfx);
+            return mn ? mkobj(mn, T_STR) : mkcstr("builtins");
+        }
         break;
     case T_BUILTIN:
         if (nm == S_name) return mkobj(((Builtin *)o.u.o)->sname, T_STR);
@@ -4198,6 +4669,11 @@ static Value get_attr(Value o, Str *nm)
         if (nm == S_setter) {
             return new_bound(o, propsetter_fn);
         }
+        if (nm == intern_c("deleter")) return new_bound(o, propdeleter_fn);
+        if (nm == intern_c("getter")) return new_bound(o, propgetter_fn);
+        if (nm == intern_c("fget")) return ((Prop *)o.u.o)->get.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->get;
+        if (nm == intern_c("fset")) return ((Prop *)o.u.o)->set.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->set;
+        if (nm == intern_c("fdel")) return ((Prop *)o.u.o)->del.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->del;
         break; }
     case T_ND: {
         Value r;
@@ -4206,6 +4682,13 @@ static Value get_attr(Value o, Str *nm)
     default: break;
     }
     if (nm == S_class) return mkobj(class_of(o), T_CLASS);
+    if (o.t == T_INT || o.t == T_BOOL || o.t == T_BIG || o.t == T_FLOAT) {
+        const char *a = nm->s;
+        if (!strcmp(a, "real") || (o.t != T_FLOAT && !strcmp(a, "numerator")))
+            return o.t == T_BOOL ? mkint(o.u.i) : o;
+        if (!strcmp(a, "imag")) return o.t == T_FLOAT ? mkfloat(0.0) : mkint(0);
+        if (o.t != T_FLOAT && !strcmp(a, "denominator")) return mkint(1);
+    }
     {
         Class *c = class_of(o);
         p = class_find(c, nm);
@@ -4213,6 +4696,12 @@ static Value get_attr(Value o, Str *nm)
         if (nm == S_name && o.t != T_INST) {
             /* fallthrough to error */
         }
+    }
+    if (o.t == T_INST && ((nm == intern_c("value") && class_isa(AS_INST(o)->cls, cls_StopIteration)) ||
+                          (nm == intern_c("code") && class_isa(AS_INST(o)->cls, cls_SystemExit)))) {
+        Value *av = amap_get(&AS_INST(o)->a, S_args);
+        if (av && av->t == T_TUPLE && AS_LIST(*av)->n > 0) return AS_LIST(*av)->a[0];
+        return NONE_V;
     }
     attr_error(o, nm);
     return NONE_V;
@@ -4239,7 +4728,7 @@ static int lookup_method(Value *o, Str *nm, Value *out, Node *cache)
         break; }
     case T_SUPER: {
         Super *s = (Super *)o->u.o;
-        p = class_find(s->start, nm);
+        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start, nm);
         if (p && (p->t == T_FUNC || p->t == T_BUILTIN) && s->obj.t != T_CLASS) {
             *out = *p;
             *o = s->obj;
@@ -4270,6 +4759,16 @@ static void set_attr(Value o, Str *nm, Value v)
     switch (o.t) {
     case T_INST: {
         Inst *in = AS_INST(o);
+        if (in->cls->flags & CF_SETATTR) {
+            Value *sa = class_find(in->cls, S_setattr);
+            if (sa && sa->t == T_FUNC) {
+                Value *base = vsp;
+                VPUSH(*sa); VPUSH(o); VPUSH(mkobj(nm, T_STR)); VPUSH(v);
+                call_value(*sa, 3, base + 1, 0, NULL);
+                vsp = base;
+                return;
+            }
+        }
         if (in->cls->flags & CF_PROPS) {
             Value *p = class_find(in->cls, nm);
             if (p && p->t == T_PROP) {
@@ -4286,16 +4785,31 @@ static void set_attr(Value o, Str *nm, Value v)
         if (v.t == T_PROP) AS_CLASS(o)->flags |= CF_PROPS;
         class_epoch++;
         return;
-    case T_MODULE:
-        amap_set(&((Module *)o.u.o)->ns, nm, v);
+    case T_FUNC:
+        amap_set(&AS_FUNC(o)->attrs, nm, v);
         return;
+    case T_MODULE: {
+        Module *md = (Module *)o.u.o;
+        if (md->gp) G[module_slot(md, nm, 1)] = v;
+        else amap_set(&md->ns, nm, v);
+        return; }
     default: break;
     }
     throw_new(cls_AttributeError, "'%.60s' object has no attribute '%.60s' and no __dict__ for setting new attributes", type_name(o), nm->s);
 }
 static void del_attr(Value o, Str *nm)
 {
+    if (o.t == T_INST && (AS_INST(o)->cls->flags & CF_PROPS)) {
+        Value *p = class_find(AS_INST(o)->cls, nm);
+        if (p && p->t == T_PROP) {
+            Prop *pr = (Prop *)p->u.o;
+            if (pr->del.t == T_UNSET) throw_new(cls_AttributeError, "can't delete attribute '%.60s'", nm->s);
+            call1(pr->del, o);
+            return;
+        }
+    }
     if (o.t == T_INST && amap_del(&AS_INST(o)->a, nm)) return;
+    if (o.t == T_FUNC && amap_del(&AS_FUNC(o)->attrs, nm)) return;
     if (o.t == T_CLASS && amap_del(&AS_CLASS(o)->ns, nm)) { class_epoch++; return; }
     attr_error(o, nm);
 }
@@ -4357,6 +4871,13 @@ static Value slice_get(Value o, Value lo, Value hi, Value st)
         buf_init(&b);
         for (i = 0; i < cnt; i++) buf_addc(&b, s->s[start + i * step]);
         return buf_value(&b); }
+    case T_BYTES: {
+        Str *s = AS_STR(o);
+        Buf b;
+        slice_adjust(lo, hi, st, s->len, &start, &stop, &step, &cnt);
+        buf_init(&b);
+        for (i = 0; i < cnt; i++) buf_addc(&b, s->s[start + i * step]);
+        { Value r = mkbytes(b.s, b.n); buf_free(&b); return r; } }
     case T_ND: return nd_subscr(o, mkslice(lo, hi, st));
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
@@ -4367,11 +4888,9 @@ static Value slice_get(Value o, Value lo, Value hi, Value st)
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_getitem);
         if (m) {
-            Value args[3];
             Value *base = vsp;
             Value sl, r;
-            args[0] = lo; args[1] = hi; args[2] = st;
-            sl = mktuple_from(args, 3);
+            sl = mkslice(lo, hi, st);
             VPUSH(*m); VPUSH(o); VPUSH(sl);
             r = call_value(*m, 2, base + 1, 0, NULL);
             vsp = base;
@@ -4389,8 +4908,13 @@ static long norm_index(long i, long n, const char *what)
     if (i < 0 || i >= n) throw_new(cls_IndexError, "%s index out of range", what);
     return i;
 }
+static void slice_del(Value o, Value lo, Value hi, Value st);
 static Value subscr(Value o, Value idx)
 {
+    if (idx.t == T_SLICE && o.t != T_INST && o.t != T_ND && o.t != T_DICT) {
+        List *sl = AS_LIST(idx);
+        return slice_get(o, sl->a[0], sl->a[1], sl->a[2]);
+    }
     switch (o.t) {
     case T_LIST: case T_TUPLE:
         if (idx.t == T_INT || idx.t == T_BOOL) {
@@ -4418,6 +4942,14 @@ static Value subscr(Value o, Value idx)
         if (dict_get(AS_DICT(o), idx, &r)) return r;
         throw_key(idx);
         break; }
+    case T_BYTES:
+        if (idx.t == T_INT || idx.t == T_BOOL) {
+            Str *s = AS_STR(o);
+            long i = norm_index(idx.u.i, s->len, "index");
+            return mkint((unsigned char)s->s[i]);
+        }
+        throw_new(cls_TypeError, "byte indices must be integers or slices, not %.40s", type_name(idx));
+        break;
     case T_ND: return nd_subscr(o, idx);
     case T_RANGE:
         if (idx.t == T_INT || idx.t == T_BOOL) {
@@ -4469,10 +5001,25 @@ static void slice_set(Value o, Value lo, Value hi, Value st, Value v)
         return;
     }
     if (o.t == T_ND) { nd_setitem(o, mkslice(lo, hi, st), v); return; }
+    if (o.t == T_INST) {
+        Value *m = class_find(AS_INST(o)->cls, S_setitem);
+        if (m) {
+            Value *base = vsp;
+            VPUSH(*m); VPUSH(o); VPUSH(mkslice(lo, hi, st)); VPUSH(v);
+            call_value(*m, 3, base + 1, 0, NULL);
+            vsp = base;
+            return;
+        }
+    }
     throw_new(cls_TypeError, "'%.60s' object does not support slice assignment", type_name(o));
 }
 static void setitem(Value o, Value idx, Value v)
 {
+    if (idx.t == T_SLICE && o.t != T_INST && o.t != T_ND && o.t != T_DICT) {
+        List *sl = AS_LIST(idx);
+        slice_set(o, sl->a[0], sl->a[1], sl->a[2], v);
+        return;
+    }
     switch (o.t) {
     case T_LIST:
         if (idx.t == T_INT || idx.t == T_BOOL) {
@@ -4503,6 +5050,11 @@ static void setitem(Value o, Value idx, Value v)
 }
 static void delitem(Value o, Value idx)
 {
+    if (idx.t == T_SLICE && o.t != T_INST && o.t != T_DICT) {
+        List *sl = AS_LIST(idx);
+        slice_del(o, sl->a[0], sl->a[1], sl->a[2]);
+        return;
+    }
     switch (o.t) {
     case T_LIST:
         if (idx.t == T_INT || idx.t == T_BOOL) {
@@ -4538,6 +5090,10 @@ static void slice_del(Value o, Value lo, Value hi, Value st)
         for (i = cnt - 1; i >= 0; i--) list_splice(l, start + i * step, start + i * step + 1, NULL, 0);
         return;
     }
+    if (o.t == T_INST) {
+        Value *m = class_find(AS_INST(o)->cls, S_delitem);
+        if (m) { call2(*m, o, mkslice(lo, hi, st)); return; }
+    }
     throw_new(cls_TypeError, "'%.60s' object doesn't support slice deletion", type_name(o));
 }
 
@@ -4558,12 +5114,18 @@ static Value get_iter(Value o)
     case T_LIST: it = iter_new(IK_LIST); it->a = o; return mkobj(it, T_ITER);
     case T_TUPLE: it = iter_new(IK_TUPLE); it->a = o; return mkobj(it, T_ITER);
     case T_STR: it = iter_new(IK_STR); it->a = o; return mkobj(it, T_ITER);
+    case T_BYTES: it = iter_new(IK_BYTES); it->a = o; return mkobj(it, T_ITER);
     case T_DICT: it = iter_new(IK_DICT); it->a = o; return mkobj(it, T_ITER);
     case T_SET: it = iter_new(IK_SET); it->a = o; return mkobj(it, T_ITER);
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
         it = iter_new(IK_RANGE);
         it->i = r->start; it->n = r->stop; it->step = r->step;
+        return mkobj(it, T_ITER); }
+    case T_DVIEW: {
+        DView *dv = (DView *)o.u.o;
+        it = iter_new(dv->what == 0 ? IK_DICT : (dv->what == 1 ? IK_DVALS : IK_DITEMS));
+        it->a = dv->d;
         return mkobj(it, T_ITER); }
     case T_ITER: case T_GEN: return o;
     case T_FILE: it = iter_new(IK_FILE); it->a = o; return mkobj(it, T_ITER);
@@ -4617,6 +5179,16 @@ static int iter_next(Value it, Value *out)
         if (t->i >= s->len) return 0;
         *out = mkstr(s->s + t->i, 1);
         t->i++;
+        return 1; }
+    case IK_BYTES: {
+        Str *s = AS_STR(t->a);
+        if (t->i >= s->len) return 0;
+        *out = mkint((unsigned char)s->s[t->i++]);
+        return 1; }
+    case IK_CALLSENT: {
+        Value r = call0(t->a);
+        if (py_eq(r, t->b)) return 0;
+        *out = r;
         return 1; }
     case IK_RANGE:
         if (t->step > 0 ? t->i >= t->n : t->i <= t->n) return 0;
@@ -4762,6 +5334,16 @@ static int contains(Value c, Value x)
         for (i = 0; i + u->len <= s->len; i++)
             if (s->s[i] == u->s[0] && memcmp(s->s + i, u->s, (size_t)u->len) == 0) return 1;
         return 0; }
+    case T_BYTES: {
+        Str *s = AS_STR(c), *u;
+        long i;
+        if (x.t == T_INT) return memchr(s->s, (int)x.u.i, (size_t)s->len) != NULL;
+        if (x.t != T_BYTES) throw_new(cls_TypeError, "a bytes-like object is required, not '%.40s'", type_name(x));
+        u = AS_STR(x);
+        if (u->len == 0) return 1;
+        for (i = 0; i + u->len <= s->len; i++)
+            if (s->s[i] == u->s[0] && memcmp(s->s + i, u->s, (size_t)u->len) == 0) return 1;
+        return 0; }
     case T_RANGE: {
         Range *r = (Range *)c.u.o;
         if (x.t == T_INT || x.t == T_BOOL) {
@@ -4770,6 +5352,15 @@ static int contains(Value c, Value x)
             return v <= r->start && v > r->stop && (r->start - v) % (-r->step) == 0;
         }
         return 0; }
+    case T_DVIEW: {
+        DView *dv = (DView *)c.u.o;
+        Value o;
+        if (dv->what == 0) return dict_get(AS_DICT(dv->d), x, &o);
+        if (dv->what == 2) {
+            if (x.t != T_TUPLE || AS_LIST(x)->n != 2) return 0;
+            return dict_get(AS_DICT(dv->d), AS_LIST(x)->a[0], &o) && py_eq(o, AS_LIST(x)->a[1]);
+        }
+        break; }
     case T_INST: {
         Value *m = class_find(AS_INST(c)->cls, S_contains);
         if (m) return py_truthy(call2(*m, c, x));
@@ -4778,7 +5369,7 @@ static int contains(Value c, Value x)
     }
     {
         Value it, y;
-        if (c.t != T_INST && c.t != T_GEN && c.t != T_ITER && c.t != T_ND)
+        if (c.t != T_DVIEW && c.t != T_INST && c.t != T_GEN && c.t != T_ITER && c.t != T_ND)
             throw_new(cls_TypeError, "argument of type '%.60s' is not iterable", type_name(c));
         it = get_iter(c);
         VPUSH(it);
@@ -4803,21 +5394,46 @@ static const char *op_str(int op)
 }
 static Str *dunder(int op, int rev)
 {
-    switch (op) {
-    case B_ADD: return rev ? S_radd : S_add;
-    case B_SUB: return rev ? S_rsub : S_sub;
-    case B_MUL: return rev ? S_rmul : S_mul;
-    case B_DIV: return rev ? NULL : S_truediv;
-    case B_FDIV: return rev ? NULL : S_floordiv;
-    case B_MOD: return rev ? NULL : S_mod;
-    case B_POW: return rev ? NULL : S_pow;
-    case B_AND: return rev ? NULL : S_and;
-    case B_OR: return rev ? NULL : S_or;
-    case B_XOR: return rev ? NULL : S_xor;
-    case B_LSH: return rev ? NULL : S_lshift;
-    default: return rev ? NULL : S_rshift;
+    static Str *tab[2][16];
+    static const char *nm[] = { "", "add", "sub", "mul", "truediv", "floordiv", "mod", "pow",
+        "and", "or", "xor", "lshift", "rshift", "matmul" };
+    if (op < 1 || op > 13) return NULL;
+    if (!tab[rev][op]) {
+        char b[40];
+        sprintf(b, "__%s%s__", rev ? "r" : "", nm[op]);
+        tab[rev][op] = intern_c(b);
     }
+    return tab[rev][op];
 }
+/* in-place dunder name (__iadd__ ...) */
+static Str *idunder(int op)
+{
+    static Str *tab[16];
+    static const char *nm[] = { "", "add", "sub", "mul", "truediv", "floordiv", "mod", "pow",
+        "and", "or", "xor", "lshift", "rshift", "matmul" };
+    if (op < 1 || op > 13) return NULL;
+    if (!tab[op]) {
+        char b[40];
+        sprintf(b, "__i%s__", nm[op]);
+        tab[op] = intern_c(b);
+    }
+    return tab[op];
+}
+static Value to_set_any(Value v)
+{
+    Dict *d = dict_new_t(T_SET);
+    Value dv = mkobj(d, T_SET), it, y;
+    Value *base = vsp;
+    VPUSH(dv);
+    VPUSH(v);
+    it = get_iter(v);
+    VPUSH(it);
+    while (iter_next(it, &y)) set_add(d, y);
+    vsp = base;
+    return dv;
+}
+static void dict_update_from(Dict *d, Value src);
+#define dict_update_from_hook dict_update_from
 static Value int_pow_v(Value a, Value b)
 {
     if (int_sign(b) < 0) {
@@ -4945,6 +5561,28 @@ static Value binop(int op, Value a, Value b)
         r->s[r->len] = 0;
         return mkobj(r, T_STR);
     }
+    if (a.t == T_BYTES && b.t == T_BYTES && op == B_ADD) {
+        Str *x = AS_STR(a), *y = AS_STR(b);
+        Buf bf;
+        Value r;
+        buf_init(&bf);
+        buf_addn(&bf, x->s, x->len);
+        buf_addn(&bf, y->s, y->len);
+        r = mkbytes(bf.s, bf.n);
+        buf_free(&bf);
+        return r;
+    }
+    if (op == B_MUL && ((a.t == T_BYTES && b.t == T_INT) || (b.t == T_BYTES && a.t == T_INT))) {
+        Str *x = AS_STR(a.t == T_BYTES ? a : b);
+        long n = a.t == T_BYTES ? b.u.i : a.u.i, i;
+        Buf bf;
+        Value r;
+        buf_init(&bf);
+        for (i = 0; i < n; i++) buf_addn(&bf, x->s, x->len);
+        r = mkbytes(bf.s, bf.n);
+        buf_free(&bf);
+        return r;
+    }
     if (op == B_ADD && a.t == b.t && (a.t == T_LIST || a.t == T_TUPLE)) {
         List *x = AS_LIST(a), *y = AS_LIST(b), *r;
         long i;
@@ -4963,17 +5601,47 @@ static Value binop(int op, Value a, Value b)
             throw_new(cls_TypeError, "can't multiply sequence by non-int of type '%.40s'", type_name(b));
     }
     if (op == B_MOD && a.t == T_STR) return py_format_percent(a, b);
+    if (op == B_OR && a.t == T_DICT && b.t == T_DICT) {
+        Dict *nd = dict_new();
+        Value nv = mkobj(nd, T_DICT);
+        VPUSH(nv);
+        dict_update_from_hook(nd, a);
+        dict_update_from_hook(nd, b);
+        vsp--;
+        return nv;
+    }
     if (a.t == T_SET && b.t == T_SET && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR))
         return set_op(op, a, b);
+    if ((a.t == T_DVIEW || b.t == T_DVIEW) && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR)) {
+        Value x = a, y = b, r;
+        Value *base = vsp;
+        if (a.t == T_DVIEW) x = ((DView *)a.u.o)->what == 1 ? a : dview_set(a);
+        VPUSH(x);
+        if (b.t == T_DVIEW) y = ((DView *)b.u.o)->what == 1 ? b : dview_set(b);
+        VPUSH(y);
+        if (x.t != T_SET) x = to_set_any(x);
+        VPUSH(x);
+        if (y.t != T_SET) y = to_set_any(y);
+        VPUSH(y);
+        r = set_op(op, x, y);
+        vsp = base;
+        return r;
+    }
     if (a.t == T_INST) {
         Str *dn = dunder(op, 0);
         Value *m = dn ? class_find(AS_INST(a)->cls, dn) : NULL;
-        if (m) return call2(*m, a, b);
+        if (m) {
+            Value r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) return r;
+        }
     }
     if (b.t == T_INST) {
         Str *dn = dunder(op, 1);
         Value *m = dn ? class_find(AS_INST(b)->cls, dn) : NULL;
-        if (m) return call2(*m, b, a);
+        if (m) {
+            Value r = call2(*m, b, a);
+            if (!IS_NOTIMPL(r)) return r;
+        }
     }
     if (op == B_ADD && a.t == T_STR)
         throw_new(cls_TypeError, "can only concatenate str (not \"%.40s\") to str", type_name(b));
@@ -4984,6 +5652,18 @@ static Value binop(int op, Value a, Value b)
     throw_new(cls_TypeError, "unsupported operand type(s) for %s: '%.40s' and '%.40s'",
               op_str(op), type_name(a), type_name(b));
     return NONE_V;
+}
+static Value inplace_binop(int op, Value a, Value b)
+{
+    if (a.t == T_INST) {
+        Str *dn = idunder(op);
+        Value *m = dn ? class_find(AS_INST(a)->cls, dn) : NULL;
+        if (m) {
+            Value r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) return r;
+        }
+    }
+    return binop(op, a, b);
 }
 static Value unop(int op, Value a)
 {
@@ -5024,7 +5704,11 @@ static Value unop(int op, Value a)
 enum { ST_NORMAL = 0, ST_BREAK, ST_CONTINUE, ST_RETURN, ST_YIELD };
 
 static int repl_echo;
-static Value find_module(Str *nm);
+static void exec_import(Frame *f, Node *n);
+static void exec_from(Frame *f, Node *n);
+static Node *compile_src(const char *src, long len, Str *gp);
+static void run_block_in(Node *blk, Str *gp);
+static Str *main_gp;
 static Value format_value(Value v, const char *spec, long speclen);
 
 static Value eval(Frame *f, Node *n);
@@ -5103,7 +5787,10 @@ static Value load_var_slow(Frame *f, Var *v)
     case VK_LOCAL: x = f->loc[v->slot]; break;
     case VK_CELL: x = ((Cell *)f->loc[v->slot].u.o)->v; break;
     case VK_FREE: x = f->cells[v->slot]->v; break;
-    case VK_GLOBAL: x = G[v->slot]; break;
+    case VK_GLOBAL:
+        x = G[v->slot];
+        if (x.t == T_UNSET && v->bslot >= 0) x = G[v->bslot];
+        break;
     case VK_NS: {
         Value *p = f->ns ? amap_get(&f->ns->ns, v->name) : NULL;
         if (p) return *p;
@@ -5142,6 +5829,7 @@ static Func *make_function(Frame *f, Node *def)
     fn->ndefs = 0;
     fn->kwdefs = NULL;
     fn->defclass = NULL;
+    fn->attrs.k = NULL; fn->attrs.v = NULL; fn->attrs.n = fn->attrs.cap = 0;
     if (fd->nfree > 0) {
         fn->cells = (Cell **)xmalloc(sizeof(Cell *) * (size_t)fd->nfree);
         for (i = 0; i < fd->nfree; i++) {
@@ -5278,6 +5966,9 @@ static Value make_gen(Func *fn, FuncDef *fd, Value *loc)
     g->state = (Value *)xmalloc(sizeof(Value) * (size_t)(fd->nstate + 1));
     for (i = 0; i < fd->nstate; i++) g->state[i] = mkint(0);
     g->yielded = NONE_V;
+    g->sent = NONE_V;
+    g->thrown = NONE_V;
+    g->ret = NONE_V;
     g->started = g->done = g->running = 0;
     return mkobj(g, T_GEN);
 }
@@ -5316,6 +6007,7 @@ static Value call_func(Func *fn, int n, Value *a, int nk, Value *kw)
     fr.gen = NULL;
     fr.ns = NULL;
     fr.resuming = 0;
+    fr.gp = fd->gpfx;
     fr.up = cur_frame;
     cur_frame = &fr;
     call_depth++;
@@ -5345,6 +6037,7 @@ static int gen_resume(Gen *g, Value *out)
     fr.gen = g;
     fr.ns = NULL;
     fr.resuming = g->started;
+    fr.gp = g->def->fd->gpfx;
     fr.up = cur_frame;
     g->started = 1;
     g->running = 1;
@@ -5376,13 +6069,41 @@ static int gen_resume(Gen *g, Value *out)
         return 1;
     }
     g->done = 1;
+    g->ret = st == ST_RETURN ? fr.ret : NONE_V;
     return 0;
 }
 
+static Value pay_ctor(Class *pc, int n, Value *a, int nk, Value *kw)
+{
+    Args x;
+    x.n = n; x.a = a; x.nk = nk; x.kw = kw;
+    return pc->ctor(&x);
+}
+/* run __init__ of instance iv (class c) */
+static void run_init(Value iv, Class *c, int n, Value *a, int nk, Value *kw)
+{
+    Value *init = class_find(c, S_init);
+    Value *base = vsp;
+    int i;
+    if (init) {
+        if (init->t == T_BUILTIN && (n > 0 || nk > 0) && init->u.o == object_init_v.u.o
+            && !(c->flags & CF_EXC) && !c->paycls) {
+            Value *nw = class_find(c, S_new);
+            if (!nw || nw->t != T_FUNC)
+                throw_new(cls_TypeError, "%.80s() takes no arguments", c->name->s);
+        }
+        vcheck(n + 8);
+        VPUSH(*init);
+        VPUSH(iv);
+        for (i = 0; i < n; i++) VPUSH(a[i]);
+        call_value(*init, n + 1, base + 1, nk, kw);
+        vsp = base;
+    }
+}
 static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
 {
     Inst *in;
-    Value iv, *init;
+    Value iv, *nw;
     Value *base = vsp;
     int i;
     if (c->ctor) {
@@ -5390,18 +6111,33 @@ static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
         x.n = n; x.a = a; x.nk = nk; x.kw = kw;
         return c->ctor(&x);
     }
+    nw = class_find(c, S_new);
+    if (nw && nw->t == T_FUNC) {
+        Value r;
+        vcheck(n + 8);
+        VPUSH(*nw);
+        VPUSH(mkobj(c, T_CLASS));
+        for (i = 0; i < n; i++) VPUSH(a[i]);
+        r = call_value(*nw, n + 1, base + 1, nk, kw);
+        vsp = base;
+        if (r.t == T_INST && class_isa(AS_INST(r)->cls, c)) {
+            VPUSH(r);
+            run_init(r, c, n, a, nk, kw);
+            vsp = base;
+        }
+        return r;
+    }
     in = new_inst(c);
     iv = mkobj(in, T_INST);
     VPUSH(iv);
-    init = class_find(c, S_init);
-    if (init) {
-        VPUSH(*init);
-        VPUSH(iv);
-        for (i = 0; i < n; i++) VPUSH(a[i]);
-        call_value(*init, n + 1, base + 2, nk, kw);
-    } else if (n > 0 || nk > 0) {
-        throw_new(cls_TypeError, "%.80s() takes no arguments", c->name->s);
+    if (c->paycls) {
+        if (c->paycls == cls_tuple || c->paycls == cls_str)
+            in->pay = pay_ctor(c->paycls, n, a, nk, kw);
+        else
+            in->pay = pay_ctor(c->paycls, 0, NULL, 0, NULL);
     }
+    if (c->flags & CF_EXC) amap_set(&in->a, S_args, mktuple_from(a, n));
+    run_init(iv, c, n, a, nk, kw);
     vsp = base;
     return iv;
 }
@@ -5412,6 +6148,9 @@ static Value call_value(Value fn, int n, Value *a, int nk, Value *kw)
     case T_FUNC: return call_func(AS_FUNC(fn), n, a, nk, kw);
     case T_BUILTIN: {
         Args x;
+        if (((Builtin *)fn.u.o)->selfpay && n > 0 && a[0].t == T_INST &&
+            AS_INST(a[0])->pay.t != T_UNSET)
+            a[0] = AS_INST(a[0])->pay;
         x.n = n; x.a = a; x.nk = nk; x.kw = kw;
         return ((Builtin *)fn.u.o)->fn(&x); }
     case T_CLASS: return call_class(AS_CLASS(fn), n, a, nk, kw);
@@ -5540,8 +6279,9 @@ static Value eval_call(Frame *f, Node *n)
     int i, mode = 0, np, nk = 0;
     Value *kwbase;
     Value r;
-    if (cn->kind == N_NAME && cn->var->kind == VK_GLOBAL && cn->name == intern_c("super") &&
-        n->n == 0 && G[cn->var->slot].t == T_BUILTIN) {
+    if (cn->kind == N_NAME && cn->var->kind == VK_GLOBAL && cn->name == S_super &&
+        n->n == 0 && G[cn->var->bslot >= 0 ? cn->var->bslot : cn->var->slot].t == T_BUILTIN &&
+        (cn->var->bslot < 0 || G[cn->var->slot].t == T_UNSET)) {
         Super *s;
         Value self;
         if (!f->fn || !f->fn->defclass || !f->loc || f->fn->def->fd->npos < 1)
@@ -5549,7 +6289,7 @@ static Value eval_call(Frame *f, Node *n)
         self = f->loc[0];
         if (self.t == T_CELL) self = ((Cell *)self.u.o)->v;
         s = (Super *)gc_alloc(sizeof(Super), T_SUPER);
-        s->start = f->fn->defclass->base ? f->fn->defclass->base : cls_object;
+        s->start = f->fn->defclass;
         s->obj = self;
         return mkobj(s, T_SUPER);
     }
@@ -5762,6 +6502,10 @@ static Value eval(Frame *f, Node *n)
         } else if (v->kind == VK_GLOBAL) {
             Value x = G[v->slot];
             if (x.t != T_UNSET) return x;
+            if (v->bslot >= 0) {
+                x = G[v->bslot];
+                if (x.t != T_UNSET) return x;
+            }
         }
         return load_var_slow(f, v); }
     case N_ATTR: {
@@ -5810,6 +6554,13 @@ static Value eval(Frame *f, Node *n)
         Value l = eval(f, n->a);
         if (py_truthy(l)) return l;
         return eval(f, n->b); }
+    case N_WALRUS: {
+        Value wv = eval(f, n->b);
+        VPUSH(wv);
+        store_var(f, n->a->var, wv);
+        vsp--;
+        return wv;
+    }
     case N_IFEXP:
         return py_truthy(eval(f, n->a)) ? eval(f, n->b) : eval(f, n->c);
     case N_CMP: {
@@ -6151,26 +6902,67 @@ static int exec_with(Frame *f, Node *n)
     return st;
 }
 
+/* create a class object; `bl` (malloc'ed, nb >= 1 entries) is owned by the class */
+static Class *make_class(Str *name, Class **bl, int nb, Str *modname)
+{
+    Class *c;
+    int i, fl = 0;
+    for (i = 0; i < nb; i++) fl |= bl[i]->flags & (CF_EXC | CF_PROPS | CF_SETATTR);
+    c = (Class *)gc_alloc(sizeof(Class), T_CLASS);
+    c->name = name;
+    c->base = bl[0];
+    c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
+    c->ctor = NULL;
+    c->flags = fl;
+    c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL;
+    c->modname = modname;
+    c->bases = bl;
+    c->nbases = nb;
+    VPUSH(mkobj(c, T_CLASS));
+    c3_build(c, bl, nb);
+    vsp--;
+    for (i = 0; i < c->nmro && !c->paycls; i++) {
+        Class *k = c->mro[i];
+        if (k == cls_list || k == cls_dict || k == cls_set || k == cls_tuple || k == cls_str)
+            c->paycls = k;
+    }
+    return c;
+}
+/* after the namespace is filled: bind methods to the class, set flags */
+static void finish_class(Class *c)
+{
+    int i;
+    for (i = 0; i < c->ns.n; i++) {
+        Value v = c->ns.v[i];
+        if (v.t == T_FUNC) AS_FUNC(v)->defclass = c;
+        else if (v.t == T_SMETH || v.t == T_CMETH || v.t == T_PROP) {
+            Prop *p = (Prop *)v.u.o;
+            if (p->get.t == T_FUNC) AS_FUNC(p->get)->defclass = c;
+            if (p->set.t == T_FUNC) AS_FUNC(p->set)->defclass = c;
+            if (v.t == T_PROP) c->flags |= CF_PROPS;
+        }
+    }
+    if (amap_get(&c->ns, S_setattr)) c->flags |= CF_SETATTR;
+    class_epoch++;
+}
 static void exec_class(Frame *f, Node *n)
 {
     FuncDef *fd = n->fd;
-    Class *c, *base = cls_object;
+    Class *c;
     Value cv, *basev = vsp;
-    int i, nbases = n->n - n->op;
+    int i, nbases = n->n - n->op, nb = 0;
     Frame cf;
     Cell **cells = NULL;
+    Class **bl;
+    bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(nbases + 1));
     for (i = 0; i < nbases; i++) {
         Value b = eval(f, n->list[i]);
         VPUSH(b);
-        if (b.t != T_CLASS) throw_new(cls_TypeError, "bases must be types");
-        if (i == 0) base = AS_CLASS(b);
+        if (b.t != T_CLASS) { free(bl); throw_new(cls_TypeError, "bases must be types"); }
+        bl[nb++] = AS_CLASS(b);
     }
-    c = (Class *)gc_alloc(sizeof(Class), T_CLASS);
-    c->name = n->name;
-    c->base = base;
-    c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
-    c->ctor = NULL;
-    c->flags = base->flags & (CF_EXC | CF_PROPS);
+    if (nb == 0) bl[nb++] = cls_object;
+    c = make_class(n->name, bl, nb, modname_of_gp(f->gp));
     cv = mkobj(c, T_CLASS);
     VPUSH(cv);
     if (fd->nfree > 0) {
@@ -6188,22 +6980,13 @@ static void exec_class(Frame *f, Node *n)
     cf.gen = NULL;
     cf.ns = c;
     cf.resuming = 0;
+    cf.gp = fd->gpfx;
     cf.up = cur_frame;
     cur_frame = &cf;
     exec_block(&cf, fd->body);
     cur_frame = cf.up;
     free(cells);
-    for (i = 0; i < c->ns.n; i++) {
-        Value v = c->ns.v[i];
-        if (v.t == T_FUNC) AS_FUNC(v)->defclass = c;
-        else if (v.t == T_SMETH || v.t == T_CMETH || v.t == T_PROP) {
-            Prop *p = (Prop *)v.u.o;
-            if (p->get.t == T_FUNC) AS_FUNC(p->get)->defclass = c;
-            if (p->set.t == T_FUNC) AS_FUNC(p->set)->defclass = c;
-            if (v.t == T_PROP) c->flags |= CF_PROPS;
-        }
-    }
-    class_epoch++;
+    finish_class(c);
     /* decorators (rare) */
     for (i = n->n - 1; i >= nbases; i--) {
         Value d = eval(f, n->list[i]);
@@ -6283,36 +7066,6 @@ static int exec_while(Frame *f, Node *n)
     return 0;
 }
 
-static void exec_import(Frame *f, Node *n)
-{
-    int i;
-    for (i = 0; i < n->n; i++) {
-        Node *it = n->list[i];
-        Value m = find_module(it->name);
-        if (m.t == T_UNSET) throw_new(cls_ImportError, "No module named '%.80s'", it->name->s);
-        store_var(f, it->b->var, m);
-    }
-}
-static void exec_from(Frame *f, Node *n)
-{
-    int i;
-    Value m = find_module(n->name);
-    if (m.t == T_UNSET) throw_new(cls_ImportError, "No module named '%.80s'", n->name->s);
-    if (n->op == 1) {
-        Module *md = (Module *)m.u.o;
-        for (i = 0; i < md->ns.n; i++)
-            if (md->ns.k[i]->s[0] != '_')
-                set_global(md->ns.k[i], md->ns.v[i]);
-        return;
-    }
-    for (i = 0; i < n->n; i++) {
-        Node *it = n->list[i];
-        Value *p = amap_get(&((Module *)m.u.o)->ns, it->name);
-        if (!p) throw_new(cls_ImportError, "cannot import name '%.80s' from '%.80s'", it->name->s, n->name->s);
-        store_var(f, it->b->var, *p);
-    }
-}
-
 static void exec_aug(Frame *f, Node *n)
 {
     Node *t = n->a;
@@ -6328,7 +7081,7 @@ static void exec_aug(Frame *f, Node *n)
             long i, m = s->n;
             for (i = 0; i < m; i++) list_push(l, s->a[i]);
             r = cur;
-        } else r = binop(n->op, cur, rhs);
+        } else r = inplace_binop(n->op, cur, rhs);
         if (cur.t == T_ND && r.t == T_ND && n->op != B_MATMUL) { nd_assign_all(cur, r); r = cur; }
         store_var(f, t->var, r);
         break; }
@@ -6339,7 +7092,7 @@ static void exec_aug(Frame *f, Node *n)
         VPUSH(cur);
         rhs = eval(f, n->b);
         VPUSH(rhs);
-        r = binop(n->op, cur, rhs);
+        r = inplace_binop(n->op, cur, rhs);
         VPUSH(r);
         set_attr(o, t->name, r);
         break; }
@@ -6352,7 +7105,7 @@ static void exec_aug(Frame *f, Node *n)
         VPUSH(cur);
         rhs = eval(f, n->b);
         VPUSH(rhs);
-        r = binop(n->op, cur, rhs);
+        r = inplace_binop(n->op, cur, rhs);
         VPUSH(r);
         setitem(o, idx, r);
         break; }
@@ -6524,7 +7277,21 @@ static int exec(Frame *f, Node *n)
     case S_WITH: return exec_with(f, n);
     case S_BLOCK: return exec_block(f, n);
     case S_YIELD:
-        if (f->resuming) { f->resuming = 0; return 0; }
+        if (f->resuming) {
+            Gen *g = f->gen;
+            f->resuming = 0;
+            if (g->thrown.t == T_INST) {
+                Value e = g->thrown;
+                g->thrown = NONE_V;
+                throw_val(e);
+            }
+            if (n->b) {
+                Value sv = g->sent;
+                g->sent = NONE_V;
+                assign_target(f, n->b, sv);
+            }
+            return 0;
+        }
         f->gen->yielded = n->a ? eval(f, n->a) : NONE_V;
         return ST_YIELD;
     case S_YIELDFROM: return exec_yieldfrom(f, n);
@@ -6568,20 +7335,8 @@ static void print_exception(Value exc)
 
 static void run_body(const char *src, long len)
 {
-    Node *blk;
-    Frame fr;
-    gc_perm = 1;
-    lex_source(src, len);
-    mod_scope = scope_new(SC_MOD, NULL);
-    cur_scope = mod_scope;
-    blk = parse_module();
-    resolve_scope(mod_scope);
-    gc_perm = 0;
-    fr.loc = NULL; fr.cells = NULL; fr.fn = NULL; fr.ret = NONE_V; fr.gen = NULL;
-    fr.ns = NULL; fr.resuming = 0; fr.up = NULL;
-    cur_frame = &fr;
-    exec_block(&fr, blk);
-    cur_frame = NULL;
+    Node *blk = compile_src(src, len, main_gp);
+    run_block_in(blk, main_gp);
 }
 
 /* returns 0 on success, 1 on an uncaught exception (already reported) */
@@ -7036,8 +7791,6 @@ static Value format_template(Str *t, int nargs, Value *args, int nk, Value *kw, 
 #define BI(name) static Value name(Args *x)
 #define A(i) (x->a[i])
 
-static Class *cls_FileNotFoundError;
-static Value object_init_v;
 
 static Value kwget(Args *x, const char *nm)
 {
@@ -7061,6 +7814,7 @@ static void need(Args *x, int lo, int hi, const char *fname)
 }
 static Str *astr(Value v, const char *what)
 {
+    if (v.t == T_INST && AS_INST(v)->pay.t == T_STR) v = AS_INST(v)->pay;
     if (v.t != T_STR)
         throw_new(cls_TypeError, "%s must be str, not %.40s", what, type_name(v));
     return AS_STR(v);
@@ -7071,11 +7825,14 @@ static Value mkbuiltin(const char *name, BFn fn)
     b->fn = fn;
     b->name = name;
     b->sname = intern_c(name);
+    b->selfpay = 0;
     return mkobj(b, T_BUILTIN);
 }
 static void def_bi(Class *c, const char *name, BFn fn)
 {
     Value b = mkbuiltin(name, fn);
+    if (c && (c == cls_str || c == cls_list || c == cls_tuple || c == cls_dict || c == cls_set))
+        ((Builtin *)b.u.o)->selfpay = 1;
     if (c) amap_set(&c->ns, intern_c(name), b);
     else set_global(intern_c(name), b);
 }
@@ -7086,6 +7843,8 @@ static Class *new_class(const char *name, Class *base, int flags)
     c->base = base;
     c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
     c->ctor = NULL;
+    c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL;
+    c->modname = NULL;
     c->flags = flags | (base ? (base->flags & CF_EXC) : 0);
     set_global(c->name, mkobj(c, T_CLASS));
     return c;
@@ -7096,6 +7855,28 @@ static long to_index(Value v)
 }
 
 /* ---- output ----------------------------------------------------------- */
+static int try_attr(Value o, Str *nm, Value *out);
+static Module *sys_mod;
+static Value print_target(Value filev)
+{
+    if (filev.t != T_UNSET && filev.t != T_NONE) return filev;
+    if (sys_mod) {
+        Value *p = amap_get(&sys_mod->ns, intern_c("stdout"));
+        if (p) return *p;
+    }
+    return UNSET_V;
+}
+static void print_write(Value target, const char *s, long n)
+{
+    Value m, str;
+    if (n == 0) return;
+    m = get_attr(target, intern_c("write"));
+    VPUSH(m);
+    str = mkstr(s, n);
+    VPUSH(str);
+    call1(m, str);
+    vsp -= 2;
+}
 BI(bi_print)
 {
     Value sepv = kwget(x, "sep"), endv = kwget(x, "end"), filev = kwget(x, "file");
@@ -7104,9 +7885,25 @@ BI(bi_print)
     const char *sep = " ", *end = "\n";
     long sepn = 1, endn = 1;
     int i;
+    Value target = print_target(filev);
     if (sepv.t == T_STR) { sep = AS_STR(sepv)->s; sepn = AS_STR(sepv)->len; }
     if (endv.t == T_STR) { end = AS_STR(endv)->s; endn = AS_STR(endv)->len; }
-    if (filev.t == T_FILE) fp = ((File *)filev.u.o)->fp;
+    if (target.t == T_FILE) fp = ((File *)target.u.o)->fp;
+    else if (target.t != T_UNSET) {
+        for (i = 0; i < x->n; i++) {
+            Value sv = py_str(A(i));
+            VPUSH(sv);
+            if (i) print_write(target, sep, sepn);
+            print_write(target, AS_STR(sv)->s, AS_STR(sv)->len);
+            vsp--;
+        }
+        print_write(target, end, endn);
+        if (flv.t != T_UNSET && py_truthy(flv)) {
+            Value fm;
+            if (try_attr(target, intern_c("flush"), &fm)) call0(fm);
+        }
+        return NONE_V;
+    }
     if (fp == stderr) fflush(stdout);
     for (i = 0; i < x->n; i++) {
         Buf b;
@@ -7331,6 +8128,7 @@ BI(bi_ord)
     Str *s;
     unsigned long c;
     need(x, 1, 1, "ord");
+    if (A(0).t == T_BYTES && AS_STR(A(0))->len == 1) return mkint((unsigned char)AS_STR(A(0))->s[0]);
     s = astr(A(0), "ord() argument");
     if (s->len == 1) return mkint((unsigned char)s->s[0]);
     c = (unsigned char)s->s[0];
@@ -7379,6 +8177,7 @@ BI(bi_tuple)
 }
 static void dict_update_from(Dict *d, Value src)
 {
+    src = unpay(src);
     if (src.t == T_DICT) {
         Dict *s = AS_DICT(src);
         long i;
@@ -7506,7 +8305,7 @@ BI(bi_reversed)
     Value v;
     need(x, 1, 1, "reversed");
     v = A(0);
-    if (v.t == T_DICT) v = iter_to_list(v);
+    if (v.t == T_DICT || v.t == T_DVIEW) v = iter_to_list(v);
     if (v.t == T_LIST || v.t == T_TUPLE || v.t == T_STR || v.t == T_RANGE) {
         it = iter_new(IK_REV);
         it->a = v;
@@ -7527,7 +8326,13 @@ BI(bi_reversed)
 }
 BI(bi_iter)
 {
-    need(x, 1, 1, "iter");
+    need(x, 1, 2, "iter");
+    if (x->n == 2) {
+        Iter *it = iter_new(IK_CALLSENT);
+        it->a = A(0);
+        it->b = A(1);
+        return mkobj(it, T_ITER);
+    }
     return get_iter(A(0));
 }
 BI(bi_next)
@@ -7736,9 +8541,40 @@ BI(bi_issubclass)
     throw_new(cls_TypeError, "issubclass() arg 2 must be a class or tuple of classes");
     return NONE_V;
 }
+static Str *cur_gp(void);
 BI(bi_type)
 {
-    need(x, 1, 1, "type");
+    need(x, 1, 3, "type");
+    if (x->n == 2) throw_new(cls_TypeError, "type() takes 1 or 3 arguments");
+    if (x->n == 3) {
+        Class **bl, *c;
+        List *bt;
+        Dict *ns;
+        long i, nb;
+        Value cv;
+        Str *nm = intern_str(astr(A(0), "type.__new__() argument 1"));
+        if (A(1).t != T_TUPLE) throw_new(cls_TypeError, "type.__new__() argument 2 must be tuple, not %.40s", type_name(A(1)));
+        if (A(2).t != T_DICT) throw_new(cls_TypeError, "type.__new__() argument 3 must be dict, not %.40s", type_name(A(2)));
+        bt = AS_LIST(A(1));
+        ns = AS_DICT(A(2));
+        bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(bt->n + 1));
+        nb = 0;
+        for (i = 0; i < bt->n; i++) {
+            if (bt->a[i].t != T_CLASS) { free(bl); throw_new(cls_TypeError, "bases must be types"); }
+            bl[nb++] = AS_CLASS(bt->a[i]);
+        }
+        if (nb == 0) bl[nb++] = cls_object;
+        c = make_class(nm, bl, (int)nb, modname_of_gp(cur_gp()));
+        cv = mkobj(c, T_CLASS);
+        VPUSH(cv);
+        for (i = 0; i < ns->used; i++) {
+            if (ns->e[i].k.t != T_STR) continue;
+            amap_set(&c->ns, intern_str(AS_STR(ns->e[i].k)), ns->e[i].v);
+        }
+        finish_class(c);
+        vsp--;
+        return cv;
+    }
     return mkobj(class_of(A(0)), T_CLASS);
 }
 static int try_attr(Value o, Str *nm, Value *out)
@@ -7835,7 +8671,7 @@ BI(bi_super)
     if (x->n < 2) throw_new(cls_RuntimeError, "super(): no arguments");
     if (A(0).t != T_CLASS) throw_new(cls_TypeError, "super() argument 1 must be a type");
     s = (Super *)gc_alloc(sizeof(Super), T_SUPER);
-    s->start = AS_CLASS(A(0))->base ? AS_CLASS(A(0))->base : cls_object;
+    s->start = AS_CLASS(A(0));
     s->obj = A(1);
     return mkobj(s, T_SUPER);
 }
@@ -7849,7 +8685,31 @@ BI(bi_propsetter)
     Prop *p;
     need(x, 2, 2, "setter");
     p = (Prop *)A(0).u.o;
-    return mk_prop(T_PROP, p->get, A(1));
+    {
+        Value r = mk_prop(T_PROP, p->get, A(1));
+        ((Prop *)r.u.o)->del = p->del;
+        return r;
+    }
+}
+BI(bi_propdeleter)
+{
+    Prop *p;
+    Value r;
+    need(x, 2, 2, "deleter");
+    p = (Prop *)A(0).u.o;
+    r = mk_prop(T_PROP, p->get, p->set);
+    ((Prop *)r.u.o)->del = A(1);
+    return r;
+}
+BI(bi_propgetter)
+{
+    Prop *p;
+    Value r;
+    need(x, 2, 2, "getter");
+    p = (Prop *)A(0).u.o;
+    r = mk_prop(T_PROP, A(1), p->set);
+    ((Prop *)r.u.o)->del = p->del;
+    return r;
 }
 BI(bi_staticmethod) { need(x, 1, 1, "staticmethod"); return mk_prop(T_SMETH, A(0), UNSET_V); }
 BI(bi_classmethod) { need(x, 1, 1, "classmethod"); return mk_prop(T_CMETH, A(0), UNSET_V); }
@@ -7858,11 +8718,6 @@ BI(bi_exit_fn)
     Value a0 = x->n > 0 ? A(0) : NONE_V;
     throw_val(new_exc_args(cls_SystemExit, &a0, x->n > 0 ? 1 : 0));
     return NONE_V;
-}
-BI(bi_vars)
-{
-    need(x, 1, 1, "vars");
-    return get_attr(A(0), S_dict);
 }
 
 /* ---- exceptions ------------------------------------------------------- */
@@ -8327,7 +9182,37 @@ BI(s_format)
 {
     return format_template(SELF, x->n - 1, x->a + 1, x->nk, x->kw, 0);
 }
-BI(s_encode) { return A(0); }
+BI(s_encode)
+{
+    Str *s = SELF;
+    Value ev = x->n > 1 ? A(1) : kwget(x, "encoding");
+    Value errv = x->n > 2 ? A(2) : kwget(x, "errors");
+    const char *enc = "utf-8", *err = "strict";
+    long i;
+    Buf b;
+    if (ev.t == T_STR) enc = AS_STR(ev)->s;
+    if (errv.t == T_STR) err = AS_STR(errv)->s;
+    if (strcmp(enc, "utf-8") == 0 || strcmp(enc, "utf8") == 0 || strcmp(enc, "UTF-8") == 0)
+        return mkbytes(s->s, s->len);
+    buf_init(&b);
+    for (i = 0; i < s->len; ) {
+        unsigned long c = (unsigned char)s->s[i];
+        int n = 1;
+        if (c >= 0xF0) { n = 4; c &= 7; } else if (c >= 0xE0) { n = 3; c &= 15; }
+        else if (c >= 0xC0) { n = 2; c &= 31; }
+        if (n > 1) { int k; for (k = 1; k < n && i + k < s->len; k++) c = (c << 6) | ((unsigned char)s->s[i + k] & 63); }
+        i += n;
+        if (c < 128 || (c < 256 && (strcmp(enc, "latin-1") == 0 || strcmp(enc, "latin1") == 0 ||
+                                    strcmp(enc, "iso-8859-1") == 0))) buf_addc(&b, (int)c);
+        else if (strcmp(err, "ignore") == 0) { }
+        else if (strcmp(err, "replace") == 0) buf_addc(&b, '?');
+        else {
+            buf_free(&b);
+            throw_new(cls_ValueError, "'%s' codec can't encode character", enc);
+        }
+    }
+    { Value r = mkbytes(b.s, b.n); buf_free(&b); return r; }
+}
 BI(s_removeprefix)
 {
     Str *s = SELF, *p = astr(A(1), "prefix");
@@ -8487,27 +9372,9 @@ BI(d_get)
     if (dict_get(self_dict(x), A(1), &r)) return r;
     return x->n > 2 ? A(2) : NONE_V;
 }
-static Value dict_view(Dict *d, int what)
-{
-    List *l = list_new(d->n);
-    long i;
-    for (i = 0; i < d->used; i++) {
-        if (d->e[i].k.t == T_UNSET) continue;
-        if (what == 0) l->a[l->n++] = d->e[i].k;
-        else if (what == 1) l->a[l->n++] = d->e[i].v;
-        else {
-            Value *base = vsp;
-            VPUSH(mklist(l));
-            l->a[l->n] = mktuple2(d->e[i].k, d->e[i].v);
-            l->n++;
-            vsp = base;
-        }
-    }
-    return mklist(l);
-}
-BI(d_keys) { return dict_view(self_dict(x), 0); }
-BI(d_values) { return dict_view(self_dict(x), 1); }
-BI(d_items) { return dict_view(self_dict(x), 2); }
+BI(d_keys) { self_dict(x); return mkdview(A(0), 0); }
+BI(d_values) { self_dict(x); return mkdview(A(0), 1); }
+BI(d_items) { self_dict(x); return mkdview(A(0), 2); }
 BI(d_update)
 {
     Dict *d = self_dict(x);
@@ -8701,17 +9568,105 @@ BI(f_is_integer)
 }
 
 /* ---- generators and iterators ----------------------------------------- */
+static void throw_stop(Value g)
+{
+    Value rv;
+    if (g.t == T_GEN && ((Gen *)g.u.o)->ret.t != T_NONE) {
+        rv = ((Gen *)g.u.o)->ret;
+        ((Gen *)g.u.o)->ret = NONE_V;
+        throw_val(new_exc_args(cls_StopIteration, &rv, 1));
+    }
+    throw_val(new_exc_args(cls_StopIteration, NULL, 0));
+}
 BI(g_next)
 {
     Value out;
     if (iter_next(A(0), &out)) return out;
-    throw_val(new_exc_args(cls_StopIteration, NULL, 0));
+    throw_stop(A(0));
     return NONE_V;
 }
 BI(g_iter) { return A(0); }
+static int protected_gen(Gen *g, Value *out, int *got, Value *exc)
+{
+    Handler h;
+    Value *save = vsp;
+    int depth = call_depth;
+    Frame *fr = cur_frame;
+    h.prev = cur_handler;
+    h.sp = save;
+    h.depth = depth;
+    h.frame = fr;
+    cur_handler = &h;
+    if (setjmp(h.jb) == 0) {
+        *got = gen_resume(g, out);
+        cur_handler = h.prev;
+        return 0;
+    }
+    cur_handler = h.prev;
+    vsp = save;
+    call_depth = depth;
+    cur_frame = fr;
+    *exc = cur_exc;
+    return 1;
+}
+BI(g_send)
+{
+    Value out;
+    need(x, 2, 2, "send");
+    if (A(0).t != T_GEN) {
+        if (A(1).t != T_NONE) throw_new(cls_AttributeError, "'%.40s' object has no attribute 'send'", type_name(A(0)));
+        if (iter_next(A(0), &out)) return out;
+        throw_stop(A(0));
+    }
+    if (!((Gen *)A(0).u.o)->started && A(1).t != T_NONE)
+        throw_new(cls_TypeError, "can't send non-None value to a just-started generator");
+    ((Gen *)A(0).u.o)->sent = A(1);
+    if (gen_resume((Gen *)A(0).u.o, &out)) return out;
+    throw_stop(A(0));
+    return NONE_V;
+}
+BI(g_throw)
+{
+    Gen *g;
+    Value out, e;
+    need(x, 2, 4, "throw");
+    if (A(0).t != T_GEN) throw_new(cls_AttributeError, "'%.40s' object has no attribute 'throw'", type_name(A(0)));
+    g = (Gen *)A(0).u.o;
+    e = A(1);
+    if (e.t == T_CLASS) e = call0(e);
+    if (e.t != T_INST || !(AS_INST(e)->cls->flags & CF_EXC))
+        throw_new(cls_TypeError, "exceptions must derive from BaseException");
+    if (!g->started || g->done) {
+        g->done = 1;
+        throw_val(e);
+    }
+    g->thrown = e;
+    if (gen_resume(g, &out)) return out;
+    throw_stop(A(0));
+    return NONE_V;
+}
 BI(g_close)
 {
-    if (A(0).t == T_GEN) ((Gen *)A(0).u.o)->done = 1;
+    Gen *g;
+    Value out, exc;
+    int got = 0;
+    if (A(0).t != T_GEN) return NONE_V;
+    g = (Gen *)A(0).u.o;
+    if (g->started && !g->done && !g->running) {
+        g->thrown = new_exc_args(cls_GeneratorExit, NULL, 0);
+        if (protected_gen(g, &out, &got, &exc)) {
+            g->done = 1;
+            if (!class_isa(AS_INST(exc)->cls, cls_GeneratorExit) &&
+                !class_isa(AS_INST(exc)->cls, cls_StopIteration))
+                throw_val(exc);
+            return NONE_V;
+        }
+        if (got) {
+            g->done = 1;
+            throw_new(cls_RuntimeError, "generator ignored GeneratorExit");
+        }
+    }
+    g->done = 1;
     return NONE_V;
 }
 
@@ -8834,6 +9789,341 @@ BI(fl_exit)
     f->closed = 1;
     return FALSE_V;
 }
+
+/* ---- protocol methods of the native base types (list dict set tuple str) ----------
+   On subclass instances the self argument is replaced by the payload (Builtin.selfpay). */
+BI(nat_new)
+{
+    Class *c;
+    Inst *in;
+    Value iv;
+    if (x->n < 1 || A(0).t != T_CLASS) throw_new(cls_TypeError, "__new__(X): X is not a type object");
+    c = AS_CLASS(A(0));
+    in = new_inst(c);
+    iv = mkobj(in, T_INST);
+    VPUSH(iv);
+    if (c->paycls) {
+        if (c->paycls == cls_tuple || c->paycls == cls_str)
+            in->pay = pay_ctor(c->paycls, x->n - 1, x->a + 1, x->nk, x->kw);
+        else
+            in->pay = pay_ctor(c->paycls, 0, NULL, 0, NULL);
+    }
+    vsp--;
+    return iv;
+}
+BI(nat_getitem) { need(x, 2, 2, "__getitem__"); return subscr(A(0), A(1)); }
+BI(nat_setitem) { need(x, 3, 3, "__setitem__"); setitem(A(0), A(1), A(2)); return NONE_V; }
+BI(nat_delitem) { need(x, 2, 2, "__delitem__"); delitem(A(0), A(1)); return NONE_V; }
+BI(nat_len) { return mkint(py_len(A(0))); }
+BI(nat_iter) { return get_iter(A(0)); }
+BI(nat_contains) { need(x, 2, 2, "__contains__"); return mkbool(contains(A(0), A(1))); }
+BI(nat_repr) { return py_repr(A(0)); }
+BI(nat_str) { return py_str(A(0)); }
+BI(nat_eq) { need(x, 2, 2, "__eq__"); return mkbool(py_eq(A(0), unpay(A(1)))); }
+BI(nat_ne) { need(x, 2, 2, "__ne__"); return mkbool(!py_eq(A(0), unpay(A(1)))); }
+BI(nat_lt) { need(x, 2, 2, "__lt__"); return mkbool(rich_cmp(C_LT, A(0), unpay(A(1)))); }
+BI(nat_le) { need(x, 2, 2, "__le__"); return mkbool(rich_cmp(C_LE, A(0), unpay(A(1)))); }
+BI(nat_gt) { need(x, 2, 2, "__gt__"); return mkbool(rich_cmp(C_GT, A(0), unpay(A(1)))); }
+BI(nat_ge) { need(x, 2, 2, "__ge__"); return mkbool(rich_cmp(C_GE, A(0), unpay(A(1)))); }
+BI(nat_hash) { return mkint((long)py_hash(A(0))); }
+BI(nat_add) { need(x, 2, 2, "__add__"); return binop(B_ADD, A(0), unpay(A(1))); }
+BI(nat_mul) { need(x, 2, 2, "__mul__"); return binop(B_MUL, A(0), A(1)); }
+BI(nat_mod) { need(x, 2, 2, "__mod__"); return binop(B_MOD, A(0), A(1)); }
+BI(nat_or) { need(x, 2, 2, "__or__"); return binop(B_OR, A(0), unpay(A(1))); }
+BI(nat_and) { need(x, 2, 2, "__and__"); return binop(B_AND, A(0), unpay(A(1))); }
+BI(nat_sub) { need(x, 2, 2, "__sub__"); return binop(B_SUB, A(0), unpay(A(1))); }
+BI(nat_xor) { need(x, 2, 2, "__xor__"); return binop(B_XOR, A(0), unpay(A(1))); }
+BI(nat_format)
+{
+    need(x, 2, 2, "__format__");
+    return format_value(A(0), astr(A(1), "format_spec")->s, AS_STR(A(1))->len);
+}
+BI(list_init)
+{
+    List *l = self_list(x);
+    need(x, 1, 2, "__init__");
+    l->n = 0;
+    if (x->n > 1) {
+        Value it, y;
+        VPUSH(A(1));
+        it = get_iter(A(1));
+        VPUSH(it);
+        while (iter_next(it, &y)) list_push(l, y);
+        vsp -= 2;
+    }
+    return NONE_V;
+}
+BI(set_init)
+{
+    Dict *d = self_set(x);
+    need(x, 1, 2, "__init__");
+    dict_clear(d);
+    if (x->n > 1) {
+        Value it, y;
+        VPUSH(A(1));
+        it = get_iter(A(1));
+        VPUSH(it);
+        while (iter_next(it, &y)) set_add(d, y);
+        vsp -= 2;
+    }
+    return NONE_V;
+}
+BI(obj_setattr)
+{
+    need(x, 3, 3, "__setattr__");
+    if (A(0).t != T_INST) throw_new(cls_TypeError, "can't apply this __setattr__ to a non-instance");
+    amap_set(&AS_INST(A(0))->a, intern_str(astr(A(1), "attribute name")), A(2));
+    return NONE_V;
+}
+BI(bi_slice)
+{
+    need(x, 1, 3, "slice");
+    if (x->n == 1) return mkslice(NONE_V, A(0), NONE_V);
+    return mkslice(A(0), A(1), x->n > 2 ? A(2) : NONE_V);
+}
+BI(sl_indices)
+{
+    List *sl;
+    long start, stop, step, cnt;
+    Value r[3];
+    need(x, 2, 2, "indices");
+    sl = AS_LIST(A(0));
+    slice_adjust(sl->a[0], sl->a[1], sl->a[2], to_index(A(1)), &start, &stop, &step, &cnt);
+    r[0] = mkint(start); r[1] = mkint(stop); r[2] = mkint(step);
+    return mktuple_from(r, 3);
+}
+
+BI(s_isidentifier)
+{
+    Str *s = SELF;
+    long i;
+    if (s->len == 0 || ch_digit[(unsigned char)s->s[0]]) return FALSE_V;
+    for (i = 0; i < s->len; i++)
+        if (!ch_alnum[(unsigned char)s->s[i]] && (unsigned char)s->s[i] < 128) return FALSE_V;
+    return TRUE_V;
+}
+BI(s_istitle)
+{
+    Str *s = SELF;
+    long i;
+    int prev = 0, any = 0;
+    for (i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->s[i];
+        if (ch_upper[c]) { if (prev) return FALSE_V; prev = 1; any = 1; }
+        else if (ch_lower[c]) { if (!prev) return FALSE_V; }
+        else prev = 0;
+    }
+    return mkbool(any);
+}
+BI(s_isprintable)
+{
+    Str *s = SELF;
+    long i;
+    for (i = 0; i < s->len; i++)
+        if ((unsigned char)s->s[i] < 32 || (unsigned char)s->s[i] == 127) return FALSE_V;
+    return TRUE_V;
+}
+BI(s_isascii)
+{
+    Str *s = SELF;
+    long i;
+    for (i = 0; i < s->len; i++) if ((unsigned char)s->s[i] >= 128) return FALSE_V;
+    return TRUE_V;
+}
+BI(notimpl_repr)
+{
+    (void)x;
+    return mkcstr("NotImplemented");
+}
+BI(ellipsis_repr)
+{
+    (void)x;
+    return mkcstr("Ellipsis");
+}
+
+/* ---- bytes ------------------------------------------------------------ */
+BI(bi_bytes)
+{
+    Value v;
+    Buf b;
+    long i;
+    if (x->n == 0) return mkbytes("", 0);
+    v = A(0);
+    if (v.t == T_BYTES) return v;
+    if (v.t == T_STR) {
+        Args a2;
+        Value av[2];
+        if (x->n < 2) throw_new(cls_TypeError, "string argument without an encoding");
+        av[0] = v; av[1] = A(1);
+        a2.n = 2; a2.a = av; a2.nk = 0; a2.kw = NULL;
+        return s_encode(&a2);
+    }
+    buf_init(&b);
+    if (v.t == T_INT) {
+        if (v.u.i < 0) { buf_free(&b); throw_new(cls_ValueError, "negative count"); }
+        for (i = 0; i < v.u.i; i++) buf_addc(&b, 0);
+    } else {
+        Value it, y;
+        it = get_iter(v);
+        VPUSH(it);
+        while (iter_next(it, &y)) {
+            if (y.t != T_INT && y.t != T_BOOL) { buf_free(&b); throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer", type_name(y)); }
+            if (y.u.i < 0 || y.u.i > 255) { buf_free(&b); throw_new(cls_ValueError, "bytes must be in range(0, 256)"); }
+            buf_addc(&b, (int)y.u.i);
+        }
+        vsp--;
+    }
+    v = mkbytes(b.s, b.n);
+    buf_free(&b);
+    return v;
+}
+static Str *abytes(Value v)
+{
+    if (v.t != T_BYTES) throw_new(cls_TypeError, "descriptor requires a 'bytes' object but received '%.40s'", type_name(v));
+    return AS_STR(v);
+}
+BI(b_decode)
+{
+    Str *s = abytes(A(0));
+    Value ev = x->n > 1 ? A(1) : kwget(x, "encoding");
+    Value errv = x->n > 2 ? A(2) : kwget(x, "errors");
+    const char *enc = "utf-8", *err = "strict";
+    Buf b;
+    long i;
+    if (ev.t == T_STR) enc = AS_STR(ev)->s;
+    if (errv.t == T_STR) err = AS_STR(errv)->s;
+    if (strcmp(enc, "latin-1") == 0 || strcmp(enc, "latin1") == 0 || strcmp(enc, "iso-8859-1") == 0) {
+        buf_init(&b);
+        for (i = 0; i < s->len; i++) put_utf8(&b, (unsigned char)s->s[i]);
+        { Value r = buf_value(&b); return r; }
+    }
+    if (strcmp(enc, "ascii") == 0 || strcmp(enc, "us-ascii") == 0) {
+        for (i = 0; i < s->len; i++)
+            if ((unsigned char)s->s[i] >= 128 && strcmp(err, "ignore") != 0 && strcmp(err, "replace") != 0)
+                throw_new(cls_ValueError, "'ascii' codec can't decode byte 0x%02x in position %ld: ordinal not in range(128)",
+                          (unsigned char)s->s[i], i);
+    }
+    return mkstr(s->s, s->len);
+}
+BI(b_hex)
+{
+    Str *s = abytes(A(0));
+    Buf b;
+    long i;
+    char t[4];
+    buf_init(&b);
+    for (i = 0; i < s->len; i++) { sprintf(t, "%02x", (unsigned char)s->s[i]); buf_add(&b, t); }
+    return buf_value(&b);
+}
+BI(b_fromhex)
+{
+    Str *s;
+    Buf b;
+    long i;
+    int hi = -1;
+    need(x, 1, 2, "fromhex");
+    s = astr(A(x->n - 1), "fromhex() argument");
+    buf_init(&b);
+    for (i = 0; i < s->len; i++) {
+        int c = (unsigned char)s->s[i], d;
+        if (c == ' ') continue;
+        if (!ch_hex[c]) { buf_free(&b); throw_new(cls_ValueError, "non-hexadecimal number found in fromhex() arg at position %ld", i); }
+        d = digit_val(c);
+        if (hi < 0) hi = d; else { buf_addc(&b, hi * 16 + d); hi = -1; }
+    }
+    if (hi >= 0) { buf_free(&b); throw_new(cls_ValueError, "non-hexadecimal number found in fromhex() arg at position %ld", s->len); }
+    { Value r = mkbytes(b.s, b.n); buf_free(&b); return r; }
+}
+static Value b2s_back(Value r)
+{
+    if (r.t == T_STR) return mkbytes(AS_STR(r)->s, AS_STR(r)->len);
+    if (r.t == T_LIST || r.t == T_TUPLE) {
+        long i;
+        for (i = 0; i < AS_LIST(r)->n; i++)
+            if (AS_LIST(r)->a[i].t == T_STR)
+                AS_LIST(r)->a[i] = mkbytes(AS_STR(AS_LIST(r)->a[i])->s, AS_STR(AS_LIST(r)->a[i])->len);
+    }
+    return r;
+}
+/* run a str method on bytes arguments (bytes become temporary str values) */
+static Value via_str(Args *x, BFn fn)
+{
+    Value *av = (Value *)xmalloc(sizeof(Value) * (size_t)(x->n + 1));
+    Args a2;
+    Value r;
+    int i;
+    for (i = 0; i < x->n; i++) {
+        if (x->a[i].t == T_BYTES) av[i] = mkstr(AS_STR(x->a[i])->s, AS_STR(x->a[i])->len);
+        else if (x->a[i].t == T_LIST || x->a[i].t == T_TUPLE) {
+            Value l = iter_to_list(x->a[i]);
+            long k;
+            for (k = 0; k < AS_LIST(l)->n; k++)
+                if (AS_LIST(l)->a[k].t == T_BYTES)
+                    AS_LIST(l)->a[k] = mkstr(AS_STR(AS_LIST(l)->a[k])->s, AS_STR(AS_LIST(l)->a[k])->len);
+            av[i] = l;
+        } else av[i] = x->a[i];
+    }
+    a2.n = x->n; a2.a = av; a2.nk = x->nk; a2.kw = x->kw;
+    for (i = 0; i < x->n; i++) VPUSH(av[i]);
+    r = fn(&a2);
+    vsp -= x->n;
+    free(av);
+    return b2s_back(r);
+}
+#define BVIA(name, fn) BI(name) { return via_str(x, fn); }
+BVIA(b_upper, s_upper) BVIA(b_lower, s_lower) BVIA(b_strip, s_strip) BVIA(b_lstrip, s_lstrip)
+BVIA(b_rstrip, s_rstrip) BVIA(b_split, s_split) BVIA(b_join, s_join) BVIA(b_replace, s_replace)
+BVIA(b_find, s_find) BVIA(b_count, s_count) BVIA(b_startswith, s_startswith)
+BVIA(b_endswith, s_endswith) BVIA(b_rfind, s_rfind) BVIA(b_index, s_index)
+BVIA(b_splitlines, s_splitlines) BVIA(b_isdigit, s_isdigit) BVIA(b_isalpha, s_isalpha)
+BI(i_to_bytes)
+{
+    Value v = A(0), kv;
+    long n, i;
+    int big = 1, sg = 0;
+    Buf b;
+    need(x, 1, 3, "to_bytes");
+    n = x->n > 1 ? to_index(A(1)) : (kv = kwget(x, "length"), kv.t == T_UNSET ? 1 : to_index(kv));
+    kv = x->n > 2 ? A(2) : kwget(x, "byteorder");
+    if (kv.t == T_STR && strcmp(AS_STR(kv)->s, "little") == 0) big = 0;
+    kv = kwget(x, "signed");
+    if (kv.t != T_UNSET && py_truthy(kv)) sg = 1;
+    if (int_sign(v) < 0) {
+        if (!sg) throw_new(cls_OverflowError, "can't convert negative int to unsigned");
+        v = int_add(int_pow(mkint(256), n), v);
+    }
+    buf_init(&b);
+    for (i = 0; i < n; i++) buf_addc(&b, 0);
+    for (i = 0; i < n; i++) {
+        Value q, r;
+        int_divmod(v, mkint(256), &q, &r);
+        b.s[big ? n - 1 - i : i] = (char)r.u.i;
+        v = q;
+    }
+    if (int_sign(v) != 0) { buf_free(&b); throw_new(cls_OverflowError, "int too big to convert"); }
+    { Value r = mkbytes(b.s, b.n); buf_free(&b); return r; }
+}
+BI(i_from_bytes)
+{
+    Value src = A(0), kv, r = mkint(0);
+    Str *s;
+    long i;
+    int big = 1, sg = 0;
+    need(x, 1, 2, "from_bytes");
+    if (src.t != T_BYTES) src = bi_bytes(x);
+    s = AS_STR(src);
+    kv = x->n > 1 ? A(1) : kwget(x, "byteorder");
+    if (kv.t == T_STR && strcmp(AS_STR(kv)->s, "little") == 0) big = 0;
+    kv = kwget(x, "signed");
+    if (kv.t != T_UNSET && py_truthy(kv)) sg = 1;
+    for (i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->s[big ? i : s->len - 1 - i];
+        r = int_add(int_mul(r, mkint(256)), mkint(c));
+    }
+    if (sg && s->len > 0 && ((unsigned char)s->s[big ? 0 : s->len - 1] & 128))
+        r = int_sub(r, int_pow(mkint(256), s->len));
+    return r;
+}
 /* ===== p7_np.c ===== */
 /* =========================================================================
    p7_np.c   numpy subset: native ndarray (bool/int64/float64, N-d, row-major,
@@ -8855,6 +10145,9 @@ enum {
 static Module *new_module(const char *name);
 static void mod_def(Module *m, const char *name, BFn fn);
 static void mod_val(Module *m, const char *name, Value v);
+static void np_init2(Module *m);
+static void la_init(Module *np);
+static void rnd_init(Module *np);
 
 typedef struct NdTmp { Nd nd; long i; double d; } NdTmp;
 
@@ -10934,12 +12227,8 @@ static void np_init(void)
     c->name = intern_c("ndarray"); c->base = cls_object;
     c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
     c->ctor = np_array; c->flags = CF_BUILTIN;
+    c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL; c->modname = NULL;
     cls_ndarray = c;
-    c = (Class *)gc_alloc(sizeof(Class), T_CLASS);
-    c->name = intern_c("slice"); c->base = cls_object;
-    c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
-    c->ctor = NULL; c->flags = CF_BUILTIN;
-    cls_slice = c;
     def_bi(cls_ndarray, "tolist", nd_tolist); def_bi(cls_ndarray, "copy", nd_copy);
     def_bi(cls_ndarray, "reshape", nd_reshape); def_bi(cls_ndarray, "flatten", nd_flatten);
     def_bi(cls_ndarray, "ravel", nd_flatten); def_bi(cls_ndarray, "astype", nd_astype_m);
@@ -11004,29 +12293,3849 @@ static void np_init(void)
     mod_val(m, "float64", mkobj(cls_float, T_CLASS));
     mod_val(m, "int64", mkobj(cls_int, T_CLASS));
     mod_val(m, "bool_", mkobj(cls_bool, T_CLASS));
+    np_init2(m);
+    la_init(m);
+    rnd_init(m);
+}
+/* ===== p7_la.c ===== */
+/* =========================================================================
+   p7_la.c   numpy.linalg (dense real matrices, double precision)
+   ========================================================================= */
+static Class *cls_LinAlgError;
+
+/* portable C89 replacements for hypot / log1p / expm1 / asinh / ... */
+static double n_hypot(double a, double b)
+{
+    double t;
+    a = fabs(a); b = fabs(b);
+    if (a < b) { t = a; a = b; b = t; }
+    if (a == 0.0) return 0.0;
+    if (a - a != 0.0) return a;
+    t = b / a;
+    return a * sqrt(1.0 + t * t);
+}
+static double n_log1p(double x)
+{
+    double u = 1.0 + x;
+    if (u == 1.0) return x;
+    return log(u) * x / (u - 1.0);
+}
+static double n_expm1(double x)
+{
+    double u = exp(x), um1;
+    if (u == 1.0) return x;
+    um1 = u - 1.0;
+    if (um1 == -1.0) return -1.0;
+    if (u - u != 0) return u;
+    return um1 * x / log(u);
+}
+static double n_asinh(double v)
+{
+    double a = fabs(v), r;
+    if (a < 1e-8 || a - a != 0.0) return v;
+    r = a > 1e8 ? log(a) + 0.69314718055994530942 : n_log1p(a + a * a / (1.0 + sqrt(1.0 + a * a)));
+    return v < 0 ? -r : r;
+}
+static double n_acosh(double v)
+{
+    if (v < 1.0) return HUGE_VAL - HUGE_VAL;
+    if (v > 1e8) return log(v) + 0.69314718055994530942;
+    return n_log1p((v - 1.0) + sqrt((v - 1.0) * (v + 1.0)));
+}
+static double n_atanh(double v)
+{
+    if (v > 1.0 || v < -1.0) return HUGE_VAL - HUGE_VAL;
+    if (v == 1.0) return HUGE_VAL;
+    if (v == -1.0) return -HUGE_VAL;
+    return 0.5 * n_log1p(2.0 * v / (1.0 - v));
+}
+static double n_cbrt(double v)
+{
+    double a, r;
+    if (v == 0 || v - v != 0) return v;
+    a = fabs(v);
+    r = pow(a, 1.0 / 3.0);
+    r = r - (r * r * r - a) / (3.0 * r * r);
+    return v < 0 ? -r : r;
+}
+static double n_trunc(double v)
+{
+    return v < 0 ? ceil(v) : floor(v);
+}
+
+static Value np_arg(Args *x, int pos, const char *nm)
+{
+    if (pos < x->n) return A(pos);
+    return kwget(x, nm);
+}
+static int np_has(Value v)
+{
+    return v.t != T_UNSET && v.t != T_NONE;
+}
+/* fresh float copy of any array-like */
+static Nd *np_f(Value v)
+{
+    NdTmp t;
+    Nd *a = nd_coerce(v, &t);
+    return nd_astype(a, ND_FLOAT);
+}
+static Nd *la_mat(Value v, long *m, long *n)
+{
+    Nd *a = np_f(v);
+    if (a->nd < 2)
+        throw_new(cls_LinAlgError, "%d-dimensional array given. Array must be at least two-dimensional", a->nd);
+    if (a->nd > 2) throw_new(cls_NotImplementedError, "linalg: stacked matrices are not supported");
+    *m = a->shape[0]; *n = a->shape[1];
+    return a;
+}
+static Nd *la_sq(Value v, long *n)
+{
+    long m;
+    Nd *a = la_mat(v, &m, n);
+    if (m != *n) throw_new(cls_LinAlgError, "Last 2 dimensions of the array must be square");
+    return a;
+}
+static Nd *mat_new(long m, long n)
+{
+    long sh[2];
+    sh[0] = m; sh[1] = n;
+    return nd_new(ND_FLOAT, 2, sh);
+}
+static Nd *vec_new(long n)
+{
+    return nd_new1(ND_FLOAT, n);
+}
+
+/* LU with partial pivoting, in place; returns sign (+1/-1) or 0 when singular */
+static int lu_dec(double *a, long n, long *piv)
+{
+    long i, j, k, p;
+    int sign = 1, sing = 0;
+    for (k = 0; k < n; k++) {
+        double mx = fabs(a[k * n + k]);
+        p = k;
+        for (i = k + 1; i < n; i++)
+            if (fabs(a[i * n + k]) > mx) { mx = fabs(a[i * n + k]); p = i; }
+        piv[k] = p;
+        if (mx == 0.0) { sing = 1; continue; }
+        if (p != k) {
+            for (j = 0; j < n; j++) {
+                double t = a[k * n + j]; a[k * n + j] = a[p * n + j]; a[p * n + j] = t;
+            }
+            sign = -sign;
+        }
+        for (i = k + 1; i < n; i++) {
+            double f = a[i * n + k] / a[k * n + k];
+            a[i * n + k] = f;
+            if (f != 0.0) for (j = k + 1; j < n; j++) a[i * n + j] -= f * a[k * n + j];
+        }
+    }
+    return sing ? 0 : sign;
+}
+/* solve with an LU factorisation: b is n x nrhs (row-major), overwritten */
+static void lu_solve(const double *lu, long n, const long *piv, double *b, long nrhs)
+{
+    long i, j, k;
+    for (k = 0; k < n; k++)
+        if (piv[k] != k)
+            for (j = 0; j < nrhs; j++) {
+                double t = b[k * nrhs + j]; b[k * nrhs + j] = b[piv[k] * nrhs + j]; b[piv[k] * nrhs + j] = t;
+            }
+    for (i = 0; i < n; i++)
+        for (k = 0; k < i; k++) {
+            double f = lu[i * n + k];
+            if (f != 0.0) for (j = 0; j < nrhs; j++) b[i * nrhs + j] -= f * b[k * nrhs + j];
+        }
+    for (i = n - 1; i >= 0; i--) {
+        for (k = i + 1; k < n; k++) {
+            double f = lu[i * n + k];
+            if (f != 0.0) for (j = 0; j < nrhs; j++) b[i * nrhs + j] -= f * b[k * nrhs + j];
+        }
+        for (j = 0; j < nrhs; j++) b[i * nrhs + j] /= lu[i * n + i];
+    }
+}
+BI(la_det)
+{
+    long n, i, *piv;
+    int sg;
+    Nd *a;
+    double d;
+    need(x, 1, 1, "det");
+    a = la_sq(A(0), &n);
+    if (n == 0) return mkfloat(1.0);
+    piv = (long *)xmalloc(sizeof(long) * (size_t)n);
+    sg = lu_dec(a->dv, n, piv);
+    free(piv);
+    if (sg == 0) return mkfloat(0.0);
+    d = (double)sg;
+    for (i = 0; i < n; i++) d *= a->dv[i * n + i];
+    return mkfloat(d);
+}
+BI(la_slogdet)
+{
+    long n, i, *piv;
+    int sg;
+    Nd *a;
+    double ld = 0.0, sgn;
+    Value tv[2];
+    need(x, 1, 1, "slogdet");
+    a = la_sq(A(0), &n);
+    piv = (long *)xmalloc(sizeof(long) * (size_t)(n > 0 ? n : 1));
+    sg = lu_dec(a->dv, n, piv);
+    free(piv);
+    if (sg == 0) { tv[0] = mkfloat(0.0); tv[1] = mkfloat(-HUGE_VAL); return mktuple_from(tv, 2); }
+    sgn = (double)sg;
+    for (i = 0; i < n; i++) {
+        double d = a->dv[i * n + i];
+        if (d < 0) { sgn = -sgn; d = -d; }
+        ld += log(d);
+    }
+    tv[0] = mkfloat(sgn); tv[1] = mkfloat(ld);
+    return mktuple_from(tv, 2);
+}
+BI(la_inv)
+{
+    long n, i, *piv;
+    Nd *a, *r;
+    need(x, 1, 1, "inv");
+    a = la_sq(A(0), &n);
+    r = mat_new(n, n);
+    piv = (long *)xmalloc(sizeof(long) * (size_t)(n > 0 ? n : 1));
+    if (n > 0 && lu_dec(a->dv, n, piv) == 0) {
+        free(piv);
+        throw_new(cls_LinAlgError, "Singular matrix");
+    }
+    for (i = 0; i < n * n; i++) r->dv[i] = 0.0;
+    for (i = 0; i < n; i++) r->dv[i * n + i] = 1.0;
+    if (n > 0) lu_solve(a->dv, n, piv, r->dv, n);
+    free(piv);
+    return ndv(r);
+}
+BI(la_solve)
+{
+    long n, i, *piv, nrhs;
+    Nd *a, *b, *r;
+    need(x, 2, 2, "solve");
+    a = la_sq(A(0), &n);
+    b = np_f(A(1));
+    if (b->nd < 1 || b->nd > 2 || b->shape[0] != n)
+        throw_new(cls_ValueError, "solve: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature (m,m),(m,n)->(m,n) (size %ld is different from %ld)",
+                  b->nd > 0 ? b->shape[0] : 0L, n);
+    nrhs = b->nd == 1 ? 1 : b->shape[1];
+    r = nd_astype(b, ND_FLOAT);
+    piv = (long *)xmalloc(sizeof(long) * (size_t)(n > 0 ? n : 1));
+    if (n > 0 && lu_dec(a->dv, n, piv) == 0) {
+        free(piv);
+        throw_new(cls_LinAlgError, "Singular matrix");
+    }
+    if (n > 0) lu_solve(a->dv, n, piv, r->dv, nrhs);
+    free(piv);
+    (void)i;
+    return ndv(r);
+}
+BI(la_cholesky)
+{
+    long n, i, j, k;
+    Nd *a, *r;
+    need(x, 1, 1, "cholesky");
+    a = la_sq(A(0), &n);
+    r = mat_new(n, n);
+    for (i = 0; i < n * n; i++) r->dv[i] = 0.0;
+    for (i = 0; i < n; i++)
+        for (j = 0; j <= i; j++) {
+            double s = a->dv[i * n + j];
+            for (k = 0; k < j; k++) s -= r->dv[i * n + k] * r->dv[j * n + k];
+            if (i == j) {
+                if (s <= 0.0) throw_new(cls_LinAlgError, "Matrix is not positive definite");
+                r->dv[i * n + i] = sqrt(s);
+            } else r->dv[i * n + j] = s / r->dv[j * n + j];
+        }
+    return ndv(r);
+}
+
+/* symmetric eigenproblem: cyclic Jacobi.  a (n x n, destroyed), w ascending,
+   v receives eigenvectors as columns */
+static void jacobi_eig(double *a, long n, double *w, double *v)
+{
+    long i, j, p, q, sweep, k;
+    for (i = 0; i < n * n; i++) v[i] = 0.0;
+    for (i = 0; i < n; i++) v[i * n + i] = 1.0;
+    for (sweep = 0; sweep < 100; sweep++) {
+        double off = 0.0, dsum = 0.0;
+        for (p = 0; p < n; p++) {
+            dsum += a[p * n + p] * a[p * n + p];
+            for (q = p + 1; q < n; q++) off += a[p * n + q] * a[p * n + q];
+        }
+        if (off == 0.0 || off < 1e-32 * dsum) break;
+        for (p = 0; p < n - 1; p++)
+            for (q = p + 1; q < n; q++) {
+                double apq = a[p * n + q], theta, t, c, s;
+                if (apq == 0.0) continue;
+                theta = (a[q * n + q] - a[p * n + p]) / (2.0 * apq);
+                t = (theta >= 0 ? 1.0 : -1.0) / (fabs(theta) + sqrt(theta * theta + 1.0));
+                c = 1.0 / sqrt(t * t + 1.0);
+                s = t * c;
+                for (k = 0; k < n; k++) {
+                    double akp = a[k * n + p], akq = a[k * n + q];
+                    a[k * n + p] = c * akp - s * akq;
+                    a[k * n + q] = s * akp + c * akq;
+                }
+                for (k = 0; k < n; k++) {
+                    double apk = a[p * n + k], aqk = a[q * n + k];
+                    a[p * n + k] = c * apk - s * aqk;
+                    a[q * n + k] = s * apk + c * aqk;
+                }
+                for (k = 0; k < n; k++) {
+                    double vkp = v[k * n + p], vkq = v[k * n + q];
+                    v[k * n + p] = c * vkp - s * vkq;
+                    v[k * n + q] = s * vkp + c * vkq;
+                }
+            }
+    }
+    for (i = 0; i < n; i++) w[i] = a[i * n + i];
+    /* selection sort ascending, swapping columns of v */
+    for (i = 0; i < n - 1; i++) {
+        long mi = i;
+        for (j = i + 1; j < n; j++) if (w[j] < w[mi]) mi = j;
+        if (mi != i) {
+            double t = w[i]; w[i] = w[mi]; w[mi] = t;
+            for (k = 0; k < n; k++) {
+                t = v[k * n + i]; v[k * n + i] = v[k * n + mi]; v[k * n + mi] = t;
+            }
+        }
+    }
+}
+/* copy one triangle over the other so the matrix is exactly symmetric */
+static void symmetrize(double *a, long n, int upper)
+{
+    long i, j;
+    for (i = 0; i < n; i++)
+        for (j = 0; j < i; j++) {
+            if (upper) a[i * n + j] = a[j * n + i];
+            else a[j * n + i] = a[i * n + j];
+        }
+}
+static int uplo_arg(Args *x, int pos)
+{
+    Value u = np_arg(x, pos, "UPLO");
+    if (u.t == T_STR) {
+        const char *s = AS_STR(u)->s;
+        if (s[0] == 'U' || s[0] == 'u') return 1;
+    }
+    return 0;
+}
+BI(la_eigvalsh)
+{
+    long n;
+    Nd *a, *w;
+    double *v;
+    need(x, 1, 2, "eigvalsh");
+    a = la_sq(A(0), &n);
+    symmetrize(a->dv, n, uplo_arg(x, 1));
+    w = vec_new(n);
+    v = (double *)xmalloc(sizeof(double) * (size_t)(n * n > 0 ? n * n : 1));
+    jacobi_eig(a->dv, n, w->dv, v);
+    free(v);
+    return ndv(w);
+}
+/* make each eigenvector's largest component positive-free of ambiguity:
+   LAPACK gives no guarantee, so normalise the sign deterministically */
+static void fix_vec_signs(double *v, long n)
+{
+    long i, j;
+    for (j = 0; j < n; j++) {
+        double mx = 0.0, sgn = 1.0;
+        for (i = 0; i < n; i++)
+            if (fabs(v[i * n + j]) > fabs(mx) * (1.0 + 1e-12)) mx = v[i * n + j];
+        if (mx < 0) sgn = -1.0;
+        if (sgn < 0) for (i = 0; i < n; i++) v[i * n + j] = -v[i * n + j];
+    }
+}
+BI(la_eigh)
+{
+    long n;
+    Nd *a, *w, *v;
+    Value tv[2];
+    need(x, 1, 2, "eigh");
+    a = la_sq(A(0), &n);
+    symmetrize(a->dv, n, uplo_arg(x, 1));
+    w = vec_new(n);
+    v = mat_new(n, n);
+    jacobi_eig(a->dv, n, w->dv, v->dv);
+    fix_vec_signs(v->dv, n);
+    tv[0] = ndv(w); tv[1] = ndv(v);
+    return mktuple_from(tv, 2);
+}
+
+/* general real matrix: Hessenberg reduction + shifted QR; returns 0 on
+   success, sets wr/wi */
+static void hessenberg(double *a, long n)
+{
+    long k, i, j;
+    double *v = (double *)xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+    for (k = 0; k + 2 < n; k++) {
+        double alpha = 0.0, nrm = 0.0, vn = 0.0;
+        for (i = k + 1; i < n; i++) nrm += a[i * n + k] * a[i * n + k];
+        nrm = sqrt(nrm);
+        if (nrm == 0.0) continue;
+        alpha = a[(k + 1) * n + k] > 0 ? -nrm : nrm;
+        for (i = k + 1; i < n; i++) v[i] = a[i * n + k];
+        v[k + 1] -= alpha;
+        for (i = k + 1; i < n; i++) vn += v[i] * v[i];
+        if (vn == 0.0) continue;
+        for (j = 0; j < n; j++) {
+            double s = 0.0;
+            for (i = k + 1; i < n; i++) s += v[i] * a[i * n + j];
+            s = 2.0 * s / vn;
+            for (i = k + 1; i < n; i++) a[i * n + j] -= s * v[i];
+        }
+        for (i = 0; i < n; i++) {
+            double s = 0.0;
+            for (j = k + 1; j < n; j++) s += a[i * n + j] * v[j];
+            s = 2.0 * s / vn;
+            for (j = k + 1; j < n; j++) a[i * n + j] -= s * v[j];
+        }
+    }
+    free(v);
+}
+static void qr_eigs(double *a, long n, double *wr, double *wi)
+{
+    long hi = n - 1, i, k, iter = 0, total = 0;
+    double *cs = (double *)xmalloc(sizeof(double) * (size_t)(2 * n + 2));
+    double *sn = cs + n + 1;
+    hessenberg(a, n);
+    while (hi >= 0) {
+        long l;
+        double mu;
+        if (hi == 0) { wr[0] = a[0]; wi[0] = 0.0; break; }
+        /* look for a small subdiagonal element */
+        for (l = hi; l > 0; l--) {
+            double s = fabs(a[(l - 1) * n + l - 1]) + fabs(a[l * n + l]);
+            if (s == 0.0) s = 1.0;
+            if (fabs(a[l * n + l - 1]) <= DBL_EPSILON * s) { a[l * n + l - 1] = 0.0; break; }
+        }
+        if (l == hi) {
+            wr[hi] = a[hi * n + hi]; wi[hi] = 0.0;
+            hi--; iter = 0;
+            continue;
+        }
+        if (l == hi - 1) {
+            double p = a[(hi - 1) * n + hi - 1], q = a[(hi - 1) * n + hi];
+            double r = a[hi * n + hi - 1], s = a[hi * n + hi];
+            double m = (p + s) / 2.0, disc = (p - s) * (p - s) / 4.0 + q * r;
+            if (disc >= 0) {
+                double sq = sqrt(disc);
+                wr[hi - 1] = m + sq; wr[hi] = m - sq;
+                if (wr[hi - 1] != 0.0 && wr[hi] != 0.0) {
+                    /* refine the smaller root through the determinant */
+                    double det = p * s - q * r;
+                    if (fabs(wr[hi - 1]) > fabs(wr[hi])) wr[hi] = det / wr[hi - 1];
+                    else wr[hi - 1] = det / wr[hi];
+                }
+                wi[hi - 1] = wi[hi] = 0.0;
+            } else {
+                wr[hi - 1] = wr[hi] = m;
+                wi[hi - 1] = sqrt(-disc); wi[hi] = -wi[hi - 1];
+            }
+            hi -= 2; iter = 0;
+            continue;
+        }
+        if (++total > 500 * n + 1000) {
+            free(cs);
+            throw_new(cls_LinAlgError, "Eigenvalues did not converge");
+        }
+        /* Wilkinson shift from the trailing 2x2 block (real part if complex) */
+        {
+            double p = a[(hi - 1) * n + hi - 1], q = a[(hi - 1) * n + hi];
+            double r = a[hi * n + hi - 1], s = a[hi * n + hi];
+            double m = (p + s) / 2.0, disc = (p - s) * (p - s) / 4.0 + q * r;
+            if (disc >= 0) {
+                double sq = sqrt(disc), e1 = m + sq, e2 = m - sq;
+                mu = fabs(e1 - s) < fabs(e2 - s) ? e1 : e2;
+            } else mu = m;
+            if (++iter % 11 == 10) mu += fabs(a[hi * n + hi - 1]) * 0.75;
+        }
+        for (i = l; i <= hi; i++) a[i * n + i] -= mu;
+        for (k = l; k < hi; k++) {
+            double f = a[k * n + k], g = a[(k + 1) * n + k], r = n_hypot(f, g), c, s;
+            long j;
+            if (r == 0.0) { c = 1.0; s = 0.0; } else { c = f / r; s = g / r; }
+            cs[k] = c; sn[k] = s;
+            for (j = k; j <= hi; j++) {
+                double t1 = a[k * n + j], t2 = a[(k + 1) * n + j];
+                a[k * n + j] = c * t1 + s * t2;
+                a[(k + 1) * n + j] = -s * t1 + c * t2;
+            }
+        }
+        for (k = l; k < hi; k++) {
+            double c = cs[k], s = sn[k];
+            long top = k + 2 < hi ? k + 2 : hi, r2;
+            for (r2 = l; r2 <= top; r2++) {
+                double t1 = a[r2 * n + k], t2 = a[r2 * n + k + 1];
+                a[r2 * n + k] = c * t1 + s * t2;
+                a[r2 * n + k + 1] = -s * t1 + c * t2;
+            }
+        }
+        for (i = l; i <= hi; i++) a[i * n + i] += mu;
+    }
+    free(cs);
+}
+BI(la_eigvals)
+{
+    long n, i;
+    Nd *a, *w;
+    double *wi;
+    need(x, 1, 1, "eigvals");
+    a = la_sq(A(0), &n);
+    w = vec_new(n);
+    wi = (double *)xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+    if (n > 0) qr_eigs(a->dv, n, w->dv, wi);
+    for (i = 0; i < n; i++)
+        if (wi[i] != 0.0) {
+            free(wi);
+            throw_new(cls_NotImplementedError, "eigvals: complex eigenvalues are not supported");
+        }
+    free(wi);
+    /* ascending order is not guaranteed by LAPACK; keep QR deflation order reversed
+       so that a triangular matrix returns its diagonal in order */
+    for (i = 0; i < n / 2; i++) { double t = w->dv[i]; w->dv[i] = w->dv[n - 1 - i]; w->dv[n - 1 - i] = t; }
+    return ndv(w);
+}
+/* eig: eigenvalues by QR, eigenvectors by solving (A - w I) v = 0 with inverse iteration */
+BI(la_eig)
+{
+    long n, i, j, it, *piv;
+    Nd *a, *w, *v, *a0;
+    double *wi, *b, *lu;
+    Value tv[2];
+    need(x, 1, 1, "eig");
+    a = la_sq(A(0), &n);
+    a0 = nd_astype(a, ND_FLOAT);
+    w = vec_new(n);
+    v = mat_new(n, n);
+    wi = (double *)xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+    if (n > 0) qr_eigs(a->dv, n, w->dv, wi);
+    for (i = 0; i < n; i++)
+        if (wi[i] != 0.0) {
+            free(wi);
+            throw_new(cls_NotImplementedError, "eig: complex eigenvalues are not supported");
+        }
+    free(wi);
+    for (i = 0; i < n / 2; i++) { double t = w->dv[i]; w->dv[i] = w->dv[n - 1 - i]; w->dv[n - 1 - i] = t; }
+    lu = (double *)xmalloc(sizeof(double) * (size_t)(n * n + n + 1));
+    b = lu + n * n;
+    piv = (long *)xmalloc(sizeof(long) * (size_t)(n > 0 ? n : 1));
+    for (j = 0; j < n; j++) {
+        double nrm = 0.0, shift = w->dv[j];
+        double scale = 0.0;
+        for (i = 0; i < n * n; i++) if (fabs(a0->dv[i]) > scale) scale = fabs(a0->dv[i]);
+        if (scale == 0.0) scale = 1.0;
+        for (i = 0; i < n * n; i++) lu[i] = a0->dv[i];
+        for (i = 0; i < n; i++) lu[i * n + i] -= shift + scale * 1e-14;
+        lu_dec(lu, n, piv);
+        for (i = 0; i < n; i++) if (lu[i * n + i] == 0.0) lu[i * n + i] = scale * 1e-300;
+        for (i = 0; i < n; i++) b[i] = 1.0 / sqrt((double)n) + 0.01 * (double)i;
+        for (it = 0; it < 4; it++) {
+            nrm = 0.0;
+            lu_solve(lu, n, piv, b, 1);
+            for (i = 0; i < n; i++) nrm += b[i] * b[i];
+            nrm = sqrt(nrm);
+            if (nrm == 0.0 || nrm != nrm) break;
+            for (i = 0; i < n; i++) b[i] /= nrm;
+        }
+        for (i = 0; i < n; i++) v->dv[i * n + j] = b[i];
+    }
+    fix_vec_signs(v->dv, n);
+    free(lu); free(piv);
+    tv[0] = ndv(w); tv[1] = ndv(v);
+    return mktuple_from(tv, 2);
+}
+
+/* one-sided Jacobi SVD of an m x n matrix with m >= n.
+   u: m x n (overwritten with left vectors scaled), v: n x n, s: n singular values */
+static void svd_jacobi(double *u, long m, long n, double *s, double *v)
+{
+    long i, p, q, sweep;
+    for (i = 0; i < n * n; i++) v[i] = 0.0;
+    for (i = 0; i < n; i++) v[i * n + i] = 1.0;
+    for (sweep = 0; sweep < 60; sweep++) {
+        int rotated = 0;
+        for (p = 0; p < n - 1; p++)
+            for (q = p + 1; q < n; q++) {
+                double al = 0.0, be = 0.0, ga = 0.0, zeta, t, c, sn;
+                for (i = 0; i < m; i++) {
+                    al += u[i * n + p] * u[i * n + p];
+                    be += u[i * n + q] * u[i * n + q];
+                    ga += u[i * n + p] * u[i * n + q];
+                }
+                if (ga == 0.0 || fabs(ga) <= 1e-15 * sqrt(al * be)) continue;
+                rotated = 1;
+                zeta = (be - al) / (2.0 * ga);
+                t = (zeta >= 0 ? 1.0 : -1.0) / (fabs(zeta) + sqrt(1.0 + zeta * zeta));
+                c = 1.0 / sqrt(1.0 + t * t);
+                sn = c * t;
+                for (i = 0; i < m; i++) {
+                    double up = u[i * n + p], uq = u[i * n + q];
+                    u[i * n + p] = c * up - sn * uq;
+                    u[i * n + q] = sn * up + c * uq;
+                }
+                for (i = 0; i < n; i++) {
+                    double vp = v[i * n + p], vq = v[i * n + q];
+                    v[i * n + p] = c * vp - sn * vq;
+                    v[i * n + q] = sn * vp + c * vq;
+                }
+            }
+        if (!rotated) break;
+    }
+    for (q = 0; q < n; q++) {
+        double nr = 0.0;
+        for (i = 0; i < m; i++) nr += u[i * n + q] * u[i * n + q];
+        s[q] = sqrt(nr);
+    }
+    /* sort descending */
+    for (p = 0; p < n - 1; p++) {
+        long mi = p;
+        for (q = p + 1; q < n; q++) if (s[q] > s[mi]) mi = q;
+        if (mi != p) {
+            double t = s[p]; s[p] = s[mi]; s[mi] = t;
+            for (i = 0; i < m; i++) { t = u[i * n + p]; u[i * n + p] = u[i * n + mi]; u[i * n + mi] = t; }
+            for (i = 0; i < n; i++) { t = v[i * n + p]; v[i * n + p] = v[i * n + mi]; v[i * n + mi] = t; }
+        }
+    }
+    for (q = 0; q < n; q++)
+        if (s[q] > 0.0) for (i = 0; i < m; i++) u[i * n + q] /= s[q];
+}
+/* fill the columns of q (m x nc, row-major) flagged invalid so that all columns are orthonormal */
+static void orth_complete(double *q, long m, long nc, const char *valid)
+{
+    long j, c, i, k;
+    double *w = (double *)xmalloc(sizeof(double) * (size_t)(m > 0 ? m : 1));
+    char *ok = (char *)xmalloc((size_t)(nc > 0 ? nc : 1));
+    for (j = 0; j < nc; j++) ok[j] = valid[j];
+    for (j = 0; j < nc; j++) {
+        double best = -1.0;
+        long bc = 0;
+        if (ok[j]) continue;
+        for (c = 0; c < m; c++) {
+            double nr;
+            for (i = 0; i < m; i++) w[i] = i == c ? 1.0 : 0.0;
+            for (k = 0; k < nc; k++) {
+                double d = 0.0;
+                if (!ok[k]) continue;
+                for (i = 0; i < m; i++) d += w[i] * q[i * nc + k];
+                for (i = 0; i < m; i++) w[i] -= d * q[i * nc + k];
+            }
+            nr = 0.0;
+            for (i = 0; i < m; i++) nr += w[i] * w[i];
+            if (nr > best) { best = nr; bc = c; }
+        }
+        for (i = 0; i < m; i++) w[i] = i == bc ? 1.0 : 0.0;
+        for (c = 0; c < 2; c++)
+            for (k = 0; k < nc; k++) {
+                double d = 0.0;
+                if (!ok[k]) continue;
+                for (i = 0; i < m; i++) d += w[i] * q[i * nc + k];
+                for (i = 0; i < m; i++) w[i] -= d * q[i * nc + k];
+            }
+        best = 0.0;
+        for (i = 0; i < m; i++) best += w[i] * w[i];
+        best = sqrt(best);
+        for (i = 0; i < m; i++) q[i * nc + j] = best > 0 ? w[i] / best : 0.0;
+        ok[j] = 1;
+    }
+    free(w); free(ok);
+}
+/* full SVD driver: returns u (m x r), s (r), vt (r x n), r = min(m, n) */
+static void svd_thin(Nd *a, long m, long n, double **pu, double **ps, double **pvt)
+{
+    long r = m < n ? m : n, i, j;
+    double *u, *s, *vt, *work, *v;
+    char *valid;
+    u = (double *)xmalloc(sizeof(double) * (size_t)(m * r + 1));
+    s = (double *)xmalloc(sizeof(double) * (size_t)(r + 1));
+    vt = (double *)xmalloc(sizeof(double) * (size_t)(r * n + 1));
+    valid = (char *)xmalloc((size_t)(r + 1));
+    memset(valid, 0, (size_t)(r + 1));
+    if (m >= n) {
+        v = (double *)xmalloc(sizeof(double) * (size_t)(n * n + 1));
+        memcpy(u, a->dv, sizeof(double) * (size_t)(m * n));
+        svd_jacobi(u, m, n, s, v);
+        for (i = 0; i < n; i++) for (j = 0; j < n; j++) vt[i * n + j] = v[j * n + i];
+        free(v);
+        for (j = 0; j < r; j++) valid[j] = s[j] > 0.0;
+        orth_complete(u, m, r, valid);
+    } else {
+        /* A^T = U' S V'^T  =>  A = V' S U'^T */
+        work = (double *)xmalloc(sizeof(double) * (size_t)(n * m + 1));
+        v = (double *)xmalloc(sizeof(double) * (size_t)(m * m + 1));
+        for (i = 0; i < m; i++) for (j = 0; j < n; j++) work[j * m + i] = a->dv[i * n + j];
+        svd_jacobi(work, n, m, s, v);
+        for (i = 0; i < m; i++) for (j = 0; j < m; j++) u[i * m + j] = v[i * m + j];
+        for (i = 0; i < m; i++) for (j = 0; j < n; j++) vt[i * n + j] = work[j * m + i];
+        /* vt is m x n; complete invalid rows through the transposed view */
+        for (j = 0; j < r; j++) valid[j] = s[j] > 0.0;
+        {
+            double *tq = (double *)xmalloc(sizeof(double) * (size_t)(n * m + 1));
+            for (i = 0; i < m; i++) for (j = 0; j < n; j++) tq[j * m + i] = vt[i * n + j];
+            orth_complete(tq, n, m, valid);
+            for (i = 0; i < m; i++) for (j = 0; j < n; j++) vt[i * n + j] = tq[j * m + i];
+            free(tq);
+        }
+        free(work); free(v);
+    }
+    free(valid);
+    *pu = u; *ps = s; *pvt = vt;
+}
+BI(la_svd)
+{
+    long m, n, r, i, j;
+    Nd *a, *S;
+    double *u, *s, *vt;
+    int full = 1, cuv = 1;
+    Value fv = np_arg(x, 1, "full_matrices"), cv = np_arg(x, 2, "compute_uv");
+    Value tv[3];
+    need(x, 1, 4, "svd");
+    if (np_has(fv)) full = py_truthy(fv);
+    if (np_has(cv)) cuv = py_truthy(cv);
+    a = la_mat(A(0), &m, &n);
+    r = m < n ? m : n;
+    svd_thin(a, m, n, &u, &s, &vt);
+    S = vec_new(r);
+    for (i = 0; i < r; i++) S->dv[i] = s[i];
+    if (!cuv) { free(u); free(s); free(vt); return ndv(S); }
+    {
+        long uc = full ? m : r, vr = full ? n : r;
+        Nd *U = mat_new(m, uc), *V = mat_new(vr, n);
+        char *valid;
+        double *tmp;
+        if (uc > r) {
+            tmp = (double *)xmalloc(sizeof(double) * (size_t)(m * uc + 1));
+            valid = (char *)xmalloc((size_t)uc + 1);
+            for (j = 0; j < uc; j++) valid[j] = j < r;
+            for (i = 0; i < m; i++) for (j = 0; j < uc; j++) tmp[i * uc + j] = j < r ? u[i * r + j] : 0.0;
+            orth_complete(tmp, m, uc, valid);
+            memcpy(U->dv, tmp, sizeof(double) * (size_t)(m * uc));
+            free(tmp); free(valid);
+        } else memcpy(U->dv, u, sizeof(double) * (size_t)(m * r));
+        if (vr > r) {
+            tmp = (double *)xmalloc(sizeof(double) * (size_t)(n * vr + 1));
+            valid = (char *)xmalloc((size_t)vr + 1);
+            for (j = 0; j < vr; j++) valid[j] = j < r;
+            for (i = 0; i < n; i++) for (j = 0; j < vr; j++) tmp[i * vr + j] = j < r ? vt[j * n + i] : 0.0;
+            orth_complete(tmp, n, vr, valid);
+            for (i = 0; i < n; i++) for (j = 0; j < vr; j++) V->dv[j * n + i] = tmp[i * vr + j];
+            free(tmp); free(valid);
+        } else memcpy(V->dv, vt, sizeof(double) * (size_t)(r * n));
+        tv[0] = ndv(U); tv[1] = ndv(S); tv[2] = ndv(V);
+    }
+    free(u); free(s); free(vt);
+    return mktuple_from(tv, 3);
+}
+static double la_eps(void)
+{
+    return DBL_EPSILON;
+}
+BI(la_matrix_rank)
+{
+    long m, n, r, i, rank = 0;
+    Nd *a;
+    double *u, *s, *vt, tol, smax = 0.0;
+    Value tv = np_arg(x, 1, "tol");
+    need(x, 1, 3, "matrix_rank");
+    a = np_f(A(0));
+    if (a->nd < 2) {
+        for (i = 0; i < a->size; i++) if (a->dv[i] != 0.0) return mkint(1);
+        return mkint(0);
+    }
+    if (a->nd > 2) throw_new(cls_NotImplementedError, "linalg: stacked matrices are not supported");
+    m = a->shape[0]; n = a->shape[1];
+    r = m < n ? m : n;
+    if (r == 0) return mkint(0);
+    svd_thin(a, m, n, &u, &s, &vt);
+    for (i = 0; i < r; i++) if (s[i] > smax) smax = s[i];
+    tol = np_has(tv) ? to_dbl(tv) : smax * (double)(m > n ? m : n) * la_eps();
+    for (i = 0; i < r; i++) if (s[i] > tol) rank++;
+    free(u); free(s); free(vt);
+    return mkint(rank);
+}
+/* least squares x = pinv(a) b with SVD cutoff; returns rank, fills singular values */
+static void lstsq_core(Nd *a, long m, long n, const double *b, long k, double rcond,
+                       double *xo, long *rankp, double *sv)
+{
+    long r = m < n ? m : n, i, j, c, rank = 0;
+    double *u, *s, *vt, cut, smax = 0.0;
+    svd_thin(a, m, n, &u, &s, &vt);
+    for (i = 0; i < r; i++) if (s[i] > smax) smax = s[i];
+    cut = rcond * smax;
+    for (i = 0; i < n * k; i++) xo[i] = 0.0;
+    for (i = 0; i < r; i++) {
+        if (sv) sv[i] = s[i];
+        if (s[i] > cut) {
+            rank++;
+            for (c = 0; c < k; c++) {
+                double d = 0.0;
+                for (j = 0; j < m; j++) d += u[j * r + i] * b[j * k + c];
+                d /= s[i];
+                for (j = 0; j < n; j++) xo[j * k + c] += d * vt[i * n + j];
+            }
+        }
+    }
+    *rankp = rank;
+    free(u); free(s); free(vt);
+}
+BI(la_lstsq)
+{
+    long m, n, k, rank, i, j, c, r;
+    Nd *a, *b, *xr, *res, *sv;
+    double rc, *bb;
+    Value rcv = np_arg(x, 2, "rcond"), tv[4];
+    need(x, 2, 3, "lstsq");
+    a = la_mat(A(0), &m, &n);
+    b = np_f(A(1));
+    if (b->nd < 1 || b->nd > 2 || b->shape[0] != m)
+        throw_new(cls_LinAlgError, "Incompatible dimensions");
+    k = b->nd == 1 ? 1 : b->shape[1];
+    r = m < n ? m : n;
+    rc = np_has(rcv) && to_dbl(rcv) >= 0 ? to_dbl(rcv) : la_eps() * (double)(m > n ? m : n);
+    xr = b->nd == 1 ? vec_new(n) : mat_new(n, k);
+    sv = vec_new(r);
+    bb = b->dv;
+    lstsq_core(a, m, n, bb, k, rc, xr->dv, &rank, sv->dv);
+    if (rank == n && m > n) {
+        res = vec_new(k);
+        for (c = 0; c < k; c++) {
+            double ss = 0.0;
+            for (i = 0; i < m; i++) {
+                double d = bb[i * k + c];
+                for (j = 0; j < n; j++) d -= a->dv[i * n + j] * xr->dv[j * k + c];
+                ss += d * d;
+            }
+            res->dv[c] = ss;
+        }
+    } else res = vec_new(0);
+    tv[0] = ndv(xr); tv[1] = ndv(res); tv[2] = mkint(rank); tv[3] = ndv(sv);
+    return mktuple_from(tv, 4);
+}
+BI(la_pinv)
+{
+    long m, n, i, j, k, r;
+    Nd *a, *res;
+    double *u, *s, *vt, cut, smax = 0.0, rc;
+    Value rcv = np_arg(x, 1, "rcond");
+    need(x, 1, 2, "pinv");
+    a = la_mat(A(0), &m, &n);
+    r = m < n ? m : n;
+    res = mat_new(n, m);
+    for (i = 0; i < n * m; i++) res->dv[i] = 0.0;
+    if (r == 0) return ndv(res);
+    svd_thin(a, m, n, &u, &s, &vt);
+    for (i = 0; i < r; i++) if (s[i] > smax) smax = s[i];
+    rc = np_has(rcv) ? to_dbl(rcv) : la_eps() * (double)(m > n ? m : n);
+    cut = rc * smax;
+    for (k = 0; k < r; k++)
+        if (s[k] > cut)
+            for (i = 0; i < n; i++)
+                for (j = 0; j < m; j++) res->dv[i * m + j] += vt[k * n + i] * u[j * r + k] / s[k];
+    free(u); free(s); free(vt);
+    return ndv(res);
+}
+/* Householder QR (LAPACK sign conventions) */
+BI(la_qr)
+{
+    long m, n, K, i, j, k, qc;
+    Nd *a, *Q, *R;
+    double *vs, *tau;
+    const char *mode = "reduced";
+    Value mv = np_arg(x, 1, "mode"), tv[2];
+    need(x, 1, 2, "qr");
+    if (mv.t == T_STR) mode = AS_STR(mv)->s;
+    a = la_mat(A(0), &m, &n);
+    K = m < n ? m : n;
+    vs = (double *)xmalloc(sizeof(double) * (size_t)(m * (K > 0 ? K : 1) + 1));
+    tau = (double *)xmalloc(sizeof(double) * (size_t)(K + 1));
+    for (k = 0; k < K; k++) {
+        double alpha = a->dv[k * n + k], xn = 0.0, beta;
+        for (i = k + 1; i < m; i++) xn += a->dv[i * n + k] * a->dv[i * n + k];
+        xn = sqrt(xn);
+        for (i = 0; i < m; i++) vs[i * K + k] = 0.0;
+        if (xn == 0.0) { tau[k] = 0.0; vs[k * K + k] = 1.0; continue; }
+        beta = -(alpha >= 0 ? 1.0 : -1.0) * n_hypot(alpha, xn);
+        tau[k] = (beta - alpha) / beta;
+        vs[k * K + k] = 1.0;
+        for (i = k + 1; i < m; i++) vs[i * K + k] = a->dv[i * n + k] / (alpha - beta);
+        a->dv[k * n + k] = beta;
+        for (i = k + 1; i < m; i++) a->dv[i * n + k] = 0.0;
+        for (j = k + 1; j < n; j++) {
+            double d = 0.0;
+            for (i = k; i < m; i++) d += vs[i * K + k] * a->dv[i * n + j];
+            d *= tau[k];
+            for (i = k; i < m; i++) a->dv[i * n + j] -= d * vs[i * K + k];
+        }
+    }
+    if (strcmp(mode, "r") == 0) {
+        R = mat_new(K, n);
+        for (i = 0; i < K; i++) for (j = 0; j < n; j++) R->dv[i * n + j] = j >= i ? a->dv[i * n + j] : 0.0;
+        free(vs); free(tau);
+        return ndv(R);
+    }
+    qc = strcmp(mode, "complete") == 0 ? m : K;
+    Q = mat_new(m, m);
+    for (i = 0; i < m * m; i++) Q->dv[i] = 0.0;
+    for (i = 0; i < m; i++) Q->dv[i * m + i] = 1.0;
+    for (k = K - 1; k >= 0; k--) {
+        if (tau[k] == 0.0) continue;
+        for (j = 0; j < m; j++) {
+            double d = 0.0;
+            for (i = k; i < m; i++) d += vs[i * K + k] * Q->dv[i * m + j];
+            d *= tau[k];
+            for (i = k; i < m; i++) Q->dv[i * m + j] -= d * vs[i * K + k];
+        }
+    }
+    {
+        Nd *Qo = mat_new(m, qc);
+        long rr = qc;
+        for (i = 0; i < m; i++) for (j = 0; j < qc; j++) Qo->dv[i * qc + j] = Q->dv[i * m + j];
+        R = mat_new(rr, n);
+        for (i = 0; i < rr; i++) for (j = 0; j < n; j++) R->dv[i * n + j] = (j >= i && i < m) ? a->dv[i * n + j] : 0.0;
+        tv[0] = ndv(Qo); tv[1] = ndv(R);
+    }
+    free(vs); free(tau);
+    return mktuple_from(tv, 2);
+}
+/* ---- norms ------------------------------------------------------------- */
+static double vec_norm(const double *p, long n, long stride, double ord, int ordnone)
+{
+    long i;
+    double s = 0.0;
+    if (ordnone || ord == 2.0) {
+        double scale = 0.0;
+        for (i = 0; i < n; i++) if (fabs(p[i * stride]) > scale) scale = fabs(p[i * stride]);
+        if (scale == 0.0 || scale != scale || scale - scale != 0.0) {
+            for (i = 0; i < n; i++) s += p[i * stride] * p[i * stride];
+            return sqrt(s);
+        }
+        for (i = 0; i < n; i++) s += p[i * stride] * p[i * stride];
+        return sqrt(s);
+    }
+    if (ord == HUGE_VAL) {
+        for (i = 0; i < n; i++) if (fabs(p[i * stride]) > s || p[i * stride] != p[i * stride]) s = fabs(p[i * stride]);
+        return s;
+    }
+    if (ord == -HUGE_VAL) {
+        s = HUGE_VAL;
+        for (i = 0; i < n; i++) if (fabs(p[i * stride]) < s) s = fabs(p[i * stride]);
+        return s;
+    }
+    if (ord == 0.0) {
+        for (i = 0; i < n; i++) if (p[i * stride] != 0.0) s += 1.0;
+        return s;
+    }
+    if (ord == 1.0) {
+        for (i = 0; i < n; i++) s += fabs(p[i * stride]);
+        return s;
+    }
+    for (i = 0; i < n; i++) s += pow(fabs(p[i * stride]), ord);
+    return pow(s, 1.0 / ord);
+}
+BI(la_norm)
+{
+    Nd *a;
+    Value ov = np_arg(x, 1, "ord"), av = np_arg(x, 2, "axis"), kv = np_arg(x, 3, "keepdims");
+    double ord = 2.0;
+    int ordnone = !np_has(ov), fro = 0, nuc = 0, keep = 0;
+    need(x, 1, 4, "norm");
+    a = np_f(A(0));
+    if (np_has(kv)) keep = py_truthy(kv);
+    if (np_has(ov)) {
+        if (ov.t == T_STR) {
+            if (strcmp(AS_STR(ov)->s, "fro") == 0) fro = 1;
+            else if (strcmp(AS_STR(ov)->s, "nuc") == 0) nuc = 1;
+            else throw_new(cls_ValueError, "Invalid norm order for matrices.");
+        } else ord = to_dbl(ov);
+    }
+    if (np_has(av)) {
+        long ax;
+        if (av.t == T_TUPLE) throw_new(cls_NotImplementedError, "norm: matrix norms over an axis pair are not supported");
+        ax = axis_norm(need_long(av, "axis"), a->nd);
+        {
+            long outer = 1, len = a->shape[ax], inner = 1, o, i, sh[ND_MAXD];
+            int k, rn = 0;
+            Nd *r;
+            for (k = 0; k < ax; k++) outer *= a->shape[k];
+            for (k = ax + 1; k < a->nd; k++) inner *= a->shape[k];
+            for (k = 0; k < a->nd; k++) {
+                if (k == ax) { if (keep) sh[rn++] = 1; }
+                else sh[rn++] = a->shape[k];
+            }
+            r = nd_new(ND_FLOAT, rn, sh);
+            for (o = 0; o < outer; o++)
+                for (i = 0; i < inner; i++)
+                    r->dv[o * inner + i] = vec_norm(a->dv + o * len * inner + i, len, inner, ord, ordnone || fro);
+            return nd_ret(r);
+        }
+    }
+    if (a->nd <= 1 || (ordnone && !nuc) || fro) {
+        double v;
+        if (a->nd > 2 && !ordnone && !fro) throw_new(cls_ValueError, "Improper number of dimensions to norm.");
+        v = vec_norm(a->dv, a->size, 1, ord, ordnone || fro);
+        if (keep && a->nd > 0) {
+            Nd *r;
+            long sh[ND_MAXD];
+            int k;
+            for (k = 0; k < a->nd; k++) sh[k] = 1;
+            r = nd_new(ND_FLOAT, a->nd, sh);
+            r->dv[0] = v;
+            return ndv(r);
+        }
+        return mkfloat(v);
+    }
+    if (a->nd != 2) throw_new(cls_ValueError, "Improper number of dimensions to norm.");
+    {
+        long m = a->shape[0], n = a->shape[1], i, j;
+        double v = 0.0;
+        if (nuc || ord == 2.0 || ord == -2.0) {
+            double *u, *s, *vt;
+            long r = m < n ? m : n;
+            if (r == 0) return mkfloat(0.0);
+            svd_thin(a, m, n, &u, &s, &vt);
+            if (nuc) for (i = 0; i < r; i++) v += s[i];
+            else v = ord > 0 ? s[0] : s[r - 1];
+            free(u); free(s); free(vt);
+        } else if (ord == 1.0 || ord == -1.0) {
+            v = ord > 0 ? 0.0 : HUGE_VAL;
+            for (j = 0; j < n; j++) {
+                double cs = 0.0;
+                for (i = 0; i < m; i++) cs += fabs(a->dv[i * n + j]);
+                if (ord > 0 ? cs > v : cs < v) v = cs;
+            }
+        } else if (ord == HUGE_VAL || ord == -HUGE_VAL) {
+            v = ord > 0 ? 0.0 : HUGE_VAL;
+            for (i = 0; i < m; i++) {
+                double rs = 0.0;
+                for (j = 0; j < n; j++) rs += fabs(a->dv[i * n + j]);
+                if (ord > 0 ? rs > v : rs < v) v = rs;
+            }
+        } else throw_new(cls_ValueError, "Invalid norm order for matrices.");
+        if (keep) {
+            Nd *r = mat_new(1, 1);
+            r->dv[0] = v;
+            return ndv(r);
+        }
+        return mkfloat(v);
+    }
+}
+BI(la_cond)
+{
+    long m, n, r, i;
+    Nd *a;
+    double *u, *s, *vt, v;
+    need(x, 1, 2, "cond");
+    if (x->n > 1 && np_has(A(1))) {
+        Args y;
+        Value av[2], c1, c2;
+        Value inv;
+        y.n = 1; y.a = av; y.nk = 0; y.kw = NULL;
+        av[0] = A(0);
+        inv = la_inv(&y);
+        y.n = 2; av[0] = A(0); av[1] = A(1);
+        c1 = la_norm(&y);
+        av[0] = inv;
+        c2 = la_norm(&y);
+        return mkfloat(to_dbl(c1) * to_dbl(c2));
+    }
+    a = la_mat(A(0), &m, &n);
+    r = m < n ? m : n;
+    svd_thin(a, m, n, &u, &s, &vt);
+    v = s[r - 1] == 0.0 ? HUGE_VAL : s[0] / s[r - 1];
+    (void)i;
+    free(u); free(s); free(vt);
+    return mkfloat(v);
+}
+BI(la_matrix_power)
+{
+    long n, p, i;
+    Nd *a, *r, *base;
+    Value pv, res;
+    need(x, 2, 2, "matrix_power");
+    a = la_sq(A(0), &n);
+    p = need_long(A(1), "n");
+    if (p < 0) {
+        Args y;
+        Value av[1];
+        y.n = 1; y.a = av; y.nk = 0; y.kw = NULL;
+        av[0] = A(0);
+        pv = la_inv(&y);
+        a = AS_ND(pv);
+        p = -p;
+    }
+    r = mat_new(n, n);
+    for (i = 0; i < n * n; i++) r->dv[i] = 0.0;
+    for (i = 0; i < n; i++) r->dv[i * n + i] = 1.0;
+    base = a;
+    while (p > 0) {
+        if (p & 1) { res = nd_matmul(r, base, 0); r = AS_ND(res); }
+        p >>= 1;
+        if (p) { res = nd_matmul(base, base, 0); base = AS_ND(res); }
+    }
+    return ndv(r);
+}
+static void la_init(Module *np)
+{
+    Module *m = new_module("numpy.linalg");
+    {
+        Class **b = (Class **)xmalloc(sizeof(Class *));
+        b[0] = cls_ValueError;
+        cls_LinAlgError = make_class(intern_c("LinAlgError"), b, 1, intern_c("numpy.linalg"));
+    }
+    mod_def(m, "det", la_det); mod_def(m, "slogdet", la_slogdet); mod_def(m, "inv", la_inv);
+    mod_def(m, "solve", la_solve); mod_def(m, "cholesky", la_cholesky);
+    mod_def(m, "eigvalsh", la_eigvalsh); mod_def(m, "eigh", la_eigh);
+    mod_def(m, "eigvals", la_eigvals); mod_def(m, "eig", la_eig);
+    mod_def(m, "svd", la_svd); mod_def(m, "matrix_rank", la_matrix_rank);
+    mod_def(m, "lstsq", la_lstsq); mod_def(m, "pinv", la_pinv); mod_def(m, "qr", la_qr);
+    mod_def(m, "norm", la_norm); mod_def(m, "cond", la_cond);
+    mod_def(m, "matrix_power", la_matrix_power);
+    mod_val(m, "LinAlgError", mkobj(cls_LinAlgError, T_CLASS));
+    mod_val(np, "linalg", mkobj(m, T_MODULE));
+    mod_val(np, "LinAlgError", mkobj(cls_LinAlgError, T_CLASS));
+}
+/* ===== p7_np2.c ===== */
+/* =========================================================================
+   p7_np2.c   more numpy: elementwise helpers, shape functions, statistics,
+              polynomials, histogram, ... (all on contiguous copies)
+   ========================================================================= */
+static double g_rtol, g_atol;
+static int g_eqnan;
+typedef double (*DF2)(double, double);
+
+/* elementwise binary op with broadcasting; result dtype outdt */
+static Value nd_map2(Nd *a, Nd *b, DF2 f, int outdt)
+{
+    long rs[ND_MAXD], sa[ND_MAXD], sb[ND_MAXD], idx[ND_MAXD], i, oa = 0, ob = 0;
+    int rnd, k;
+    Nd *r;
+    rnd = nd_bshape(a, b, rs);
+    nd_bstrides(a, rnd, sa);
+    nd_bstrides(b, rnd, sb);
+    r = nd_new(outdt, rnd, rs);
+    for (k = 0; k < ND_MAXD; k++) idx[k] = 0;
+    for (i = 0; i < r->size; i++) {
+        double v = f(nd_d(a, oa), nd_d(b, ob));
+        if (outdt == ND_FLOAT) r->dv[i] = v; else r->iv[i] = v != 0.0;
+        nd_odo(idx, rnd, rs, sa, sb, &oa, &ob);
+    }
+    return nd_ret(r);
+}
+static double f_atan2(double y, double x) { return atan2(y, x); }
+static double f_hypot(double a, double b) { return n_hypot(a, b); }
+static double f_fmax(double a, double b) { return a != a ? b : (b != b ? a : (a > b ? a : b)); }
+static double f_fmin(double a, double b) { return a != a ? b : (b != b ? a : (a < b ? a : b)); }
+static double f_copysign(double a, double b) { return b < 0 || (b == 0 && 1.0 / b < 0) ? -fabs(a) : fabs(a); }
+static double f_isclose(double a, double b)
+{
+    if (a != a || b != b) return g_eqnan && a != a && b != b;
+    if (a == b) return 1.0;
+    if (a - a != 0.0 || b - b != 0.0) return 0.0;
+    return fabs(a - b) <= g_atol + g_rtol * fabs(b);
+}
+static double f_land(double a, double b) { return a != 0.0 && b != 0.0; }
+static double f_lor(double a, double b) { return a != 0.0 || b != 0.0; }
+static double f_lxor(double a, double b) { return (a != 0.0) != (b != 0.0); }
+#define NDM2(fname, f, dt) \
+    BI(fname) { \
+        NdTmp ta_, tb_; \
+        if (x->n != 2) throw_new(cls_TypeError, "function takes exactly 2 arguments"); \
+        return nd_map2(nd_coerce(A(0), &ta_), nd_coerce(A(1), &tb_), f, dt); }
+NDM2(np_arctan2, f_atan2, ND_FLOAT)
+NDM2(np_hypot, f_hypot, ND_FLOAT)
+NDM2(np_copysign, f_copysign, ND_FLOAT)
+NDM2(np_logical_and, f_land, ND_BOOL)
+NDM2(np_logical_or, f_lor, ND_BOOL)
+NDM2(np_logical_xor, f_lxor, ND_BOOL)
+BI(np_fmax)
+{
+    NdTmp ta, tb;
+    Nd *a, *b;
+    need(x, 2, 2, "fmax");
+    a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
+    if (a->dt != ND_FLOAT && b->dt != ND_FLOAT) return nd_binary(OP_MAX, a, b);
+    return nd_map2(a, b, f_fmax, ND_FLOAT);
+}
+BI(np_fmin)
+{
+    NdTmp ta, tb;
+    Nd *a, *b;
+    need(x, 2, 2, "fmin");
+    a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
+    if (a->dt != ND_FLOAT && b->dt != ND_FLOAT) return nd_binary(OP_MIN, a, b);
+    return nd_map2(a, b, f_fmin, ND_FLOAT);
+}
+BI(np_isclose)
+{
+    NdTmp ta, tb;
+    Value rt = np_arg(x, 2, "rtol"), at = np_arg(x, 3, "atol"), en = np_arg(x, 4, "equal_nan");
+    need(x, 2, 5, "isclose");
+    g_rtol = np_has(rt) ? to_dbl(rt) : 1e-5;
+    g_atol = np_has(at) ? to_dbl(at) : 1e-8;
+    g_eqnan = np_has(en) && py_truthy(en);
+    return nd_map2(nd_coerce(A(0), &ta), nd_coerce(A(1), &tb), f_isclose, ND_BOOL);
+}
+BI(np_logical_not)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r;
+    long i;
+    r = nd_new(ND_BOOL, a->nd, a->shape);
+    for (i = 0; i < a->size; i++) r->iv[i] = a->dt == ND_FLOAT ? a->dv[i] == 0.0 : a->iv[i] == 0;
+    return nd_ret(r);
+}
+
+/* more unary functions via a double->double table */
+typedef double (*DF1)(double);
+static double d_exp2(double v) { return pow(2.0, v); }
+static double nd_em1(double v) { return n_expm1(v); }
+static double nd_l1p(double v) { return n_log1p(v); }
+static double d_cbrt(double v) { return n_cbrt(v); }
+static double d_asinh(double v) { return n_asinh(v); }
+static double d_acosh(double v) { return n_acosh(v); }
+static double d_atanh(double v) { return n_atanh(v); }
+static double d_deg2rad(double v) { return v * (3.14159265358979323846 / 180.0); }
+static double d_rad2deg(double v) { return v * (180.0 / 3.14159265358979323846); }
+static double d_recip(double v) { return 1.0 / v; }
+static double d_trunc(double v) { return n_trunc(v); }
+static double d_rint(double v) { return nd_rint(v); }
+static double d_sinc(double v)
+{
+    double t = 3.14159265358979323846 * v;
+    return v == 0.0 ? 1.0 : sin(t) / t;
+}
+static Value nd_map1(Nd *a, DF1 f)
+{
+    Nd *r = nd_new(ND_FLOAT, a->nd, a->shape);
+    long i;
+    for (i = 0; i < a->size; i++) r->dv[i] = f(nd_d(a, i));
+    return nd_ret(r);
+}
+#define NDD1(fname, f) BI(fname) { NdTmp t_; Nd *a_ = nd_arg0(x, &t_); return nd_map1(a_, f); }
+NDD1(np_exp2, d_exp2)
+NDD1(np_expm1, nd_em1)
+NDD1(np_log1p, nd_l1p)
+NDD1(np_cbrt, d_cbrt)
+NDD1(np_arcsinh, d_asinh)
+NDD1(np_arccosh, d_acosh)
+NDD1(np_arctanh, d_atanh)
+NDD1(np_deg2rad, d_deg2rad)
+NDD1(np_rad2deg, d_rad2deg)
+NDD1(np_reciprocal, d_recip)
+NDD1(np_trunc, d_trunc)
+NDD1(np_rint, d_rint)
+NDD1(np_sinc, d_sinc)
+
+BI(np_nan_to_num)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r;
+    Value nv = np_arg(x, 1, "nan"), pv = np_arg(x, 2, "posinf"), mv = np_arg(x, 3, "neginf");
+    double nanv = np_has(nv) ? to_dbl(nv) : 0.0;
+    double pinf = np_has(pv) ? to_dbl(pv) : DBL_MAX, minf = np_has(mv) ? to_dbl(mv) : -DBL_MAX;
+    long i;
+    r = nd_astype(a, a->dt);
+    if (r->dt == ND_FLOAT)
+        for (i = 0; i < r->size; i++) {
+            double d = r->dv[i];
+            if (d != d) r->dv[i] = nanv;
+            else if (d == HUGE_VAL) r->dv[i] = pinf;
+            else if (d == -HUGE_VAL) r->dv[i] = minf;
+        }
+    return nd_ret(r);
+}
+/* nan-aware reductions: flat or along one axis */
+static Nd *nan_fill(Nd *a, double fillv)
+{
+    Nd *r = nd_astype(a, ND_FLOAT);
+    long i;
+    for (i = 0; i < r->size; i++) if (r->dv[i] != r->dv[i]) r->dv[i] = fillv;
+    return r;
+}
+static Nd *nan_count(Nd *a)
+{
+    Nd *r = nd_new(ND_INT, a->nd, a->shape);
+    long i;
+    for (i = 0; i < a->size; i++) r->iv[i] = a->dt == ND_FLOAT ? a->dv[i] == a->dv[i] : 1;
+    return r;
+}
+BI(np_nansum)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    int axis = 0, has = get_axis(x, 1, a, &axis);
+    if (a->dt != ND_FLOAT) return nd_reduce(R_SUM, a, has, axis, 0);
+    return nd_reduce(R_SUM, nan_fill(a, 0.0), has, axis, 0);
+}
+BI(np_nanprod)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    int axis = 0, has = get_axis(x, 1, a, &axis);
+    if (a->dt != ND_FLOAT) return nd_reduce(R_PROD, a, has, axis, 0);
+    return nd_reduce(R_PROD, nan_fill(a, 1.0), has, axis, 0);
+}
+BI(np_nanmean)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *cnt;
+    int axis = 0, has = get_axis(x, 1, a, &axis);
+    Value s, c;
+    NdTmp t1, t2;
+    if (a->dt != ND_FLOAT) return nd_reduce(R_MEAN, a, has, axis, 0);
+    s = nd_reduce(R_SUM, nan_fill(a, 0.0), has, axis, 0);
+    cnt = nan_count(a);
+    c = nd_reduce(R_SUM, cnt, has, axis, 0);
+    return nd_binary(B_DIV, nd_coerce(s, &t1), nd_coerce(c, &t2));
+}
+static Value nan_var(Args *x, int issd)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *z, *cnt, *dev;
+    long ddof = ddof_arg(x), i, n = 0;
+    double mean = 0.0, ss = 0.0, v;
+    int axis = 0;
+    if (get_axis(x, 1, a, &axis))
+        throw_new(cls_NotImplementedError, "nanstd/nanvar: axis is not supported");
+    z = nan_fill(a, 0.0);
+    cnt = nan_count(a);
+    for (i = 0; i < z->size; i++) { mean += nd_d(z, i); n += cnt->iv[i]; }
+    if (n == 0) return mkfloat(HUGE_VAL - HUGE_VAL);
+    mean /= (double)n;
+    dev = nd_astype(a, ND_FLOAT);
+    for (i = 0; i < dev->size; i++) if (cnt->iv[i]) { double d = dev->dv[i] - mean; ss += d * d; }
+    v = ss / (double)(n - ddof > 0 ? n - ddof : 0);
+    return mkfloat(issd ? sqrt(v) : v);
+}
+BI(np_nanvar) { return nan_var(x, 0); }
+BI(np_nanstd) { return nan_var(x, 1); }
+BI(np_nanmax)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    int axis = 0, has = get_axis(x, 1, a, &axis);
+    if (a->dt != ND_FLOAT) return nd_reduce(R_MAX, a, has, axis, 0);
+    return nd_reduce(R_MAX, nan_fill(a, -HUGE_VAL), has, axis, 0);
+}
+BI(np_nanmin)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    int axis = 0, has = get_axis(x, 1, a, &axis);
+    if (a->dt != ND_FLOAT) return nd_reduce(R_MIN, a, has, axis, 0);
+    return nd_reduce(R_MIN, nan_fill(a, HUGE_VAL), has, axis, 0);
+}
+BI(np_nanargmax)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    int axis = 0, has = get_axis(x, 1, a, &axis);
+    return nd_reduce(R_ARGMAX, a->dt == ND_FLOAT ? nan_fill(a, -HUGE_VAL) : a, has, axis, 0);
+}
+BI(np_nanargmin)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    int axis = 0, has = get_axis(x, 1, a, &axis);
+    return nd_reduce(R_ARGMIN, a->dt == ND_FLOAT ? nan_fill(a, HUGE_VAL) : a, has, axis, 0);
+}
+BI(np_ptp)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    int axis = 0, has = get_axis(x, 1, a, &axis);
+    Value mx = nd_reduce(R_MAX, a, has, axis, 0), mn = nd_reduce(R_MIN, a, has, axis, 0);
+    NdTmp t1, t2;
+    return nd_binary(B_SUB, nd_coerce(mx, &t1), nd_coerce(mn, &t2));
+}
+BI(np_average)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    Value wv = np_arg(x, 2, "weights");
+    int axis = 0, has = get_axis(x, 1, a, &axis);
+    if (!np_has(wv)) return nd_reduce(R_MEAN, a, has, axis, 0);
+    {
+        NdTmp tw, t1, t2, t3;
+        Nd *w = nd_coerce(wv, &tw);
+        Value prod = nd_binary(B_MUL, a, w), num, den;
+        if (w->nd != a->nd && has) throw_new(cls_NotImplementedError, "average: weights must match the array shape");
+        num = nd_reduce(R_SUM, nd_coerce(prod, &t1), has, axis, 0);
+        if (w->nd == a->nd || !has) den = nd_reduce(R_SUM, w, has, axis, 0);
+        else den = nd_reduce(R_SUM, w, 0, 0, 0);
+        return nd_binary(B_DIV, nd_coerce(num, &t2), nd_coerce(den, &t3));
+    }
+}
+
+/* ---- axis helpers -------------------------------------------------------- */
+static void axis_split(const Nd *a, int ax, long *outer, long *len, long *inner)
+{
+    int k;
+    *outer = 1; *inner = 1; *len = a->shape[ax];
+    for (k = 0; k < ax; k++) *outer *= a->shape[k];
+    for (k = ax + 1; k < a->nd; k++) *inner *= a->shape[k];
+}
+BI(np_diff)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *cur;
+    Value nv = np_arg(x, 1, "n"), av = np_arg(x, 2, "axis");
+    long n = np_has(nv) ? need_long(nv, "n") : 1, step;
+    int ax;
+    if (a->nd == 0) throw_new(cls_ValueError, "diff requires input that is at least one dimensional");
+    ax = np_has(av) ? axis_norm(need_long(av, "axis"), a->nd) : a->nd - 1;
+    if (n < 0) throw_new(cls_ValueError, "order must be non-negative but got %ld", n);
+    cur = nd_astype(a, a->dt);
+    for (step = 0; step < n; step++) {
+        long outer, len, inner, o, j, i, sh[ND_MAXD];
+        Nd *r;
+        int k;
+        axis_split(cur, ax, &outer, &len, &inner);
+        if (len == 0) break;
+        for (k = 0; k < cur->nd; k++) sh[k] = cur->shape[k];
+        sh[ax] = len - 1;
+        r = nd_new(cur->dt, cur->nd, sh);
+        for (o = 0; o < outer; o++)
+            for (j = 0; j + 1 < len; j++)
+                for (i = 0; i < inner; i++) {
+                    long p = (o * len + j) * inner + i, q = p + inner, d = (o * (len - 1) + j) * inner + i;
+                    if (cur->dt == ND_FLOAT) r->dv[d] = cur->dv[q] - cur->dv[p];
+                    else if (cur->dt == ND_BOOL) r->iv[d] = cur->iv[q] != cur->iv[p];
+                    else r->iv[d] = cur->iv[q] - cur->iv[p];
+                }
+        cur = r;
+    }
+    return ndv(cur);
+}
+BI(np_ediff1d)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *f;
+    long n = a->size;
+    Args y;
+    Value av[1];
+    f = nd_reshaped(a, 1, &n);
+    y.n = 1; y.a = av; y.nk = 0; y.kw = NULL;
+    av[0] = ndv(f);
+    return np_diff(&y);
+}
+BI(np_gradient)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *f;
+    int naxes, ax, k, single = 0;
+    Value axv = kwget(x, "axis"), tv[ND_MAXD];
+    int axes[ND_MAXD];
+    int nvar = x->n - 1;
+    if (a->nd == 0) throw_new(cls_ValueError, "gradient: need at least 1-d input");
+    f = nd_astype(a, ND_FLOAT);
+    if (np_has(axv)) {
+        if (axv.t == T_TUPLE || axv.t == T_LIST) {
+            List *l = AS_LIST(axv);
+            naxes = (int)l->n;
+            for (k = 0; k < naxes; k++) axes[k] = axis_norm(need_long(l->a[k], "axis"), a->nd);
+        } else { naxes = 1; axes[0] = axis_norm(need_long(axv, "axis"), a->nd); single = 1; }
+    } else {
+        naxes = a->nd;
+        for (k = 0; k < naxes; k++) axes[k] = k;
+    }
+    if (nvar != 0 && nvar != 1 && nvar != naxes)
+        throw_new(cls_TypeError, "invalid number of arguments");
+    for (k = 0; k < naxes; k++) {
+        long outer, len, inner, o, j, i;
+        Nd *r, *xs = NULL;
+        double h = 1.0;
+        Value sp = nvar == 0 ? UNSET_V : (nvar == 1 ? A(1) : A(1 + k));
+        ax = axes[k];
+        axis_split(f, ax, &outer, &len, &inner);
+        if (len < 2) throw_new(cls_ValueError, "Shape of array too small to calculate a numerical gradient, at least (edge_order + 1) elements are required.");
+        if (np_has(sp)) {
+            if (sp.t == T_INT || sp.t == T_FLOAT || sp.t == T_BOOL) h = to_dbl(sp);
+            else {
+                xs = np_f(sp);
+                if (xs->size != len)
+                    throw_new(cls_ValueError, "when 1d, distances must match the length of the corresponding dimension");
+            }
+        }
+        r = nd_new(ND_FLOAT, f->nd, f->shape);
+        for (o = 0; o < outer; o++)
+            for (i = 0; i < inner; i++) {
+                double *fp = f->dv + o * len * inner + i, *rp = r->dv + o * len * inner + i;
+                rp[0] = (fp[inner] - fp[0]) / (xs ? xs->dv[1] - xs->dv[0] : h);
+                rp[(len - 1) * inner] = (fp[(len - 1) * inner] - fp[(len - 2) * inner]) /
+                                        (xs ? xs->dv[len - 1] - xs->dv[len - 2] : h);
+                for (j = 1; j < len - 1; j++) {
+                    if (xs) {
+                        double hd = xs->dv[j] - xs->dv[j - 1], hs = xs->dv[j + 1] - xs->dv[j];
+                        double fm = fp[(j - 1) * inner], f0 = fp[j * inner], fpl = fp[(j + 1) * inner];
+                        rp[j * inner] = (hd * hd * fpl - hs * hs * fm + (hs * hs - hd * hd) * f0) /
+                                        (hs * hd * (hd + hs));
+                    } else
+                        rp[j * inner] = (fp[(j + 1) * inner] - fp[(j - 1) * inner]) / (2.0 * h);
+                }
+            }
+        tv[k] = ndv(r);
+    }
+    if (single || naxes == 1) return tv[0];
+    return mktuple_from(tv, naxes);
+}
+
+/* ---- sorting related ------------------------------------------------------ */
+BI(np_searchsorted)
+{
+    NdTmp t, tv_;
+    Nd *a = nd_arg0(x, &t), *v, *r;
+    Value sd = np_arg(x, 2, "side");
+    int right = 0;
+    long i;
+    need(x, 2, 4, "searchsorted");
+    if (sd.t == T_STR && AS_STR(sd)->s[0] == 'r') right = 1;
+    if (a->nd != 1) throw_new(cls_ValueError, "object too deep for desired array");
+    v = nd_coerce(A(1), &tv_);
+    r = nd_new(ND_INT, v->nd, v->shape);
+    for (i = 0; i < v->size; i++) {
+        double key = nd_d(v, i);
+        long lo = 0, hi = a->size;
+        while (lo < hi) {
+            long mid = (lo + hi) / 2;
+            double e = nd_d(a, mid);
+            int go = right ? (e <= key) : (e < key);
+            if (e != e) go = 0;
+            if (key != key) go = e == e;
+            if (go) lo = mid + 1; else hi = mid;
+        }
+        r->iv[i] = lo;
+    }
+    return nd_ret(r);
+}
+/* percentile / quantile / median along an axis (linear interpolation) */
+static double lerp_q(double a, double b, double t)
+{
+    double d = b - a, r = a + d * t;
+    if (t >= 0.5) r = b - d * (1.0 - t);
+    return r;
+}
+static int g_median_mode;
+static double quant_sorted(const double *s, long n, double q)
+{
+    double vi, t;
+    long lo, hi;
+    if (n == 0) return HUGE_VAL - HUGE_VAL;
+    if (g_median_mode) {
+        if (s[n - 1] != s[n - 1]) return s[n - 1];
+        return n % 2 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2.0;
+    }
+    vi = q * (double)(n - 1);
+    lo = (long)floor(vi); hi = lo + 1;
+    if (lo < 0) lo = 0;
+    if (hi > n - 1) hi = n - 1;
+    t = vi - floor(vi);
+    if (s[hi] != s[hi]) return s[hi];
+    return lerp_q(s[lo], s[hi], t);
+}
+static Value quantile_impl(Args *x, double scale, const char *fname)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *qs, *r, *f;
+    Value av = np_arg(x, 2, "axis"), mv = kwget(x, "method");
+    long nq, qi, outer, len, inner, o, i, j;
+    int ax = -1, scalar_q;
+    double *buf;
+    need(x, 2, 6, fname);
+    if (mv.t == T_STR && strcmp(AS_STR(mv)->s, "linear") != 0)
+        throw_new(cls_NotImplementedError, "%s: only method='linear' is supported", fname);
+    {
+        NdTmp tq;
+        qs = nd_astype(nd_coerce(A(1), &tq), ND_FLOAT);
+        scalar_q = qs->nd == 0;
+        nq = qs->size;
+        for (qi = 0; qi < nq; qi++) {
+            qs->dv[qi] /= scale;
+            if (!(qs->dv[qi] >= 0.0 && qs->dv[qi] <= 1.0))
+                throw_new(cls_ValueError, scale == 1.0 ? "Quantiles must be in the range [0, 1]" : "Percentiles must be in the range [0, 100]");
+        }
+    }
+    f = nd_astype(a, ND_FLOAT);
+    if (np_has(av)) ax = axis_norm(need_long(av, "axis"), a->nd);
+    if (ax < 0) {
+        long n = f->size;
+        buf = f->dv;
+        qsort(buf, (size_t)n, sizeof(double), cmp_dbl);
+        if (scalar_q) return mkfloat(quant_sorted(buf, n, qs->dv[0]));
+        r = nd_new1(ND_FLOAT, nq);
+        for (qi = 0; qi < nq; qi++) r->dv[qi] = quant_sorted(buf, n, qs->dv[qi]);
+        return ndv(r);
+    }
+    axis_split(f, ax, &outer, &len, &inner);
+    {
+        long sh[ND_MAXD];
+        int k, rn = 0;
+        if (!scalar_q) sh[rn++] = nq;
+        for (k = 0; k < a->nd; k++) if (k != ax) sh[rn++] = a->shape[k];
+        r = nd_new(ND_FLOAT, rn, sh);
+    }
+    buf = (double *)xmalloc(sizeof(double) * (size_t)(len > 0 ? len : 1));
+    for (o = 0; o < outer; o++)
+        for (i = 0; i < inner; i++) {
+            for (j = 0; j < len; j++) buf[j] = f->dv[(o * len + j) * inner + i];
+            qsort(buf, (size_t)len, sizeof(double), cmp_dbl);
+            for (qi = 0; qi < nq; qi++)
+                r->dv[qi * outer * inner + o * inner + i] = quant_sorted(buf, len, qs->dv[qi]);
+        }
+    free(buf);
+    return nd_ret(r);
+}
+BI(np_percentile) { return quantile_impl(x, 100.0, "percentile"); }
+BI(np_quantile) { return quantile_impl(x, 1.0, "quantile"); }
+BI(np_median2)
+{
+    Value av = np_arg(x, 1, "axis"), r;
+    Args y;
+    Value v[3];
+    if (!np_has(av)) return np_median(x);
+    y.n = 3; y.a = v; y.nk = 0; y.kw = NULL;
+    v[0] = A(0); v[1] = mkfloat(0.5); v[2] = av;
+    g_median_mode = 1;
+    r = quantile_impl(&y, 1.0, "median");
+    g_median_mode = 0;
+    return r;
+}
+BI(np_histogram)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *f, *edges, *hist, *w = NULL;
+    Value bv = np_arg(x, 1, "bins"), rv = np_arg(x, 2, "range"), dv = kwget(x, "density"), wv = kwget(x, "weights");
+    long nb = 10, i, n;
+    double lo, hi;
+    int density = np_has(dv) && py_truthy(dv);
+    Value tv[2];
+    Nd *edges_out = NULL;
+    f = nd_astype(a, ND_FLOAT);
+    n = f->size;
+    if (np_has(wv)) {
+        w = np_f(wv);
+        if (w->size != n) throw_new(cls_ValueError, "weights should have the same shape as a.");
+    }
+    if (np_has(bv) && (bv.t == T_LIST || bv.t == T_TUPLE || bv.t == T_ND)) {
+        edges = np_f(bv);
+        edges_out = nd_from_value(bv, -1);
+        nb = edges->size - 1;
+        if (nb < 1) throw_new(cls_ValueError, "`bins` must have at least 2 edges");
+        for (i = 0; i < nb; i++)
+            if (edges->dv[i + 1] < edges->dv[i]) throw_new(cls_ValueError, "`bins` must increase monotonically, when an array");
+    } else {
+        if (np_has(bv)) nb = need_long(bv, "bins");
+        if (nb < 1) throw_new(cls_ValueError, "`bins` must be positive, when an integer");
+        if (np_has(rv)) {
+            Nd *rg = np_f(rv);
+            if (rg->size != 2) throw_new(cls_ValueError, "range must be a pair");
+            lo = rg->dv[0]; hi = rg->dv[1];
+            if (lo > hi) throw_new(cls_ValueError, "max must be larger than min in range parameter.");
+        } else if (n == 0) { lo = 0.0; hi = 1.0; }
+        else {
+            lo = HUGE_VAL; hi = -HUGE_VAL;
+            for (i = 0; i < n; i++) { if (f->dv[i] < lo) lo = f->dv[i]; if (f->dv[i] > hi) hi = f->dv[i]; }
+        }
+        if (lo == hi) { lo -= 0.5; hi += 0.5; }
+        edges = vec_new(nb + 1);
+        {
+            double step = (hi - lo) / (double)nb;
+            for (i = 0; i <= nb; i++) edges->dv[i] = (double)i * step + lo;
+            edges->dv[nb] = hi;
+        }
+    }
+    hist = nd_new1(w || density ? ND_FLOAT : ND_INT, nb);
+    for (i = 0; i < nb; i++) { if (hist->dt == ND_FLOAT) hist->dv[i] = 0.0; else hist->iv[i] = 0; }
+    for (i = 0; i < n; i++) {
+        double v = f->dv[i];
+        long l = 0, h = nb;
+        if (!(v >= edges->dv[0] && v <= edges->dv[nb])) continue;
+        while (l < h) {
+            long mid = (l + h) / 2;
+            if (edges->dv[mid + 1] <= v) l = mid + 1; else h = mid;
+        }
+        if (l >= nb) l = nb - 1;
+        if (hist->dt == ND_FLOAT) hist->dv[l] += w ? w->dv[i] : 1.0; else hist->iv[l]++;
+    }
+    if (density) {
+        double tot = 0.0;
+        for (i = 0; i < nb; i++) tot += hist->dv[i];
+        for (i = 0; i < nb; i++) hist->dv[i] = hist->dv[i] / tot / (edges->dv[i + 1] - edges->dv[i]);
+    }
+    tv[0] = ndv(hist); tv[1] = ndv(edges_out ? edges_out : edges);
+    return mktuple_from(tv, 2);
+}
+BI(np_bincount)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r, *w = NULL;
+    Value wv = np_arg(x, 1, "weights"), mv = np_arg(x, 2, "minlength");
+    long i, mx = -1, ml = np_has(mv) ? need_long(mv, "minlength") : 0;
+    if (a->dt == ND_FLOAT) throw_new(cls_TypeError, "Cannot cast array data from dtype('float64') to dtype('int64') according to the rule 'safe'");
+    if (a->nd != 1) throw_new(cls_ValueError, "object too deep for desired array");
+    for (i = 0; i < a->size; i++) {
+        if (a->iv[i] < 0) throw_new(cls_ValueError, "'list' argument must have no negative elements");
+        if (a->iv[i] > mx) mx = a->iv[i];
+    }
+    if (mx + 1 < ml) mx = ml - 1;
+    if (np_has(wv)) w = np_f(wv);
+    r = nd_new1(w ? ND_FLOAT : ND_INT, mx + 1);
+    for (i = 0; i <= mx; i++) { if (w) r->dv[i] = 0.0; else r->iv[i] = 0; }
+    for (i = 0; i < a->size; i++) { if (w) r->dv[a->iv[i]] += w->dv[i]; else r->iv[a->iv[i]]++; }
+    return ndv(r);
+}
+/* ---- covariance ---------------------------------------------------------- */
+static Nd *cov_matrix(Args *x, int *scalar)
+{
+    NdTmp t;
+    Nd *m = nd_astype(nd_arg0(x, &t), ND_FLOAT), *X, *c;
+    Value yv = np_arg(x, 1, "y"), rv = np_arg(x, 2, "rowvar"), bv = np_arg(x, 3, "bias"), dv = np_arg(x, 4, "ddof");
+    int rowvar = !np_has(rv) || py_truthy(rv);
+    long ddof = np_has(bv) && py_truthy(bv) ? 0 : 1, nv, N, i, j, k;
+    double fact;
+    double *means;
+    if (np_has(dv)) ddof = need_long(dv, "ddof");
+    if (m->nd > 2) throw_new(cls_ValueError, "m has more than 2 dimensions");
+    if (m->nd < 2) { long sh[2]; sh[0] = 1; sh[1] = m->size; m = nd_reshaped(m, 2, sh); rowvar = 1; }
+    *scalar = 0;
+    if (!rowvar && m->shape[0] != 1) {
+        long sh[2];
+        Nd *tr = mat_new(m->shape[1], m->shape[0]);
+        for (i = 0; i < m->shape[0]; i++) for (j = 0; j < m->shape[1]; j++) tr->dv[j * m->shape[0] + i] = m->dv[i * m->shape[1] + j];
+        m = tr; (void)sh;
+    }
+    if (np_has(yv)) {
+        Nd *y = np_f(yv);
+        long sh[2];
+        if (y->nd < 2) { sh[0] = 1; sh[1] = y->size; y = nd_reshaped(y, 2, sh); }
+        else if (!rowvar && y->shape[0] != 1) {
+            Nd *tr = mat_new(y->shape[1], y->shape[0]);
+            for (i = 0; i < y->shape[0]; i++) for (j = 0; j < y->shape[1]; j++) tr->dv[j * y->shape[0] + i] = y->dv[i * y->shape[1] + j];
+            y = tr;
+        }
+        if (y->shape[1] != m->shape[1]) throw_new(cls_ValueError, "all the input array dimensions except for the concatenation axis must match exactly");
+        X = mat_new(m->shape[0] + y->shape[0], m->shape[1]);
+        memcpy(X->dv, m->dv, sizeof(double) * (size_t)m->size);
+        memcpy(X->dv + m->size, y->dv, sizeof(double) * (size_t)y->size);
+    } else X = m;
+    nv = X->shape[0]; N = X->shape[1];
+    fact = (double)(N - ddof);
+    if (fact <= 0) fact = 0.0;
+    means = (double *)xmalloc(sizeof(double) * (size_t)(nv + 1));
+    for (i = 0; i < nv; i++) {
+        means[i] = pw_sum(X->dv + i * N, N) / (double)N;
+        for (j = 0; j < N; j++) X->dv[i * N + j] -= means[i];
+    }
+    free(means);
+    c = mat_new(nv, nv);
+    for (i = 0; i < nv; i++)
+        for (j = 0; j < nv; j++) {
+            double s = 0.0;
+            for (k = 0; k < N; k++) s += X->dv[i * N + k] * X->dv[j * N + k];
+            c->dv[i * nv + j] = s * (1.0 / fact);
+        }
+    if (nv == 1) *scalar = 1;
+    return c;
+}
+BI(np_cov)
+{
+    int sc;
+    Nd *c = cov_matrix(x, &sc);
+    if (sc) return mkfloat(c->dv[0]);
+    return ndv(c);
+}
+BI(np_corrcoef)
+{
+    int sc;
+    Nd *c = cov_matrix(x, &sc);
+    long n = c->shape[0], i, j;
+    double *sd;
+    if (sc) return mkfloat(c->dv[0] / c->dv[0]);
+    sd = (double *)xmalloc(sizeof(double) * (size_t)n);
+    for (i = 0; i < n; i++) sd[i] = sqrt(c->dv[i * n + i]);
+    for (i = 0; i < n; i++)
+        for (j = 0; j < n; j++) {
+            double v = c->dv[i * n + j] / sd[i] / sd[j];
+            if (v > 1.0) v = 1.0; else if (v < -1.0) v = -1.0;
+            c->dv[i * n + j] = v;
+        }
+    free(sd);
+    return ndv(c);
+}
+/* ---- triangular, kron, outer, cross ------------------------------------- */
+static Value tri_impl(Args *x, int upper)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r;
+    Value kv = np_arg(x, 1, "k");
+    long k = np_has(kv) ? need_long(kv, "k") : 0, m, n, o, nmat, i, j;
+    if (a->nd < 2) {
+        /* numpy broadcasts a 1-d input against its own length */
+        long sh[2];
+        Nd *tmp;
+        sh[0] = a->size; sh[1] = a->size;
+        tmp = nd_new(a->dt, 2, sh);
+        for (i = 0; i < a->size; i++) nd_cp(tmp, i * a->size, a, 0, a->size);
+        a = tmp;
+    }
+    m = a->shape[a->nd - 2]; n = a->shape[a->nd - 1];
+    nmat = m * n > 0 ? a->size / (m * n) : 0;
+    r = nd_astype(a, a->dt);
+    for (o = 0; o < nmat; o++)
+        for (i = 0; i < m; i++)
+            for (j = 0; j < n; j++) {
+                int keep = upper ? (j - i >= k) : (j - i <= k);
+                if (!keep) { if (r->dt == ND_FLOAT) r->dv[o * m * n + i * n + j] = 0.0; else r->iv[o * m * n + i * n + j] = 0; }
+            }
+    return ndv(r);
+}
+BI(np_tril) { return tri_impl(x, 0); }
+BI(np_triu) { return tri_impl(x, 1); }
+BI(np_kron)
+{
+    NdTmp ta, tb;
+    Nd *a, *b, *ra, *rb, *r;
+    int nd, k;
+    long sh[ND_MAXD], sa[ND_MAXD], sb[ND_MAXD], i, j, idx[ND_MAXD], dt;
+    need(x, 2, 2, "kron");
+    a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
+    nd = a->nd > b->nd ? a->nd : b->nd;
+    if (nd == 0) return nd_binary(B_MUL, a, b);
+    for (k = 0; k < nd; k++) {
+        int ka = k - (nd - a->nd), kb = k - (nd - b->nd);
+        sa[k] = ka >= 0 ? a->shape[ka] : 1;
+        sb[k] = kb >= 0 ? b->shape[kb] : 1;
+        sh[k] = sa[k] * sb[k];
+    }
+    dt = (a->dt == ND_FLOAT || b->dt == ND_FLOAT) ? ND_FLOAT : ND_INT;
+    ra = nd_astype(a, (int)dt); rb = nd_astype(b, (int)dt);
+    r = nd_new(dt, nd, sh);
+    for (k = 0; k < ND_MAXD; k++) idx[k] = 0;
+    for (i = 0; i < r->size; i++) {
+        long oa = 0, ob = 0, ma = 1, mb = 1;
+        for (k = nd - 1; k >= 0; k--) {
+            oa += (idx[k] / sb[k]) * ma; ma *= sa[k];
+            ob += (idx[k] % sb[k]) * mb; mb *= sb[k];
+        }
+        if (dt == ND_FLOAT) r->dv[i] = ra->dv[oa] * rb->dv[ob];
+        else r->iv[i] = (long)((unsigned long)ra->iv[oa] * (unsigned long)rb->iv[ob]);
+        for (k = nd - 1; k >= 0; k--) { if (++idx[k] < sh[k]) break; idx[k] = 0; }
+    }
+    (void)j;
+    return ndv(r);
+}
+BI(np_outer)
+{
+    NdTmp ta, tb;
+    Nd *a, *b, *ra, *rb;
+    long sh[2];
+    need(x, 2, 2, "outer");
+    a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
+    sh[0] = a->size; sh[1] = 1;
+    ra = nd_reshaped(a, 2, sh);
+    sh[0] = 1; sh[1] = b->size;
+    rb = nd_reshaped(b, 2, sh);
+    return nd_binary(B_MUL, ra, rb);
+}
+BI(np_inner)
+{
+    NdTmp ta, tb;
+    Nd *a, *b;
+    need(x, 2, 2, "inner");
+    a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
+    if (a->nd <= 1 && b->nd <= 1) return nd_matmul(a, b, 1);
+    if (a->nd == 2 && b->nd == 1) return nd_matmul(a, b, 1);
+    if (a->nd <= 1 && b->nd == 2) return nd_matmul(a, nd_transposed(b), 1);
+    if (a->nd == 2 && b->nd == 2) return nd_matmul(a, nd_transposed(b), 1);
+    throw_new(cls_NotImplementedError, "inner: only up to 2-d arrays are supported");
+    return NONE_V;
+}
+BI(np_vdot)
+{
+    NdTmp ta, tb;
+    Nd *a, *b;
+    long n;
+    need(x, 2, 2, "vdot");
+    a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
+    if (a->size != b->size) throw_new(cls_ValueError, "cannot reshape array of size %ld into shape (%ld)", b->size, a->size);
+    n = a->size;
+    return nd_matmul(nd_reshaped(a, 1, &n), nd_reshaped(b, 1, &n), 1);
+}
+BI(np_cross)
+{
+    NdTmp ta, tb;
+    Nd *a, *b, *r;
+    long na, nb, n, i;
+    int dt;
+    need(x, 2, 2, "cross");
+    a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
+    if (a->nd < 1 || b->nd < 1 || a->nd > 2 || b->nd > 2 ||
+        a->shape[a->nd - 1] != 3 || b->shape[b->nd - 1] != 3)
+        throw_new(cls_ValueError, "incompatible dimensions for cross product\n(dimension must be 3)");
+    na = a->nd == 2 ? a->shape[0] : 1;
+    nb = b->nd == 2 ? b->shape[0] : 1;
+    if (na != nb && na != 1 && nb != 1)
+        throw_new(cls_ValueError, "operands could not be broadcast together with shapes (%ld,3) (%ld,3) ", na, nb);
+    n = na > nb ? na : nb;
+    dt = (a->dt == ND_FLOAT || b->dt == ND_FLOAT) ? ND_FLOAT : ND_INT;
+    if (a->nd == 1 && b->nd == 1) r = nd_new1(dt, 3);
+    else { long sh[2]; sh[0] = n; sh[1] = 3; r = nd_new(dt, 2, sh); }
+    for (i = 0; i < n; i++) {
+        long pa = (na == 1 ? 0 : i) * 3, pb = (nb == 1 ? 0 : i) * 3;
+        if (dt == ND_FLOAT) {
+            double a0 = nd_d(a, pa), a1 = nd_d(a, pa + 1), a2 = nd_d(a, pa + 2);
+            double b0 = nd_d(b, pb), b1 = nd_d(b, pb + 1), b2 = nd_d(b, pb + 2);
+            r->dv[i * 3] = a1 * b2 - a2 * b1;
+            r->dv[i * 3 + 1] = a2 * b0 - a0 * b2;
+            r->dv[i * 3 + 2] = a0 * b1 - a1 * b0;
+        } else {
+            long a0 = a->iv[pa], a1 = a->iv[pa + 1], a2 = a->iv[pa + 2];
+            long b0 = b->iv[pb], b1 = b->iv[pb + 1], b2 = b->iv[pb + 2];
+            r->iv[i * 3] = a1 * b2 - a2 * b1;
+            r->iv[i * 3 + 1] = a2 * b0 - a0 * b2;
+            r->iv[i * 3 + 2] = a0 * b1 - a1 * b0;
+        }
+    }
+    return ndv(r);
+}
+BI(np_meshgrid)
+{
+    int n = x->n, k, xy = 1;
+    Value iv = kwget(x, "indexing");
+    Nd *g[ND_MAXD];
+    Value tv[ND_MAXD];
+    long sh[ND_MAXD], idx[ND_MAXD], i;
+    if (iv.t == T_STR) {
+        if (strcmp(AS_STR(iv)->s, "ij") == 0) xy = 0;
+        else if (strcmp(AS_STR(iv)->s, "xy") != 0) throw_new(cls_ValueError, "Valid values for `indexing` are 'xy' and 'ij'.");
+    }
+    if (n > ND_MAXD) throw_new(cls_ValueError, "too many arrays");
+    for (k = 0; k < n; k++) {
+        NdTmp t;
+        Nd *a = nd_coerce(A(k), &t);
+        long sz = a->size;
+        g[k] = nd_reshaped(a, 1, &sz);
+        sh[k] = sz;
+    }
+    if (xy && n >= 2) { long t = sh[0]; sh[0] = sh[1]; sh[1] = t; }
+    for (k = 0; k < n; k++) {
+        int axis = k;
+        Nd *r = nd_new(g[k]->dt, n, sh);
+        if (xy && n >= 2) { if (k == 0) axis = 1; else if (k == 1) axis = 0; }
+        for (i = 0; i < n; i++) idx[i] = 0;
+        for (i = 0; i < r->size; i++) {
+            int d;
+            nd_cp(r, i, g[k], idx[axis], 1);
+            for (d = n - 1; d >= 0; d--) { if (++idx[d] < sh[d]) break; idx[d] = 0; }
+        }
+        tv[k] = ndv(r);
+    }
+    return mktuple_from(tv, n);
+}
+/* ---- polynomials, convolution ------------------------------------------- */
+BI(np_polyfit)
+{
+    NdTmp tx, ty;
+    Nd *xs, *ys, *V, *res, *w = NULL;
+    Value dv = np_arg(x, 2, "deg"), wv = kwget(x, "w");
+    long deg, m, cols, k, i, j, rank;
+    double *scale, *b, *sol, rc;
+    need(x, 3, 8, "polyfit");
+    deg = need_long(dv, "deg");
+    if (deg < 0) throw_new(cls_ValueError, "expected deg >= 0");
+    xs = nd_astype(nd_coerce(A(0), &tx), ND_FLOAT);
+    ys = nd_astype(nd_coerce(A(1), &ty), ND_FLOAT);
+    if (xs->nd != 1) throw_new(cls_TypeError, "expected 1D vector for x");
+    if (xs->size == 0) throw_new(cls_TypeError, "expected non-empty vector for x");
+    if (ys->nd < 1 || ys->nd > 2) throw_new(cls_TypeError, "expected 1D or 2D array for y");
+    if (ys->shape[0] != xs->size) throw_new(cls_TypeError, "expected x and y to have same length");
+    if (np_has(wv)) {
+        w = np_f(wv);
+        if (w->size != xs->size) throw_new(cls_TypeError, "expected w and x to have same length");
+    }
+    m = xs->size; cols = deg + 1;
+    k = ys->nd == 1 ? 1 : ys->shape[1];
+    V = mat_new(m, cols);
+    for (i = 0; i < m; i++) {
+        double p = 1.0;
+        for (j = cols - 1; j >= 0; j--) { V->dv[i * cols + j] = p; p *= xs->dv[i]; }
+    }
+    b = (double *)xmalloc(sizeof(double) * (size_t)(m * k + 1));
+    memcpy(b, ys->dv, sizeof(double) * (size_t)(m * k));
+    if (w) {
+        for (i = 0; i < m; i++) {
+            for (j = 0; j < cols; j++) V->dv[i * cols + j] *= w->dv[i];
+            for (j = 0; j < k; j++) b[i * k + j] *= w->dv[i];
+        }
+    }
+    scale = (double *)xmalloc(sizeof(double) * (size_t)cols);
+    for (j = 0; j < cols; j++) {
+        double s = 0.0;
+        for (i = 0; i < m; i++) s += V->dv[i * cols + j] * V->dv[i * cols + j];
+        scale[j] = sqrt(s);
+        if (scale[j] == 0.0) scale[j] = 1.0;
+        for (i = 0; i < m; i++) V->dv[i * cols + j] /= scale[j];
+    }
+    sol = (double *)xmalloc(sizeof(double) * (size_t)(cols * k + 1));
+    rc = (double)m * DBL_EPSILON;
+    lstsq_core(V, m, cols, b, k, rc, sol, &rank, NULL);
+    for (j = 0; j < cols; j++) for (i = 0; i < k; i++) sol[j * k + i] /= scale[j];
+    if (ys->nd == 1) { res = vec_new(cols); memcpy(res->dv, sol, sizeof(double) * (size_t)cols); }
+    else { res = mat_new(cols, k); memcpy(res->dv, sol, sizeof(double) * (size_t)(cols * k)); }
+    free(b); free(scale); free(sol);
+    return ndv(res);
+}
+BI(np_polyval)
+{
+    NdTmp tp, tx;
+    Nd *p, *xs, *r;
+    long i, j;
+    need(x, 2, 2, "polyval");
+    p = nd_coerce(A(0), &tp); xs = nd_coerce(A(1), &tx);
+    if (p->nd > 1) throw_new(cls_ValueError, "object too deep for desired array");
+    if (p->dt == ND_FLOAT || xs->dt == ND_FLOAT) {
+        r = nd_new(ND_FLOAT, xs->nd, xs->shape);
+        for (i = 0; i < xs->size; i++) {
+            double v = 0.0, xv = nd_d(xs, i);
+            for (j = 0; j < p->size; j++) v = v * xv + nd_d(p, j);
+            r->dv[i] = v;
+        }
+    } else {
+        r = nd_new(ND_INT, xs->nd, xs->shape);
+        for (i = 0; i < xs->size; i++) {
+            long v = 0;
+            for (j = 0; j < p->size; j++) v = v * xs->iv[i] + p->iv[j];
+            r->iv[i] = v;
+        }
+    }
+    return nd_ret(r);
+}
+BI(np_convolve)
+{
+    NdTmp ta, tv_;
+    Nd *a, *v, *full, *r, *t;
+    Value mv = np_arg(x, 2, "mode");
+    const char *mode = mv.t == T_STR ? AS_STR(mv)->s : "full";
+    long na, nv, nf, i, j, start = 0, len = 0;
+    int fl;
+    need(x, 2, 3, "convolve");
+    a = nd_coerce(A(0), &ta); v = nd_coerce(A(1), &tv_);
+    if (a->nd > 1 || v->nd > 1) throw_new(cls_ValueError, "object too deep for desired array");
+    if (a->size == 0) throw_new(cls_ValueError, "a cannot be empty");
+    if (v->size == 0) throw_new(cls_ValueError, "v cannot be empty");
+    if (v->size > a->size) { t = a; a = v; v = t; }
+    na = a->size; nv = v->size; nf = na + nv - 1;
+    fl = a->dt == ND_FLOAT || v->dt == ND_FLOAT;
+    full = nd_new1(fl ? ND_FLOAT : ND_INT, nf);
+    for (i = 0; i < nf; i++) { if (fl) full->dv[i] = 0.0; else full->iv[i] = 0; }
+    for (i = 0; i < na; i++)
+        for (j = 0; j < nv; j++) {
+            if (fl) full->dv[i + j] += nd_d(a, i) * nd_d(v, j);
+            else full->iv[i + j] += a->iv[i] * v->iv[j];
+        }
+    if (strcmp(mode, "full") == 0 || mode[0] == 'f') return ndv(full);
+    if (strcmp(mode, "same") == 0 || mode[0] == 's') { start = (nv - 1) / 2; len = na; }
+    else if (strcmp(mode, "valid") == 0 || mode[0] == 'v') { start = nv - 1; len = na - nv + 1; }
+    else throw_new(cls_ValueError, "mode must be one of 'full', 'same', or 'valid'");
+    r = nd_new1(full->dt, len);
+    nd_cp(r, 0, full, start, len);
+    return ndv(r);
+}
+BI(np_trapz)
+{
+    NdTmp t;
+    Nd *y = nd_astype(nd_arg0(x, &t), ND_FLOAT), *xs = NULL;
+    Value xv = np_arg(x, 1, "x"), dxv = np_arg(x, 2, "dx");
+    double dx = np_has(dxv) ? to_dbl(dxv) : 1.0, s = 0.0;
+    long i;
+    if (y->nd != 1) throw_new(cls_NotImplementedError, "trapz: only 1-d input is supported");
+    if (np_has(xv)) xs = np_f(xv);
+    for (i = 1; i < y->size; i++) {
+        double h = xs ? xs->dv[i] - xs->dv[i - 1] : dx;
+        s += h * (y->dv[i] + y->dv[i - 1]) / 2.0;
+    }
+    return mkfloat(s);
+}
+/* ---- shape manipulation --------------------------------------------------- */
+BI(np_flip)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r;
+    Value av = np_arg(x, 1, "axis");
+    long outer, len, inner, o, j, i;
+    int ax;
+    if (a->nd == 0) return nd_ret(nd_astype(a, a->dt));
+    r = nd_astype(a, a->dt);
+    if (!np_has(av)) {
+        for (ax = 0; ax < a->nd; ax++) {
+            Nd *s = nd_astype(r, r->dt);
+            axis_split(s, ax, &outer, &len, &inner);
+            for (o = 0; o < outer; o++) for (j = 0; j < len; j++)
+                nd_cp(r, (o * len + j) * inner, s, (o * len + (len - 1 - j)) * inner, inner);
+        }
+        return ndv(r);
+    }
+    ax = axis_norm(need_long(av, "axis"), a->nd);
+    axis_split(a, ax, &outer, &len, &inner);
+    for (o = 0; o < outer; o++) for (j = 0; j < len; j++)
+        for (i = 0; i < 1; i++) nd_cp(r, (o * len + j) * inner, a, (o * len + (len - 1 - j)) * inner, inner);
+    return ndv(r);
+}
+BI(np_fliplr)
+{
+    Args y;
+    Value v[2];
+    y.n = 2; y.a = v; y.nk = 0; y.kw = NULL;
+    v[0] = A(0); v[1] = mkint(1);
+    return np_flip(&y);
+}
+BI(np_flipud)
+{
+    Args y;
+    Value v[2];
+    y.n = 2; y.a = v; y.nk = 0; y.kw = NULL;
+    v[0] = A(0); v[1] = mkint(0);
+    return np_flip(&y);
+}
+BI(np_roll)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r;
+    Value sv = np_arg(x, 1, "shift"), av = np_arg(x, 2, "axis");
+    long shift, outer, len, inner, o, j;
+    int ax;
+    shift = need_long(sv, "shift");
+    r = nd_astype(a, a->dt);
+    if (a->size == 0) return ndv(r);
+    if (!np_has(av)) {
+        long n = a->size;
+        shift = ((shift % n) + n) % n;
+        for (j = 0; j < n; j++) nd_cp(r, (j + shift) % n, a, j, 1);
+        return ndv(r);
+    }
+    ax = axis_norm(need_long(av, "axis"), a->nd);
+    axis_split(a, ax, &outer, &len, &inner);
+    shift = ((shift % len) + len) % len;
+    for (o = 0; o < outer; o++) for (j = 0; j < len; j++)
+        nd_cp(r, (o * len + (j + shift) % len) * inner, a, (o * len + j) * inner, inner);
+    return ndv(r);
+}
+BI(np_tile)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r;
+    long reps[ND_MAXD], sh[ND_MAXD], idx[ND_MAXD], i;
+    int rn, nd, k;
+    need(x, 2, 2, "tile");
+    memset(sh, 0, sizeof(sh));
+    rn = A(1).t == T_INT ? (reps[0] = A(1).u.i, 1) : shape_arg(A(1), reps);
+    nd = a->nd > rn ? a->nd : rn;
+    {
+        long ash[ND_MAXD], rr[ND_MAXD];
+        for (k = 0; k < nd; k++) {
+            int ka = k - (nd - a->nd), kr = k - (nd - rn);
+            ash[k] = ka >= 0 ? a->shape[ka] : 1;
+            rr[k] = kr >= 0 ? reps[kr] : 1;
+            sh[k] = ash[k] * rr[k];
+        }
+        r = nd_new(a->dt, nd, sh);
+        for (k = 0; k < nd; k++) idx[k] = 0;
+        for (i = 0; i < r->size; i++) {
+            long off = 0, mul = 1;
+            for (k = nd - 1; k >= 0; k--) { off += (idx[k] % ash[k]) * mul; mul *= ash[k]; }
+            nd_cp(r, i, a, off, 1);
+            for (k = nd - 1; k >= 0; k--) { if (++idx[k] < sh[k]) break; idx[k] = 0; }
+        }
+    }
+    return ndv(r);
+}
+BI(np_repeat)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r, *src;
+    Value rv = np_arg(x, 1, "repeats"), av = np_arg(x, 2, "axis");
+    long outer, len, inner, o, j, i, c, total = 0, pos = 0, sh[ND_MAXD];
+    Nd *reps = NULL;
+    int ax, k;
+    need(x, 2, 3, "repeat");
+    if (rv.t == T_INT) c = rv.u.i;
+    else { reps = nd_astype(nd_coerce(rv, &t), ND_INT); c = -1; }
+    if (!np_has(av)) {
+        long n = a->size;
+        src = nd_reshaped(a, 1, &n);
+        ax = 0;
+    } else { src = a; ax = axis_norm(need_long(av, "axis"), a->nd); }
+    axis_split(src, ax, &outer, &len, &inner);
+    if (reps && reps->size != len && reps->size != 1)
+        throw_new(cls_ValueError, "operands could not be broadcast together with shape (%ld,) (%ld,)", len, reps->size);
+    for (j = 0; j < len; j++) total += c >= 0 ? c : reps->iv[reps->size == 1 ? 0 : j];
+    for (k = 0; k < src->nd; k++) sh[k] = src->shape[k];
+    sh[ax] = total;
+    r = nd_new(src->dt, src->nd, sh);
+    for (o = 0; o < outer; o++) {
+        for (j = 0; j < len; j++) {
+            long cnt = c >= 0 ? c : reps->iv[reps->size == 1 ? 0 : j];
+            for (i = 0; i < cnt; i++) {
+                nd_cp(r, (o * total + pos + i) * inner, src, (o * len + j) * inner, inner);
+            }
+            pos += cnt;
+        }
+        pos = 0;
+    }
+    return ndv(r);
+}
+BI(np_squeeze)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    long sh[ND_MAXD];
+    int k, rn = 0;
+    Value av = np_arg(x, 1, "axis");
+    for (k = 0; k < a->nd; k++) {
+        if (a->shape[k] == 1 && (!np_has(av) || axis_norm(need_long(av, "axis"), a->nd) == k)) continue;
+        if (np_has(av) && axis_norm(need_long(av, "axis"), a->nd) == k)
+            throw_new(cls_ValueError, "cannot select an axis to squeeze out which has size not equal to one");
+        sh[rn++] = a->shape[k];
+    }
+    return nd_ret(nd_reshaped(a, rn, sh));
+}
+BI(np_expand_dims)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    long sh[ND_MAXD], ax;
+    int k, j = 0;
+    need(x, 2, 2, "expand_dims");
+    ax = need_long(A(1), "axis");
+    if (a->nd + 1 > ND_MAXD) throw_new(cls_ValueError, "maximum supported dimension for an ndarray is %d", ND_MAXD);
+    if (ax < 0) ax += a->nd + 1;
+    if (ax < 0 || ax > a->nd) throw_new(cls_ValueError, "axis %ld is out of bounds for array of dimension %d", ax, a->nd + 1);
+    for (k = 0; k <= a->nd; k++) {
+        if (k == ax) sh[k] = 1; else sh[k] = a->shape[j++];
+    }
+    return ndv(nd_reshaped(a, a->nd + 1, sh));
+}
+BI(np_swapaxes)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r;
+    long i, idx[ND_MAXD], sh[ND_MAXD], st[ND_MAXD], mul = 1;
+    int a1, a2, k;
+    need(x, 3, 3, "swapaxes");
+    a1 = axis_norm(need_long(A(1), "axis1"), a->nd);
+    a2 = axis_norm(need_long(A(2), "axis2"), a->nd);
+    for (k = a->nd - 1; k >= 0; k--) { st[k] = mul; mul *= a->shape[k]; }
+    for (k = 0; k < a->nd; k++) sh[k] = a->shape[k];
+    sh[a1] = a->shape[a2]; sh[a2] = a->shape[a1];
+    { long t1 = st[a1]; st[a1] = st[a2]; st[a2] = t1; }
+    r = nd_new(a->dt, a->nd, sh);
+    for (k = 0; k < ND_MAXD; k++) idx[k] = 0;
+    for (i = 0; i < r->size; i++) {
+        long off = 0;
+        for (k = 0; k < a->nd; k++) off += idx[k] * st[k];
+        nd_cp(r, i, a, off, 1);
+        for (k = a->nd - 1; k >= 0; k--) { if (++idx[k] < sh[k]) break; idx[k] = 0; }
+    }
+    return nd_ret(r);
+}
+BI(np_argwhere)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r;
+    long cnt = 0, i, pos = 0, idx[ND_MAXD], sh[2];
+    int k;
+    for (i = 0; i < a->size; i++) if (a->dt == ND_FLOAT ? a->dv[i] != 0 : a->iv[i] != 0) cnt++;
+    sh[0] = cnt; sh[1] = a->nd;
+    r = nd_new(ND_INT, 2, sh);
+    for (k = 0; k < ND_MAXD; k++) idx[k] = 0;
+    for (i = 0; i < a->size; i++) {
+        if (a->dt == ND_FLOAT ? a->dv[i] != 0 : a->iv[i] != 0) {
+            for (k = 0; k < a->nd; k++) r->iv[pos * a->nd + k] = idx[k];
+            pos++;
+        }
+        for (k = a->nd - 1; k >= 0; k--) { if (++idx[k] < a->shape[k]) break; idx[k] = 0; }
+    }
+    return ndv(r);
+}
+BI(np_isin)
+{
+    NdTmp ta, tb;
+    Nd *a, *b, *r;
+    long i, j;
+    need(x, 2, 2, "isin");
+    a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
+    r = nd_new(ND_BOOL, a->nd, a->shape);
+    for (i = 0; i < a->size; i++) {
+        double v = nd_d(a, i);
+        r->iv[i] = 0;
+        for (j = 0; j < b->size; j++) if (nd_d(b, j) == v) { r->iv[i] = 1; break; }
+    }
+    return nd_ret(r);
+}
+BI(np_append)
+{
+    NdTmp ta, tb;
+    Nd *a, *b, *arr[2];
+    Value av = np_arg(x, 2, "axis");
+    need(x, 2, 3, "append");
+    a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
+    if (!np_has(av)) {
+        long na = a->size, nb = b->size;
+        arr[0] = nd_reshaped(a, 1, &na); arr[1] = nd_reshaped(b, 1, &nb);
+        return ndv(nd_concat(arr, 2, 0));
+    }
+    arr[0] = nd_astype(a, a->dt); arr[1] = nd_astype(b, b->dt);
+    return ndv(nd_concat(arr, 2, axis_norm(need_long(av, "axis"), a->nd)));
+}
+BI(np_take)
+{
+    NdTmp ta, ti;
+    Nd *a, *ix, *r, *src;
+    Value av = np_arg(x, 2, "axis");
+    long outer, len, inner, o, j, i, sh[ND_MAXD];
+    int ax, k, rn = 0;
+    need(x, 2, 3, "take");
+    a = nd_coerce(A(0), &ta); ix = nd_coerce(A(1), &ti);
+    if (ix->dt == ND_FLOAT) throw_new(cls_TypeError, "Cannot cast array data from dtype('float64') to dtype('int64') according to the rule 'same_kind'");
+    if (!np_has(av)) { long n = a->size; src = nd_reshaped(a, 1, &n); ax = 0; }
+    else { src = a; ax = axis_norm(need_long(av, "axis"), a->nd); }
+    axis_split(src, ax, &outer, &len, &inner);
+    for (k = 0; k < ax; k++) sh[rn++] = src->shape[k];
+    for (k = 0; k < ix->nd; k++) sh[rn++] = ix->shape[k];
+    for (k = ax + 1; k < src->nd; k++) sh[rn++] = src->shape[k];
+    r = nd_new(src->dt, rn, sh);
+    for (o = 0; o < outer; o++)
+        for (j = 0; j < ix->size; j++) {
+            long p = ix->iv[j];
+            if (p < -len || p >= len)
+                throw_new(cls_IndexError, "index %ld is out of bounds for axis %d with size %ld", p, ax, len);
+            if (p < 0) p += len;
+            for (i = 0; i < 1; i++) nd_cp(r, (o * ix->size + j) * inner, src, (o * len + p) * inner, inner);
+        }
+    return nd_ret(r);
+}
+BI(np_shape) { NdTmp t; Nd *a = nd_arg0(x, &t); Value tv[ND_MAXD]; int k; for (k = 0; k < a->nd; k++) tv[k] = mkint(a->shape[k]); return mktuple_from(tv, a->nd); }
+BI(np_ndim) { NdTmp t; Nd *a = nd_arg0(x, &t); return mkint(a->nd); }
+BI(np_size) { NdTmp t; Nd *a = nd_arg0(x, &t); return mkint(a->size); }
+BI(np_isscalar)
+{
+    need(x, 1, 1, "isscalar");
+    return tobool(A(0).t == T_INT || A(0).t == T_FLOAT || A(0).t == T_BOOL || A(0).t == T_BIG || A(0).t == T_STR);
+}
+BI(np_linspace2)
+{
+    Value rs = np_arg(x, 4, "retstep");
+    Value r = np_linspace(x), tv[2];
+    if (np_has(rs) && py_truthy(rs)) {
+        Nd *a = AS_ND(r);
+        Value nv = x->n > 2 ? A(2) : kwget(x, "num"), ev = x->n > 3 ? A(3) : kwget(x, "endpoint");
+        long num = np_has(nv) ? need_long(nv, "num") : 50;
+        int endpoint = !np_has(ev) || py_truthy(ev);
+        long div = endpoint ? num - 1 : num;
+        double step = div > 0 ? (to_dbl(A(1)) - to_dbl(A(0))) / (double)div : HUGE_VAL - HUGE_VAL;
+        (void)a;
+        tv[0] = r; tv[1] = mkfloat(step);
+        return mktuple_from(tv, 2);
+    }
+    return r;
+}
+BI(np_tri)
+{
+    long n, m, k = 0, i, j, sh[2];
+    Value mv = np_arg(x, 1, "M"), kv = np_arg(x, 2, "k");
+    Nd *r;
+    n = need_long(A(0), "N");
+    m = np_has(mv) ? need_long(mv, "M") : n;
+    if (np_has(kv)) k = need_long(kv, "k");
+    sh[0] = n; sh[1] = m;
+    r = nd_new(dtype_kw(x, ND_FLOAT), 2, sh);
+    for (i = 0; i < n; i++) for (j = 0; j < m; j++) {
+        int v = (j - i <= k);
+        if (r->dt == ND_FLOAT) r->dv[i * m + j] = v; else r->iv[i * m + j] = v;
+    }
+    return ndv(r);
+}
+BI(np_vander)
+{
+    NdTmp t;
+    Nd *a = nd_arg0(x, &t), *r;
+    Value nv = np_arg(x, 1, "N"), iv = np_arg(x, 2, "increasing");
+    long n = np_has(nv) ? need_long(nv, "N") : a->size, i, j, sh[2];
+    int inc = np_has(iv) && py_truthy(iv);
+    sh[0] = a->size; sh[1] = n;
+    r = nd_new(a->dt == ND_FLOAT ? ND_FLOAT : ND_INT, 2, sh);
+    for (i = 0; i < a->size; i++)
+        for (j = 0; j < n; j++) {
+            long e = inc ? j : n - 1 - j;
+            if (r->dt == ND_FLOAT) r->dv[i * n + j] = pow(a->dv[i], (double)e);
+            else { long p = 1, q; for (q = 0; q < e; q++) p *= a->iv[i]; r->iv[i * n + j] = p; }
+        }
+    return ndv(r);
+}
+
+static void np_init2(Module *m)
+{
+    mod_def(m, "arctan2", np_arctan2); mod_def(m, "hypot", np_hypot);
+    mod_def(m, "copysign", np_copysign); mod_def(m, "fmax", np_fmax); mod_def(m, "fmin", np_fmin);
+    mod_def(m, "isclose", np_isclose);
+    mod_def(m, "logical_and", np_logical_and); mod_def(m, "logical_or", np_logical_or);
+    mod_def(m, "logical_xor", np_logical_xor); mod_def(m, "logical_not", np_logical_not);
+    mod_def(m, "exp2", np_exp2); mod_def(m, "expm1", np_expm1); mod_def(m, "log1p", np_log1p);
+    mod_def(m, "cbrt", np_cbrt); mod_def(m, "arcsinh", np_arcsinh);
+    mod_def(m, "arccosh", np_arccosh); mod_def(m, "arctanh", np_arctanh);
+    mod_def(m, "deg2rad", np_deg2rad); mod_def(m, "radians", np_deg2rad);
+    mod_def(m, "rad2deg", np_rad2deg); mod_def(m, "degrees", np_rad2deg);
+    mod_def(m, "reciprocal", np_reciprocal); mod_def(m, "trunc", np_trunc);
+    mod_def(m, "fix", np_trunc); mod_def(m, "rint", np_rint); mod_def(m, "sinc", np_sinc);
+    mod_def(m, "nan_to_num", np_nan_to_num);
+    mod_def(m, "nansum", np_nansum); mod_def(m, "nanprod", np_nanprod);
+    mod_def(m, "nanmean", np_nanmean); mod_def(m, "nanvar", np_nanvar);
+    mod_def(m, "nanstd", np_nanstd); mod_def(m, "nanmax", np_nanmax);
+    mod_def(m, "nanmin", np_nanmin); mod_def(m, "nanargmax", np_nanargmax);
+    mod_def(m, "nanargmin", np_nanargmin);
+    mod_def(m, "ptp", np_ptp); mod_def(m, "average", np_average);
+    mod_def(m, "diff", np_diff); mod_def(m, "ediff1d", np_ediff1d);
+    mod_def(m, "gradient", np_gradient); mod_def(m, "searchsorted", np_searchsorted);
+    mod_def(m, "percentile", np_percentile); mod_def(m, "quantile", np_quantile);
+    mod_def(m, "median", np_median2); mod_def(m, "histogram", np_histogram);
+    mod_def(m, "bincount", np_bincount); mod_def(m, "cov", np_cov);
+    mod_def(m, "corrcoef", np_corrcoef); mod_def(m, "tril", np_tril);
+    mod_def(m, "triu", np_triu); mod_def(m, "kron", np_kron); mod_def(m, "outer", np_outer);
+    mod_def(m, "inner", np_inner); mod_def(m, "vdot", np_vdot); mod_def(m, "cross", np_cross);
+    mod_def(m, "meshgrid", np_meshgrid); mod_def(m, "polyfit", np_polyfit);
+    mod_def(m, "polyval", np_polyval); mod_def(m, "convolve", np_convolve);
+    mod_def(m, "trapz", np_trapz); mod_def(m, "trapezoid", np_trapz);
+    mod_def(m, "flip", np_flip); mod_def(m, "fliplr", np_fliplr); mod_def(m, "flipud", np_flipud);
+    mod_def(m, "roll", np_roll); mod_def(m, "tile", np_tile); mod_def(m, "repeat", np_repeat);
+    mod_def(m, "squeeze", np_squeeze); mod_def(m, "expand_dims", np_expand_dims);
+    mod_def(m, "swapaxes", np_swapaxes); mod_def(m, "argwhere", np_argwhere);
+    mod_def(m, "isin", np_isin); mod_def(m, "append", np_append); mod_def(m, "take", np_take);
+    mod_def(m, "shape", np_shape); mod_def(m, "ndim", np_ndim); mod_def(m, "size", np_size);
+    mod_def(m, "isscalar", np_isscalar); mod_def(m, "tri", np_tri); mod_def(m, "vander", np_vander);
+    mod_def(m, "linspace", np_linspace2);
+    mod_val(m, "float32", mkobj(cls_float, T_CLASS));
+    mod_val(m, "int32", mkobj(cls_int, T_CLASS));
+    mod_val(m, "int_", mkobj(cls_int, T_CLASS));
+    mod_val(m, "float_", mkobj(cls_float, T_CLASS));
+    mod_val(m, "bool", mkobj(cls_bool, T_CLASS));
+    mod_val(m, "euler_gamma", mkfloat(0.57721566490153286061));
+    mod_val(m, "Inf", mkfloat(HUGE_VAL));
+    mod_val(m, "NaN", mkfloat(HUGE_VAL - HUGE_VAL));
+    mod_val(m, "PINF", mkfloat(HUGE_VAL));
+    mod_val(m, "NINF", mkfloat(-HUGE_VAL));
+}
+/* ===== p7_rnd.c ===== */
+/* =========================================================================
+   p7_rnd.c   numpy.random: xoshiro256** generator, legacy functions,
+              default_rng / Generator / RandomState objects
+   ========================================================================= */
+typedef unsigned long u64;
+static u64 g_rs[4];
+static Class *cls_rng[2];
+
+static u64 splitmix(u64 *z)
+{
+    u64 r;
+    *z += 0x9E3779B97F4A7C15UL;
+    r = *z;
+    r = (r ^ (r >> 30)) * 0xBF58476D1CE4E5B9UL;
+    r = (r ^ (r >> 27)) * 0x94D049BB133111EBUL;
+    return r ^ (r >> 31);
+}
+static void nrng_seed(u64 *s, u64 seed)
+{
+    int i;
+    for (i = 0; i < 4; i++) s[i] = splitmix(&seed);
+}
+static u64 rotl64(u64 v, int k)
+{
+    return (v << k) | (v >> (64 - k));
+}
+static u64 nrng_next(u64 *s)
+{
+    u64 r = rotl64(s[1] * 5UL, 7) * 9UL, t = s[1] << 17;
+    s[2] ^= s[0]; s[3] ^= s[1]; s[1] ^= s[2]; s[0] ^= s[3];
+    s[2] ^= t;
+    s[3] = rotl64(s[3], 45);
+    return r;
+}
+static double nrng_dbl(u64 *s)
+{
+    return (double)(nrng_next(s) >> 11) * (1.0 / 9007199254740992.0);
+}
+static double nrng_norm(u64 *s)
+{
+    double u1, u2;
+    do u1 = nrng_dbl(s); while (u1 <= 0.0);
+    u2 = nrng_dbl(s);
+    return sqrt(-2.0 * log(u1)) * cos(6.283185307179586476925 * u2);
+}
+/* uniform integer in [0, n) */
+static u64 nrng_below(u64 *s, u64 n)
+{
+    u64 lim, r;
+    if (n <= 1) return 0;
+    lim = ULONG_MAX - (ULONG_MAX % n);
+    do r = nrng_next(s); while (r >= lim);
+    return r % n;
+}
+static u64 seed_value(Value v)
+{
+    if (v.t == T_INT || v.t == T_BOOL) return (u64)v.u.i;
+    if (v.t == T_BIG) return (u64)py_hash(v);
+    if (v.t == T_FLOAT) throw_new(cls_TypeError, "Cannot cast scalar from dtype('float64') to dtype('int64') according to the rule 'safe'");
+    if (v.t == T_ND || v.t == T_LIST || v.t == T_TUPLE) {
+        Nd *a = nd_from_value(v, ND_INT);
+        u64 h = 0x1234567UL;
+        long i;
+        for (i = 0; i < a->size; i++) { u64 t = (u64)a->iv[i] + h; h = splitmix(&t); }
+        return h;
+    }
+    throw_new(cls_TypeError, "Seed must be an integer");
+    return 0;
+}
+static void seed_from(u64 *s, Value v)
+{
+    if (v.t == T_UNSET || v.t == T_NONE) {
+        u64 t = (u64)time(NULL) * 1000003UL + (u64)clock() + (u64)(size_t)s;
+        nrng_seed(s, t);
+    } else nrng_seed(s, seed_value(v));
+}
+
+/* ---- argument helpers: off = 0 for module functions, 1 for methods ---- */
+#define RN (x->n - off)
+#define RA(i) (x->a[off + (i)])
+static Value rarg(Args *x, int off, int pos, const char *nm)
+{
+    if (pos < RN) return RA(pos);
+    return kwget(x, nm);
+}
+static double rdbl(Args *x, int off, int pos, const char *nm, double dflt)
+{
+    Value v = rarg(x, off, pos, nm);
+    if (!np_has(v)) return dflt;
+    return to_dbl(v);
+}
+/* size argument -> shape; returns -1 for a scalar result */
+static int rsize(Value sz, long *shape)
+{
+    if (!np_has(sz)) return -1;
+    return shape_arg(sz, shape);
+}
+typedef double (*RGen)(u64 *s, double p1, double p2);
+static double g_unif(u64 *s, double a, double b) { return a + (b - a) * nrng_dbl(s); }
+static double g_norm(u64 *s, double a, double b) { return a + b * nrng_norm(s); }
+static double g_exp(u64 *s, double a, double b)
+{
+    double u;
+    (void)b;
+    do u = nrng_dbl(s); while (u <= 0.0);
+    return -log(u) * a;
+}
+static Value rfill(u64 *s, Value sz, RGen g, double p1, double p2)
+{
+    long shape[ND_MAXD], i;
+    int nd = rsize(sz, shape);
+    Nd *r;
+    if (nd < 0) return mkfloat(g(s, p1, p2));
+    r = nd_new(ND_FLOAT, nd, shape);
+    for (i = 0; i < r->size; i++) r->dv[i] = g(s, p1, p2);
+    return nd_ret(r);
+}
+/* positional dims (rand / randn) */
+static Value rdims(Args *x, int off, u64 *s, RGen g)
+{
+    long shape[ND_MAXD], i;
+    int nd = RN, k;
+    Nd *r;
+    if (nd == 0) return mkfloat(g(s, 0.0, 1.0));
+    if (nd > ND_MAXD) throw_new(cls_ValueError, "maximum supported dimension for an ndarray is %d", ND_MAXD);
+    for (k = 0; k < nd; k++) {
+        shape[k] = need_long(RA(k), "dimension");
+        if (shape[k] < 0) throw_new(cls_ValueError, "negative dimensions are not allowed");
+    }
+    r = nd_new(ND_FLOAT, nd, shape);
+    for (i = 0; i < r->size; i++) r->dv[i] = g(s, 0.0, 1.0);
+    return ndv(r);
+}
+static Value nr_random(Args *x, int off, u64 *s)
+{
+    return rfill(s, rarg(x, off, 0, "size"), g_unif, 0.0, 1.0);
+}
+static Value nr_stdnorm(Args *x, int off, u64 *s)
+{
+    return rfill(s, rarg(x, off, 0, "size"), g_norm, 0.0, 1.0);
+}
+static Value nr_normal(Args *x, int off, u64 *s)
+{
+    double loc = rdbl(x, off, 0, "loc", 0.0), sc = rdbl(x, off, 1, "scale", 1.0);
+    if (sc < 0) throw_new(cls_ValueError, "scale < 0");
+    return rfill(s, rarg(x, off, 2, "size"), g_norm, loc, sc);
+}
+static Value nr_uniform(Args *x, int off, u64 *s)
+{
+    double lo = rdbl(x, off, 0, "low", 0.0), hi = rdbl(x, off, 1, "high", 1.0);
+    return rfill(s, rarg(x, off, 2, "size"), g_unif, lo, hi);
+}
+static Value nr_exponential(Args *x, int off, u64 *s)
+{
+    double sc = rdbl(x, off, 0, "scale", 1.0);
+    if (sc < 0) throw_new(cls_ValueError, "scale < 0");
+    return rfill(s, rarg(x, off, 1, "size"), g_exp, sc, 0.0);
+}
+static Value nr_stdexp(Args *x, int off, u64 *s)
+{
+    return rfill(s, rarg(x, off, 0, "size"), g_exp, 1.0, 0.0);
+}
+/* integers: legacy randint has high exclusive; Generator.integers adds endpoint */
+static Value nr_ints(Args *x, int off, u64 *s, int gen)
+{
+    Value lov = rarg(x, off, 0, "low"), hiv = rarg(x, off, 1, "high"), szv = rarg(x, off, 2, "size");
+    Value epv = gen ? kwget(x, "endpoint") : UNSET_V;
+    long lo, hi, shape[ND_MAXD], i;
+    int nd;
+    Nd *r;
+    if (!np_has(lov)) throw_new(cls_TypeError, "integers() missing required argument 'low'");
+    if (!np_has(hiv)) { hi = need_long(lov, "low"); lo = 0; }
+    else { lo = need_long(lov, "low"); hi = need_long(hiv, "high"); }
+    if (np_has(epv) && py_truthy(epv)) hi++;
+    if (lo >= hi) throw_new(cls_ValueError, np_has(hiv) ? "low >= high" : "high <= 0");
+    nd = rsize(szv, shape);
+    if (nd < 0) return mkint(lo + (long)nrng_below(s, (u64)hi - (u64)lo));
+    r = nd_new(ND_INT, nd, shape);
+    for (i = 0; i < r->size; i++) r->iv[i] = lo + (long)nrng_below(s, (u64)hi - (u64)lo);
+    return nd_ret(r);
+}
+static Value nr_randint(Args *x, int off, u64 *s) { return nr_ints(x, off, s, 0); }
+static Value nr_integers(Args *x, int off, u64 *s) { return nr_ints(x, off, s, 1); }
+
+/* in-place Fisher-Yates of the first axis of an array / list */
+static void shuffle_nd(Nd *a, u64 *s)
+{
+    long n, row, i, j;
+    Nd *tmp;
+    if (a->nd == 0) throw_new(cls_TypeError, "shuffle: 0-d array");
+    n = a->shape[0];
+    row = n > 0 ? a->size / n : 0;
+    tmp = nd_new(a->dt, 1, &row);
+    for (i = n - 1; i > 0; i--) {
+        j = (long)nrng_below(s, (u64)i + 1);
+        if (j != i && row > 0) {
+            nd_cp(tmp, 0, a, i * row, row);
+            nd_cp(a, i * row, a, j * row, row);
+            nd_cp(a, j * row, tmp, 0, row);
+        }
+    }
+}
+static Value nr_shuffle(Args *x, int off, u64 *s)
+{
+    Value v;
+    if (RN < 1) throw_new(cls_TypeError, "shuffle() missing 1 required positional argument: 'x'");
+    v = RA(0);
+    if (v.t == T_ND) shuffle_nd(AS_ND(v), s);
+    else if (v.t == T_LIST) {
+        List *l = AS_LIST(v);
+        long i, j;
+        for (i = l->n - 1; i > 0; i--) {
+            Value t;
+            j = (long)nrng_below(s, (u64)i + 1);
+            t = l->a[i]; l->a[i] = l->a[j]; l->a[j] = t;
+        }
+    } else throw_new(cls_TypeError, "shuffle: unsupported type '%.40s'", type_name(v));
+    return NONE_V;
+}
+static Value nr_permutation(Args *x, int off, u64 *s)
+{
+    Value v;
+    Nd *r;
+    if (RN < 1) throw_new(cls_TypeError, "permutation() missing 1 required positional argument: 'x'");
+    v = RA(0);
+    if (v.t == T_INT) {
+        long n = v.u.i, i;
+        if (n < 0) throw_new(cls_ValueError, "negative dimensions are not allowed");
+        r = nd_new1(ND_INT, n);
+        for (i = 0; i < n; i++) r->iv[i] = i;
+    } else {
+        r = nd_from_value(v, -1);
+        if (r->nd == 0) throw_new(cls_ValueError, "x must be an integer or at least 1-dimensional");
+    }
+    shuffle_nd(r, s);
+    return ndv(r);
+}
+static Value nr_choice(Args *x, int off, u64 *s)
+{
+    Value av = rarg(x, off, 0, "a"), szv = rarg(x, off, 1, "size"), rpv = rarg(x, off, 2, "replace");
+    Value pv = rarg(x, off, 3, "p");
+    Nd *src, *idx, *res;
+    long n, cnt, i, j, shape[ND_MAXD], row;
+    int nd, repl = 1, k;
+    double *cum = NULL;
+    if (!np_has(av)) throw_new(cls_TypeError, "choice() missing required argument 'a'");
+    if (np_has(rpv)) repl = py_truthy(rpv);
+    if (av.t == T_INT) {
+        n = av.u.i;
+        if (n <= 0) throw_new(cls_ValueError, "a must be a positive integer unless no samples are taken");
+        src = NULL;
+    } else {
+        src = nd_from_value(av, -1);
+        if (src->nd < 1) throw_new(cls_ValueError, "a must be 1-dimensional or an integer");
+        n = src->shape[0];
+        if (n == 0) throw_new(cls_ValueError, "a cannot be empty unless no samples are taken");
+    }
+    nd = rsize(szv, shape);
+    cnt = 1;
+    if (nd >= 0) for (k = 0; k < nd; k++) cnt *= shape[k];
+    if (np_has(pv)) {
+        Nd *p = np_f(pv);
+        double tot = 0.0;
+        if (p->size != n) throw_new(cls_ValueError, "a and p must have same size");
+        cum = (double *)xmalloc(sizeof(double) * (size_t)(n + 1));
+        for (i = 0; i < n; i++) {
+            if (p->dv[i] < 0) { free(cum); throw_new(cls_ValueError, "probabilities are not non-negative"); }
+            tot += p->dv[i];
+            cum[i] = tot;
+        }
+        if (fabs(tot - 1.0) > 1e-8) { free(cum); throw_new(cls_ValueError, "probabilities do not sum to 1"); }
+        for (i = 0; i < n; i++) cum[i] /= tot;
+    }
+    if (!repl && cnt > n) {
+        free(cum);
+        throw_new(cls_ValueError, "Cannot take a larger sample than population when 'replace=False'");
+    }
+    idx = nd_new1(ND_INT, cnt);
+    if (cum) {
+        if (repl) {
+            for (i = 0; i < cnt; i++) {
+                double u = nrng_dbl(s);
+                long lo = 0, hi = n - 1;
+                while (lo < hi) {
+                    long mid = (lo + hi) / 2;
+                    if (cum[mid] > u) hi = mid; else lo = mid + 1;
+                }
+                idx->iv[i] = lo;
+            }
+        } else {
+            /* sequential removal, renormalising */
+            double *w = (double *)xmalloc(sizeof(double) * (size_t)(n + 1));
+            double prev = 0.0;
+            for (i = 0; i < n; i++) { w[i] = cum[i] - prev; prev = cum[i]; }
+            for (i = 0; i < cnt; i++) {
+                double tot = 0.0, u, acc = 0.0;
+                long pick = n - 1;
+                for (j = 0; j < n; j++) tot += w[j];
+                u = nrng_dbl(s) * tot;
+                for (j = 0; j < n; j++) {
+                    acc += w[j];
+                    if (w[j] > 0 && acc > u) { pick = j; break; }
+                }
+                idx->iv[i] = pick;
+                w[pick] = 0.0;
+            }
+            free(w);
+        }
+        free(cum);
+    } else if (repl) {
+        for (i = 0; i < cnt; i++) idx->iv[i] = (long)nrng_below(s, (u64)n);
+    } else {
+        long *pool = (long *)xmalloc(sizeof(long) * (size_t)n);
+        for (i = 0; i < n; i++) pool[i] = i;
+        for (i = 0; i < cnt; i++) {
+            long t;
+            j = i + (long)nrng_below(s, (u64)(n - i));
+            t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+            idx->iv[i] = pool[i];
+        }
+        free(pool);
+    }
+    if (nd < 0) {
+        if (!src) return mkint(idx->iv[0]);
+        if (src->nd == 1) return nd_elem(src, idx->iv[0]);
+        row = src->size / n;
+        res = nd_new(src->dt, src->nd - 1, src->shape + 1);
+        nd_cp(res, 0, src, idx->iv[0] * row, row);
+        return ndv(res);
+    }
+    if (!src) {
+        res = nd_new(ND_INT, nd, shape);
+        for (i = 0; i < cnt; i++) res->iv[i] = idx->iv[i];
+        return nd_ret(res);
+    }
+    row = src->size / n;
+    {
+        long rs[ND_MAXD];
+        int rn = nd;
+        for (k = 0; k < nd; k++) rs[k] = shape[k];
+        for (k = 1; k < src->nd && rn < ND_MAXD; k++) rs[rn++] = src->shape[k];
+        res = nd_new(src->dt, rn, rs);
+    }
+    for (i = 0; i < cnt; i++) nd_cp(res, i * row, src, idx->iv[i] * row, row);
+    return nd_ret(res);
+}
+static long nr_poisson1(u64 *s, double lam)
+{
+    long k = 0;
+    while (lam > 500.0) {
+        /* split: Poisson(lam) = Poisson(500) + Poisson(lam - 500) */
+        k += nr_poisson1(s, 500.0);
+        lam -= 500.0;
+    }
+    {
+        double L = exp(-lam), p = 1.0;
+        do { k++; p *= nrng_dbl(s); } while (p > L);
+    }
+    return k - 1;
+}
+static Value nr_poisson(Args *x, int off, u64 *s)
+{
+    double lam = rdbl(x, off, 0, "lam", 1.0);
+    long shape[ND_MAXD], i;
+    int nd = rsize(rarg(x, off, 1, "size"), shape);
+    Nd *r;
+    if (lam < 0) throw_new(cls_ValueError, "lam < 0 or lam is NaN");
+    if (nd < 0) return mkint(nr_poisson1(s, lam));
+    r = nd_new(ND_INT, nd, shape);
+    for (i = 0; i < r->size; i++) r->iv[i] = nr_poisson1(s, lam);
+    return nd_ret(r);
+}
+static long nr_binom1(u64 *s, long n, double p)
+{
+    long k = 0, i;
+    for (i = 0; i < n; i++) if (nrng_dbl(s) < p) k++;
+    return k;
+}
+static Value nr_binomial(Args *x, int off, u64 *s)
+{
+    long n = need_long(rarg(x, off, 0, "n"), "n"), shape[ND_MAXD], i;
+    double p = rdbl(x, off, 1, "p", 0.5);
+    int nd = rsize(rarg(x, off, 2, "size"), shape);
+    Nd *r;
+    if (n < 0) throw_new(cls_ValueError, "n < 0");
+    if (!(p >= 0.0 && p <= 1.0)) throw_new(cls_ValueError, "p < 0, p > 1 or p is NaN");
+    if (nd < 0) return mkint(nr_binom1(s, n, p));
+    r = nd_new(ND_INT, nd, shape);
+    for (i = 0; i < r->size; i++) r->iv[i] = nr_binom1(s, n, p);
+    return nd_ret(r);
+}
+
+/* module-level (global state) and method (instance state) wrappers */
+static u64 *self_state(Args *x)
+{
+    Value *sv;
+    if (x->n < 1 || x->a[0].t != T_INST) throw_new(cls_TypeError, "descriptor requires a Generator object");
+    sv = amap_get(&AS_INST(x->a[0])->a, intern_c("_s"));
+    if (!sv || sv->t != T_ND) throw_new(cls_TypeError, "uninitialised Generator");
+    return (u64 *)AS_ND(*sv)->iv;
+}
+#define RFN(nm, impl) \
+    BI(rm_##nm) { return impl(x, 0, g_rs); } \
+    BI(rg_##nm) { return impl(x, 1, self_state(x)); }
+RFN(random, nr_random)
+RFN(stdnorm, nr_stdnorm)
+RFN(normal, nr_normal)
+RFN(uniform, nr_uniform)
+RFN(exponential, nr_exponential)
+RFN(stdexp, nr_stdexp)
+RFN(randint, nr_randint)
+RFN(integers, nr_integers)
+RFN(choice, nr_choice)
+RFN(shuffle, nr_shuffle)
+RFN(permutation, nr_permutation)
+RFN(poisson, nr_poisson)
+RFN(binomial, nr_binomial)
+BI(rm_rand) { return rdims(x, 0, g_rs, g_unif); }
+BI(rg_rand) { return rdims(x, 1, self_state(x), g_unif); }
+BI(rm_randn) { return rdims(x, 0, g_rs, g_norm); }
+BI(rg_randn) { return rdims(x, 1, self_state(x), g_norm); }
+BI(rm_seed)
+{
+    Value sv = x->n > 0 ? A(0) : kwget(x, "seed");
+    seed_from(g_rs, sv);
+    return NONE_V;
+}
+static Value make_rng(Class *c, Value seed)
+{
+    Inst *in = new_inst(c);
+    Nd *st = nd_new1(ND_INT, 4);
+    Value iv = mkobj(in, T_INST);
+    VPUSH(iv);
+    seed_from((u64 *)st->iv, seed);
+    amap_set(&in->a, intern_c("_s"), ndv(st));
+    vsp--;
+    return iv;
+}
+BI(rm_default_rng)
+{
+    Value sv = x->n > 0 ? A(0) : kwget(x, "seed");
+    if (sv.t == T_INST && AS_INST(sv)->cls == cls_rng[0]) return sv;
+    return make_rng(cls_rng[0], sv);
+}
+BI(rm_RandomState)
+{
+    Value sv = x->n > 0 ? A(0) : kwget(x, "seed");
+    return make_rng(cls_rng[1], sv);
+}
+BI(rg_seed)
+{
+    Value sv = x->n > 1 ? A(1) : kwget(x, "seed");
+    seed_from(self_state(x), sv);
+    return NONE_V;
+}
+static void rnd_methods(Class *c)
+{
+    def_bi(c, "random", rg_random); def_bi(c, "random_sample", rg_random);
+    def_bi(c, "standard_normal", rg_stdnorm); def_bi(c, "normal", rg_normal);
+    def_bi(c, "uniform", rg_uniform); def_bi(c, "exponential", rg_exponential);
+    def_bi(c, "standard_exponential", rg_stdexp);
+    def_bi(c, "integers", rg_integers); def_bi(c, "randint", rg_randint);
+    def_bi(c, "choice", rg_choice); def_bi(c, "shuffle", rg_shuffle);
+    def_bi(c, "permutation", rg_permutation); def_bi(c, "poisson", rg_poisson);
+    def_bi(c, "binomial", rg_binomial); def_bi(c, "rand", rg_rand);
+    def_bi(c, "randn", rg_randn); def_bi(c, "seed", rg_seed);
+}
+static void rnd_init(Module *np)
+{
+    Module *m = new_module("numpy.random");
+    int i;
+    static const char *nm[2] = { "Generator", "RandomState" };
+    (void)rm_integers;
+    for (i = 0; i < 2; i++) {
+        Class **b = (Class **)xmalloc(sizeof(Class *));
+        b[0] = cls_object;
+        cls_rng[i] = make_class(intern_c(nm[i]), b, 1, intern_c("numpy.random"));
+        rnd_methods(cls_rng[i]);
+        mod_val(m, nm[i], mkobj(cls_rng[i], T_CLASS));
+    }
+    cls_rng[1]->ctor = rm_RandomState;
+    nrng_seed(g_rs, (u64)time(NULL) * 2654435761UL + (u64)clock());
+    mod_def(m, "seed", rm_seed); mod_def(m, "default_rng", rm_default_rng);
+    mod_def(m, "random", rm_random); mod_def(m, "random_sample", rm_random);
+    mod_def(m, "ranf", rm_random); mod_def(m, "sample", rm_random);
+    mod_def(m, "rand", rm_rand); mod_def(m, "randn", rm_randn);
+    mod_def(m, "standard_normal", rm_stdnorm); mod_def(m, "normal", rm_normal);
+    mod_def(m, "uniform", rm_uniform); mod_def(m, "exponential", rm_exponential);
+    mod_def(m, "standard_exponential", rm_stdexp);
+    mod_def(m, "randint", rm_randint); mod_def(m, "choice", rm_choice);
+    mod_def(m, "shuffle", rm_shuffle); mod_def(m, "permutation", rm_permutation);
+    mod_def(m, "poisson", rm_poisson); mod_def(m, "binomial", rm_binomial);
+    mod_val(np, "random", mkobj(m, T_MODULE));
+}
+/* ===== p7_imp.c ===== */
+/* =========================================================================
+   p7_imp.c   module import from files, sys.path, sys.modules, exec/eval,
+              globals()/locals()/dir()
+   ========================================================================= */
+#ifndef PY_LIBDIR
+#define PY_LIBDIR "pylib"
+#endif
+
+static Value sys_modules_v = { 0, { 0 } };
+static Value sys_path_v = { 0, { 0 } };
+static Class *cls_ModuleNotFoundError;
+static const char *exe_path = "";
+
+/* the only place that knows how paths are joined (VM/370 may differ) */
+static void path_join(Buf *b, const char *dir, long dlen, const char *name, long nlen)
+{
+    if (dlen > 0) {
+        buf_addn(b, dir, dlen);
+        if (dir[dlen - 1] != '/') buf_addc(b, '/');
+    }
+    buf_addn(b, name, nlen);
+}
+static Value path_join_v(Value dir, const char *name)
+{
+    Buf b;
+    buf_init(&b);
+    path_join(&b, AS_STR(dir)->s, AS_STR(dir)->len, name, (long)strlen(name));
+    return buf_value(&b);
+}
+
+static char *read_whole(const char *path, long *len)
+{
+    FILE *fp = fopen(path, "rb");
+    char *buf;
+    long n = 0, cap = 4096;
+    int c;
+    if (!fp) return NULL;
+    buf = (char *)xmalloc((size_t)cap);
+    while ((c = getc(fp)) != EOF) {
+        if (n + 2 >= cap) { cap *= 2; buf = (char *)xrealloc(buf, (size_t)cap); }
+        buf[n++] = (char)c;
+    }
+    if (ferror(fp)) { fclose(fp); free(buf); return NULL; }
+    buf[n] = 0;
+    fclose(fp);
+    *len = n;
+    return buf;
+}
+
+/* ---- compile and run -------------------------------------------------- */
+static Node *compile_src(const char *src, long len, Str *gp)
+{
+    Handler h;
+    int sgp = gc_perm;
+    Str *sg = cur_gpfx;
+    Scope *sm = mod_scope, *sc = cur_scope;
+    Node *blk = NULL;
+    h.prev = cur_handler;
+    h.sp = vsp;
+    h.depth = call_depth;
+    h.frame = cur_frame;
+    cur_handler = &h;
+    if (setjmp(h.jb) == 0) {
+        gc_perm = 1;
+        cur_gpfx = gp;
+        lex_source(src, len);
+        mod_scope = scope_new(SC_MOD, NULL);
+        cur_scope = mod_scope;
+        blk = parse_module();
+        resolve_scope(mod_scope);
+        cur_handler = h.prev;
+        gc_perm = sgp; cur_gpfx = sg; mod_scope = sm; cur_scope = sc;
+        return blk;
+    }
+    cur_handler = h.prev;
+    vsp = h.sp;
+    call_depth = h.depth;
+    cur_frame = h.frame;
+    gc_perm = sgp; cur_gpfx = sg; mod_scope = sm; cur_scope = sc;
+    throw_val(cur_exc);
+    return NULL;
+}
+
+static void init_frame(Frame *fr, Str *gp)
+{
+    fr->loc = NULL; fr->cells = NULL; fr->fn = NULL; fr->ret = NONE_V; fr->gen = NULL;
+    fr->ns = NULL; fr->resuming = 0; fr->gp = gp; fr->up = cur_frame;
+}
+static void run_block_in(Node *blk, Str *gp)
+{
+    Frame fr;
+    if (call_depth >= MAX_DEPTH) throw_new(cls_RecursionError, "maximum recursion depth exceeded");
+    init_frame(&fr, gp);
+    cur_frame = &fr;
+    call_depth++;
+    exec_block(&fr, blk);
+    call_depth--;
+    cur_frame = fr.up;
+}
+
+/* ---- modules written in Python ---------------------------------------- */
+static Value mods_get(Str *name)
+{
+    Value r;
+    if (dict_get(AS_DICT(sys_modules_v), mkobj(name, T_STR), &r)) return r;
+    return UNSET_V;
+}
+static Str *concat_dot(Str *a, const char *b, long blen, int dot)
+{
+    Buf bf;
+    Str *r;
+    buf_init(&bf);
+    buf_addn(&bf, a->s, a->len);
+    if (dot) buf_addc(&bf, '.');
+    buf_addn(&bf, b, blen);
+    r = intern(bf.s, bf.n);
+    buf_free(&bf);
+    return r;
+}
+static Module *module_new_py(Str *name)
+{
+    Module *m = (Module *)gc_alloc(sizeof(Module), T_MODULE);
+    m->name = name;
+    m->ns.k = NULL; m->ns.v = NULL; m->ns.n = m->ns.cap = 0;
+    m->gmap = NULL;
+    m->gp = concat_dot(name, "", 0, 1);
+    return m;
+}
+static void mod_gset(Module *m, const char *attr, Value v)
+{
+    G[global_index(prefixed(m->gp, intern_c(attr)))] = v;
+}
+
+static void load_module_file(Str *full, Value mv, const char *file, const char *src, long len,
+                             int ispkg, Value pkgdir, Str *parentname)
+{
+    Module *m = (Module *)mv.u.o;
+    Handler h;
+    int saved_echo = repl_echo;
+    Node *blk;
+    mod_gset(m, "__name__", mkobj(full, T_STR));
+    mod_gset(m, "__file__", mkcstr(file));
+    if (ispkg) {
+        List *pl = list_new(1);
+        list_push(pl, pkgdir);
+        mod_gset(m, "__path__", mklist(pl));
+        mod_gset(m, "__package__", mkobj(full, T_STR));
+    } else {
+        mod_gset(m, "__package__", parentname ? mkobj(parentname, T_STR) : mkstr("", 0));
+    }
+    VPUSH(mv);
+    h.prev = cur_handler;
+    h.sp = vsp;
+    h.depth = call_depth;
+    h.frame = cur_frame;
+    cur_handler = &h;
+    if (setjmp(h.jb) == 0) {
+        blk = compile_src(src, len, m->gp);
+        repl_echo = 0;
+        run_block_in(blk, m->gp);
+        repl_echo = saved_echo;
+        cur_handler = h.prev;
+        vsp--;
+        return;
+    }
+    cur_handler = h.prev;
+    vsp = h.sp - 1;
+    call_depth = h.depth;
+    cur_frame = h.frame;
+    repl_echo = saved_echo;
+    gc_perm = 0;
+    dict_del(AS_DICT(sys_modules_v), mkobj(full, T_STR));
+    throw_val(cur_exc);
+}
+
+static Value import_one(Str *full);
+
+/* look for module `leaf` in directory `dir`; returns the module or UNSET */
+static Value try_dir(Value dir, Str *leaf, Str *full, Str *parentname)
+{
+    Buf pb;
+    Value sub, pkgfile, mv;
+    char *src;
+    long len;
+    int ispkg = 1;
+    Module *m;
+    if (dir.t != T_STR) return UNSET_V;
+    sub = path_join_v(dir, leaf->s);
+    VPUSH(sub);
+    buf_init(&pb);
+    path_join(&pb, AS_STR(sub)->s, AS_STR(sub)->len, "__init__.py", 11);
+    src = read_whole(pb.s, &len);
+    if (!src) {
+        buf_free(&pb);
+        buf_init(&pb);
+        buf_addn(&pb, AS_STR(sub)->s, AS_STR(sub)->len);
+        buf_add(&pb, ".py");
+        src = read_whole(pb.s, &len);
+        ispkg = 0;
+    }
+    if (!src) { buf_free(&pb); vsp--; return UNSET_V; }
+    pkgfile = mkstr(pb.s, pb.n);
+    buf_free(&pb);
+    VPUSH(pkgfile);
+    m = module_new_py(full);
+    mv = mkobj(m, T_MODULE);
+    VPUSH(mv);
+    dict_set(AS_DICT(sys_modules_v), mkobj(full, T_STR), mv);
+    load_module_file(full, mv, AS_STR(pkgfile)->s, src, len, ispkg, sub, parentname);
+    free(src);
+    vsp -= 3;
+    return mv;
+}
+
+static Value module_getattr_opt(Value mv, Str *nm);
+
+static int import_soft;   /* next import_one returns UNSET instead of raising ModuleNotFoundError */
+static Value import_one(Str *full)
+{
+    Value m = mods_get(full), dirs, r;
+    int soft = import_soft;
+    Str *leaf, *parent = NULL;
+    Value pm = UNSET_V;
+    long i, dot = -1;
+    import_soft = 0;
+    if (m.t != T_UNSET) {
+        if (full->len == 5 && memcmp(full->s, "numpy", 5) == 0) np_float_methods();
+        return m;
+    }
+    for (i = full->len - 1; i >= 0; i--) if (full->s[i] == '.') { dot = i; break; }
+    if (dot >= 0) {
+        parent = intern(full->s, dot);
+        leaf = intern(full->s + dot + 1, full->len - dot - 1);
+        pm = import_one(parent);
+        dirs = module_getattr_opt(pm, intern_c("__path__"));
+        if (dirs.t != T_LIST)
+            throw_new(cls_ModuleNotFoundError, "No module named '%.200s'; '%.100s' is not a package",
+                      full->s, parent->s);
+    } else {
+        leaf = full;
+        dirs = sys_path_v;
+    }
+    VPUSH(pm);
+    VPUSH(dirs);
+    for (i = 0; i < AS_LIST(dirs)->n; i++) {
+        r = try_dir(AS_LIST(dirs)->a[i], leaf, full, parent);
+        if (r.t != T_UNSET) {
+            if (pm.t == T_MODULE) set_attr(pm, leaf, r);
+            vsp -= 2;
+            return r;
+        }
+    }
+    vsp -= 2;
+    if (soft) return UNSET_V;
+    throw_new(cls_ModuleNotFoundError, "No module named '%.200s'", full->s);
+    return UNSET_V;
+}
+
+/* import `dotted` and all its parents; returns the leaf, or the top-level package */
+static Value import_dotted(Str *dotted, int want_leaf)
+{
+    Value leaf = import_one(dotted);
+    long i;
+    if (want_leaf) return leaf;
+    for (i = 0; i < dotted->len; i++)
+        if (dotted->s[i] == '.') return import_one(intern(dotted->s, i));
+    return leaf;
+}
+
+/* ---- module attributes ------------------------------------------------ */
+static Value module_getattr_opt(Value mv, Str *nm)
+{
+    Module *m = (Module *)mv.u.o;
+    if (m->gp) {
+        long gi = module_slot(m, nm, 0);
+        if (gi >= 0 && G[gi].t != T_UNSET) return G[gi];
+        return UNSET_V;
+    } else {
+        Value *p = amap_get(&m->ns, nm);
+        if (p) return *p;
+    }
+    return UNSET_V;
+}
+
+/* package that the code with global prefix `pfx` belongs to */
+static Str *package_of(Str *pfx)
+{
+    Value m, p;
+    if (!pfx) return NULL;
+    m = mods_get(intern(pfx->s, pfx->len - 1));
+    if (m.t != T_MODULE) return NULL;
+    p = module_getattr_opt(m, intern_c("__package__"));
+    if (p.t != T_STR || AS_STR(p)->len == 0) return NULL;
+    return intern_str(AS_STR(p));
+}
+static Str *resolve_from_name(Node *n)
+{
+    Str *base;
+    int i;
+    if (n->level == 0) return n->name;
+    base = package_of(n->pfx);
+    if (!base) throw_new(cls_ImportError, "attempted relative import with no known parent package");
+    for (i = 1; i < n->level; i++) {
+        long k;
+        for (k = base->len - 1; k >= 0 && base->s[k] != '.'; k--) { }
+        if (k < 0) throw_new(cls_ImportError, "attempted relative import beyond top-level package");
+        base = intern(base->s, k);
+    }
+    if (!n->name) return base;
+    return concat_dot(base, n->name->s, n->name->len, 1);
+}
+
+static void exec_import(Frame *f, Node *n)
+{
+    int i;
+    for (i = 0; i < n->n; i++) {
+        Node *it = n->list[i];
+        Value m = import_dotted(it->name, it->op);
+        store_var(f, it->b->var, m);
+    }
+}
+
+/* names a module exports for "from m import *" */
+static Value module_public_names(Value mv)
+{
+    Module *m = (Module *)mv.u.o;
+    List *l = list_new(16);
+    Value lv = mklist(l), all;
+    long i;
+    VPUSH(lv);
+    all = module_getattr_opt(mv, intern_c("__all__"));
+    if (all.t == T_LIST || all.t == T_TUPLE) {
+        for (i = 0; i < AS_LIST(all)->n; i++) list_push(l, AS_LIST(all)->a[i]);
+    } else if (m->gp) {
+        for (i = 0; i < nglobals; i++) {
+            Str *g = gnames[i];
+            if (g->len > m->gp->len && memcmp(g->s, m->gp->s, (size_t)m->gp->len) == 0 &&
+                G[i].t != T_UNSET && g->s[m->gp->len] != '_' &&
+                !memchr(g->s + m->gp->len, '.', (size_t)(g->len - m->gp->len)))
+                list_push(l, mkstr(g->s + m->gp->len, g->len - m->gp->len));
+        }
+    } else {
+        for (i = 0; i < m->ns.n; i++)
+            if (m->ns.k[i]->s[0] != '_') list_push(l, mkobj(m->ns.k[i], T_STR));
+    }
+    vsp--;
+    return lv;
+}
+
+static void exec_from(Frame *f, Node *n)
+{
+    Str *full = resolve_from_name(n);
+    Value m = import_one(full), names;
+    int i;
+    if (n->op == 1) {
+        long k;
+        Module *md = (Module *)m.u.o;
+        VPUSH(m);
+        names = module_public_names(m);
+        VPUSH(names);
+        for (k = 0; k < AS_LIST(names)->n; k++) {
+            Value nm = AS_LIST(names)->a[k], v;
+            if (nm.t != T_STR) throw_new(cls_TypeError, "Item in __all__ must be str");
+            v = module_getattr_opt(m, intern_str(AS_STR(nm)));
+            if (v.t == T_UNSET) {
+                v = mods_get(concat_dot(md->name, AS_STR(nm)->s, AS_STR(nm)->len, 1));
+                if (v.t == T_UNSET)
+                    throw_new(cls_AttributeError, "module '%.100s' has no attribute '%.100s'",
+                              md->name->s, AS_STR(nm)->s);
+            }
+            G[global_index(prefixed(n->pfx, intern_str(AS_STR(nm))))] = v;
+        }
+        vsp -= 2;
+        return;
+    }
+    VPUSH(m);
+    for (i = 0; i < n->n; i++) {
+        Node *it = n->list[i];
+        Value v = module_getattr_opt(m, it->name);
+        if (v.t == T_UNSET) {
+            Value path = module_getattr_opt(m, intern_c("__path__"));
+            if (path.t == T_LIST) {
+                import_soft = 1;
+                v = import_one(concat_dot(full, it->name->s, it->name->len, 1));
+                import_soft = 0;
+            }
+        }
+        if (v.t == T_UNSET) {
+            Value part = module_getattr_opt(m, intern_c("__file__"));
+            throw_new(cls_ImportError, "cannot import name '%.100s' from '%.100s' (%.200s)",
+                      it->name->s, full->s, part.t == T_STR ? AS_STR(part)->s : "unknown location");
+        }
+        store_var(f, it->b->var, v);
+    }
+    vsp--;
+}
+
+/* ---- sys.path --------------------------------------------------------- */
+static void path_append(List *l, const char *s, long n)
+{
+    list_push(l, mkstr(s, n));
+}
+static void init_sys_path(const char *script)
+{
+    List *l = list_new(8);
+    const char *env = getenv("PYLIB");
+    long i, last = -1, n = (long)strlen(script);
+    Buf b;
+    for (i = 0; i < n; i++) if (script[i] == '/') last = i;
+    path_append(l, script, last < 0 ? 0 : (last == 0 ? 1 : last));
+    if (env) {
+        const char *p = env;
+        while (*p) {
+            const char *q = p;
+            while (*q && *q != ':') q++;
+            if (q > p) path_append(l, p, (long)(q - p));
+            p = *q ? q + 1 : q;
+        }
+    }
+    n = (long)strlen(exe_path);
+    last = -1;
+    for (i = 0; i < n; i++) if (exe_path[i] == '/') last = i;
+    buf_init(&b);
+    path_join(&b, exe_path, last < 0 ? 0 : last, "pylib", 5);
+    path_append(l, b.s, b.n);
+    buf_free(&b);
+    buf_init(&b);
+    path_join(&b, exe_path, last < 0 ? 0 : last, "../pylib", 8);
+    path_append(l, b.s, b.n);
+    buf_free(&b);
+    path_append(l, PY_LIBDIR, (long)strlen(PY_LIBDIR));
+    sys_path_v = mklist(l);
+}
+
+/* ---- globals() locals() dir() exec() eval() --------------------------- */
+static Str *cur_gp(void)
+{
+    Frame *f;
+    for (f = cur_frame; f; f = f->up) if (f->gp) return f->gp;
+    return main_gp;
+}
+static Value globals_of(Str *gp)
+{
+    Dict *d = dict_new();
+    Value dv = mkobj(d, T_DICT);
+    long i;
+    VPUSH(dv);
+    for (i = 0; i < nglobals; i++) {
+        Str *g = gnames[i];
+        if (gp ? (g->len > gp->len && memcmp(g->s, gp->s, (size_t)gp->len) == 0 &&
+                  G[i].t != T_UNSET &&
+                  !memchr(g->s + gp->len, '.', (size_t)(g->len - gp->len)))
+               : 0) {
+            Value k = mkstr(g->s + gp->len, g->len - gp->len);
+            VPUSH(k);
+            dict_set(d, k, G[i]);
+            vsp--;
+        }
+    }
+    vsp--;
+    return dv;
+}
+BI(bi_globals)
+{
+    (void)x;
+    return globals_of(cur_gp());
+}
+static Value locals_dict(void)
+{
+    Frame *f = cur_frame;
+    Dict *d;
+    Value dv;
+    int i;
+    if (!f || !f->fn || !f->loc) return globals_of(cur_gp());
+    d = dict_new();
+    dv = mkobj(d, T_DICT);
+    VPUSH(dv);
+    {
+        Scope *sc = f->fn->def->fd->sc;
+        for (i = 0; i < sc->nvars; i++) {
+            Var *v = sc->vars[i];
+            Value val = UNSET_V;
+            if (v->kind == VK_LOCAL) val = f->loc[v->slot];
+            else if (v->kind == VK_CELL) val = ((Cell *)f->loc[v->slot].u.o)->v;
+            else if (v->kind == VK_FREE && f->cells) val = f->cells[v->slot]->v;
+            if (val.t != T_UNSET && v->name->s[0] != '.') dict_set(d, mkobj(v->name, T_STR), val);
+        }
+    }
+    vsp--;
+    return dv;
+}
+BI(bi_locals)
+{
+    (void)x;
+    return locals_dict();
+}
+BI(bi_vars2)
+{
+    if (x->n == 0) return locals_dict();
+    if (A(0).t == T_MODULE && ((Module *)A(0).u.o)->gp) return globals_of(((Module *)A(0).u.o)->gp);
+    return get_attr(A(0), S_dict);
+}
+static void dir_add(List *l, Str *nm)
+{
+    long i;
+    for (i = 0; i < l->n; i++) if (AS_STR(l->a[i]) == nm) return;
+    list_push(l, mkobj(nm, T_STR));
+}
+BI(bi_dir)
+{
+    List *l = list_new(32);
+    Value lv = mklist(l), o;
+    Value *base = vsp;
+    long i;
+    VPUSH(lv);
+    if (x->n == 0) {
+        Value d = locals_dict();
+        VPUSH(d);
+        for (i = 0; i < AS_DICT(d)->used; i++)
+            if (AS_DICT(d)->e[i].k.t != T_UNSET) dir_add(l, intern_str(AS_STR(AS_DICT(d)->e[i].k)));
+    } else {
+        o = A(0);
+        if (o.t == T_MODULE) {
+            Module *m = (Module *)o.u.o;
+            if (m->gp) {
+                Value d = globals_of(m->gp);
+                VPUSH(d);
+                for (i = 0; i < AS_DICT(d)->used; i++)
+                    if (AS_DICT(d)->e[i].k.t != T_UNSET)
+                        dir_add(l, intern_str(AS_STR(AS_DICT(d)->e[i].k)));
+            } else {
+                for (i = 0; i < m->ns.n; i++) dir_add(l, m->ns.k[i]);
+            }
+        } else {
+            Class *c = o.t == T_CLASS ? AS_CLASS(o) : class_of(o);
+            int k, n;
+            Class **mro = class_mro_array(c, &n);
+            if (o.t == T_INST)
+                for (i = 0; i < AS_INST(o)->a.n; i++) dir_add(l, AS_INST(o)->a.k[i]);
+            for (k = 0; k < n; k++)
+                for (i = 0; i < mro[k]->ns.n; i++) dir_add(l, mro[k]->ns.k[i]);
+            free(mro);
+        }
+    }
+    sort_list(l, NONE_V, 0);
+    vsp = base;
+    return lv;
+}
+BI(bi_exc_info)
+{
+    Value r[3];
+    (void)x;
+    if (handled_exc.t == T_INST) {
+        r[0] = mkobj(AS_INST(handled_exc)->cls, T_CLASS);
+        r[1] = handled_exc;
+        r[2] = NONE_V;
+    } else {
+        r[0] = r[1] = r[2] = NONE_V;
+    }
+    return mktuple_from(r, 3);
+}
+
+static int exec_ns_serial;
+/* exec(src[, globals[, locals]]) and eval(src[, globals[, locals]]) */
+static Value exec_eval(Args *x, int is_eval)
+{
+    Value srcv, gd = UNSET_V, ld = UNSET_V, result = NONE_V;
+    Str *gp;
+    Node *blk;
+    Buf b;
+    long i, k;
+    int usedict = 0;
+    need(x, 1, 3, is_eval ? "eval" : "exec");
+    srcv = A(0);
+    if (srcv.t != T_STR) throw_new(cls_TypeError, "%s() arg 1 must be a string", is_eval ? "eval" : "exec");
+    if (x->n > 1) gd = A(1); else gd = kwget(x, "globals");
+    if (x->n > 2) ld = A(2); else ld = kwget(x, "locals");
+    if (gd.t == T_DICT) {
+        usedict = 1;
+        gp = intern_c("<exec>.");
+        /* clear the scratch namespace, then load the dicts */
+        for (i = 0; i < nglobals; i++)
+            if (gnames[i]->len > gp->len && memcmp(gnames[i]->s, gp->s, (size_t)gp->len) == 0)
+                G[i] = UNSET_V;
+        for (k = 0; k < 2; k++) {
+            Value dd = k == 0 ? gd : ld;
+            if (dd.t != T_DICT) continue;
+            for (i = 0; i < AS_DICT(dd)->used; i++) {
+                DEnt *e = &AS_DICT(dd)->e[i];
+                if (e->k.t == T_STR)
+                    G[global_index(prefixed(gp, intern_str(AS_STR(e->k))))] = e->v;
+            }
+        }
+    } else {
+        gp = cur_gp();
+        if (ld.t == T_DICT) {
+            for (i = 0; i < AS_DICT(ld)->used; i++) {
+                DEnt *e = &AS_DICT(ld)->e[i];
+                if (e->k.t == T_STR)
+                    G[global_index(prefixed(gp, intern_str(AS_STR(e->k))))] = e->v;
+            }
+        }
+    }
+    buf_init(&b);
+    if (is_eval) {
+        const char *s = AS_STR(srcv)->s;
+        long n = AS_STR(srcv)->len;
+        while (n > 0 && (*s == ' ' || *s == '\t')) { s++; n--; }
+        buf_addc(&b, '(');
+        buf_addn(&b, s, n);
+        buf_add(&b, "\n)\n");
+    } else {
+        buf_addn(&b, AS_STR(srcv)->s, AS_STR(srcv)->len);
+        buf_addc(&b, '\n');
+    }
+    exec_ns_serial++;
+    VPUSH(srcv);
+    blk = compile_src(b.s, b.n, gp);
+    buf_free(&b);
+    if (is_eval) {
+        Frame fr;
+        if (blk->n < 1 || blk->list[0]->kind != S_EXPR) throw_new(cls_SyntaxError, "invalid syntax");
+        init_frame(&fr, gp);
+        cur_frame = &fr;
+        call_depth++;
+        result = eval(&fr, blk->list[0]->a);
+        call_depth--;
+        cur_frame = fr.up;
+    } else {
+        run_block_in(blk, gp);
+    }
+    vsp--;
+    if (usedict) {
+        VPUSH(result);
+        for (i = 0; i < nglobals; i++) {
+            Str *g = gnames[i];
+            if (g->len > gp->len && memcmp(g->s, gp->s, (size_t)gp->len) == 0 && G[i].t != T_UNSET &&
+                !memchr(g->s + gp->len, '.', (size_t)(g->len - gp->len)) && g->s[gp->len] != '.')
+                dict_set(AS_DICT(gd), mkstr(g->s + gp->len, g->len - gp->len), G[i]);
+        }
+        vsp--;
+    }
+    return result;
+}
+BI(bi_exec) { exec_eval(x, 0); return NONE_V; }
+BI(bi_eval) { return exec_eval(x, 1); }
+BI(bi_import)
+{
+    need(x, 1, 5, "__import__");
+    return import_dotted(intern_str(astr(A(0), "name")), x->n > 3 && A(3).t == T_TUPLE && AS_LIST(A(3))->n > 0);
+}
+
+/* ---- os and os.path --------------------------------------------------- */
+BI(os_getenv)
+{
+    const char *v;
+    need(x, 1, 2, "getenv");
+    v = getenv(astr(A(0), "key")->s);
+    if (v) return mkcstr(v);
+    return x->n > 1 ? A(1) : NONE_V;
+}
+BI(os_getcwd)
+{
+    (void)x;
+#ifdef PY_POSIX
+    {
+        char b[4096];
+        if (getcwd(b, sizeof(b))) return mkcstr(b);
+    }
+#endif
+    return mkcstr(".");
+}
+BI(osp_join)
+{
+    Buf b;
+    int i;
+    need(x, 1, 1000, "join");
+    buf_init(&b);
+    for (i = 0; i < x->n; i++) {
+        Str *p = astr(A(i), "path");
+        if (p->len > 0 && p->s[0] == '/') b.n = 0;
+        if (b.n > 0 && b.s[b.n - 1] != '/' && p->len > 0) buf_addc(&b, '/');
+        else if (b.n > 0 && b.s[b.n - 1] != '/' && i == x->n - 1 && p->len == 0) buf_addc(&b, '/');
+        buf_addn(&b, p->s, p->len);
+    }
+    return buf_value(&b);
+}
+static long last_slash(Str *s)
+{
+    long i;
+    for (i = s->len - 1; i >= 0; i--) if (s->s[i] == '/') return i;
+    return -1;
+}
+BI(osp_basename)
+{
+    Str *s;
+    need(x, 1, 1, "basename");
+    s = astr(A(0), "path");
+    return mkstr(s->s + last_slash(s) + 1, s->len - last_slash(s) - 1);
+}
+BI(osp_dirname)
+{
+    Str *s;
+    long k, e;
+    need(x, 1, 1, "dirname");
+    s = astr(A(0), "path");
+    k = last_slash(s);
+    if (k < 0) return mkstr("", 0);
+    e = k;
+    while (e > 0 && s->s[e - 1] == '/') e--;
+    if (e == 0) e = 1;
+    return mkstr(s->s, e);
+}
+BI(osp_split)
+{
+    Value h = osp_dirname(x), t = osp_basename(x);
+    return mktuple2(h, t);
+}
+BI(osp_splitext)
+{
+    Str *s;
+    long i, slash;
+    need(x, 1, 1, "splitext");
+    s = astr(A(0), "path");
+    slash = last_slash(s);
+    for (i = s->len - 1; i > slash + 1; i--) {
+        if (s->s[i] == '.') {
+            long j = slash + 1;
+            while (j < i && s->s[j] == '.') j++;
+            if (j < i) return mktuple2(mkstr(s->s, i), mkstr(s->s + i, s->len - i));
+            break;
+        }
+    }
+    return mktuple2(A(0), mkstr("", 0));
+}
+BI(osp_isabs)
+{
+    Str *s;
+    need(x, 1, 1, "isabs");
+    s = astr(A(0), "path");
+    return mkbool(s->len > 0 && s->s[0] == '/');
+}
+BI(osp_normpath)
+{
+    Str *s;
+    Buf out;
+    List *parts = list_new(8);
+    Value pv = mklist(parts);
+    long i = 0, k;
+    int abs;
+    need(x, 1, 1, "normpath");
+    s = astr(A(0), "path");
+    abs = s->len > 0 && s->s[0] == '/';
+    VPUSH(pv);
+    while (i < s->len) {
+        long j = i;
+        while (j < s->len && s->s[j] != '/') j++;
+        if (j > i) {
+            if (j - i == 1 && s->s[i] == '.') { }
+            else if (j - i == 2 && s->s[i] == '.' && s->s[i + 1] == '.') {
+                if (parts->n > 0 && !(AS_STR(parts->a[parts->n - 1])->len == 2 &&
+                                      AS_STR(parts->a[parts->n - 1])->s[0] == '.' &&
+                                      AS_STR(parts->a[parts->n - 1])->s[1] == '.')) parts->n--;
+                else if (!abs) list_push(parts, mkstr("..", 2));
+            } else list_push(parts, mkstr(s->s + i, j - i));
+        }
+        i = j + 1;
+    }
+    buf_init(&out);
+    if (abs) buf_addc(&out, '/');
+    for (k = 0; k < parts->n; k++) {
+        if (k) buf_addc(&out, '/');
+        buf_addn(&out, AS_STR(parts->a[k])->s, AS_STR(parts->a[k])->len);
+    }
+    if (out.n == 0) buf_addc(&out, '.');
+    vsp--;
+    return buf_value(&out);
+}
+BI(osp_abspath)
+{
+    Value cw, j[2], p;
+    Args a2;
+    need(x, 1, 1, "abspath");
+    p = A(0);
+    if (astr(p, "path")->len == 0 || AS_STR(p)->s[0] != '/') {
+        Args none;
+        none.n = 0; none.a = NULL; none.nk = 0; none.kw = NULL;
+        cw = os_getcwd(&none);
+        j[0] = cw; j[1] = p;
+        a2.n = 2; a2.a = j; a2.nk = 0; a2.kw = NULL;
+        VPUSH(cw);
+        p = osp_join(&a2);
+        vsp--;
+    }
+    VPUSH(p);
+    a2.n = 1; a2.a = &p; a2.nk = 0; a2.kw = NULL;
+    p = osp_normpath(&a2);
+    vsp--;
+    return p;
+}
+BI(osp_expanduser)
+{
+    Str *s;
+    const char *home;
+    need(x, 1, 1, "expanduser");
+    s = astr(A(0), "path");
+    if (s->len > 0 && s->s[0] == '~' && (s->len == 1 || s->s[1] == '/')) {
+        home = getenv("HOME");
+        if (home) {
+            Buf b;
+            buf_init(&b);
+            buf_add(&b, home);
+            buf_addn(&b, s->s + 1, s->len - 1);
+            return buf_value(&b);
+        }
+    }
+    return A(0);
+}
+BI(osp_exists)
+{
+    FILE *fp;
+    need(x, 1, 1, "exists");
+    fp = fopen(astr(A(0), "path")->s, "rb");
+    if (!fp) return FALSE_V;
+    fclose(fp);
+    return TRUE_V;
+}
+static int path_is_dir(const char *p)
+{
+    FILE *fp = fopen(p, "rb");
+    int isdir = 0;
+    if (!fp) return 0;
+    if (getc(fp) == EOF && ferror(fp)) isdir = 1;
+    fclose(fp);
+    return isdir;
+}
+BI(osp_isdir)
+{
+    need(x, 1, 1, "isdir");
+    return mkbool(path_is_dir(astr(A(0), "path")->s));
+}
+BI(osp_isfile)
+{
+    FILE *fp;
+    int ok;
+    need(x, 1, 1, "isfile");
+    fp = fopen(astr(A(0), "path")->s, "rb");
+    if (!fp) return FALSE_V;
+    ok = !(getc(fp) == EOF && ferror(fp));
+    fclose(fp);
+    return mkbool(ok);
+}
+BI(osp_getsize)
+{
+    FILE *fp;
+    long n;
+    need(x, 1, 1, "getsize");
+    fp = fopen(astr(A(0), "path")->s, "rb");
+    if (!fp) throw_new(cls_FileNotFoundError, "[Errno 2] No such file or directory: '%.200s'", AS_STR(A(0))->s);
+    fseek(fp, 0L, SEEK_END);
+    n = ftell(fp);
+    fclose(fp);
+    return mkint(n);
+}
+BI(os_remove)
+{
+    need(x, 1, 1, "remove");
+    if (remove(astr(A(0), "path")->s) != 0)
+        throw_new(cls_FileNotFoundError, "[Errno 2] No such file or directory: '%.200s'", AS_STR(A(0))->s);
+    return NONE_V;
+}
+BI(os_rename)
+{
+    need(x, 2, 2, "rename");
+    if (rename(astr(A(0), "src")->s, astr(A(1), "dst")->s) != 0)
+        throw_new(cls_OSError, "rename failed: '%.200s'", AS_STR(A(0))->s);
+    return NONE_V;
+}
+
+
+#ifdef PY_POSIX
+extern char **environ;
+#endif
+static Value init_environ(void)
+{
+    Dict *d = dict_new();
+    Value dv = mkobj(d, T_DICT);
+#ifdef PY_POSIX
+    {
+        char **e;
+        for (e = environ; e && *e; e++) {
+            const char *eq = strchr(*e, '=');
+            if (eq) dict_set(d, mkstr(*e, (long)(eq - *e)), mkcstr(eq + 1));
+        }
+    }
+#endif
+    return dv;
 }
 /* ===== p7_mod.c ===== */
 /* =========================================================================
    p7_mod.c   builtin modules (math random sys time) and initialisation
    ========================================================================= */
-static Module *modules[16];
-static int nmodules;
-
 static Module *new_module(const char *name)
 {
     Module *m = (Module *)gc_alloc(sizeof(Module), T_MODULE);
     m->name = intern_c(name);
     m->ns.k = NULL; m->ns.v = NULL; m->ns.n = m->ns.cap = 0;
-    modules[nmodules++] = m;
+    m->gp = NULL;
+    m->gmap = NULL;
+    if (sys_modules_v.t == T_DICT) dict_set(AS_DICT(sys_modules_v), mkobj(m->name, T_STR), mkobj(m, T_MODULE));
     return m;
-}
-static Value find_module(Str *nm)
-{
-    int i;
-    if (nm->len == 5 && memcmp(nm->s, "numpy", 5) == 0) np_float_methods();
-    for (i = 0; i < nmodules; i++)
-        if (modules[i]->name == nm) return mkobj(modules[i], T_MODULE);
-    return UNSET_V;
 }
 static void mod_def(Module *m, const char *name, BFn fn)
 {
@@ -11244,6 +16353,291 @@ BI(m_prod)
     return r;
 }
 
+/* ---- more math: isclose fsum log1p expm1 erf gamma ... (portable C89 versions) ---- */
+BI(m_isclose)
+{
+    double a, b, rel = 1e-9, ab = 0.0, diff;
+    Value v;
+    need(x, 2, 4, "isclose");
+    a = dbl_arg(x, 0); b = dbl_arg(x, 1);
+    v = x->n > 2 ? A(2) : kwget(x, "rel_tol");
+    if (v.t != T_UNSET) rel = to_dbl(v);
+    v = x->n > 3 ? A(3) : kwget(x, "abs_tol");
+    if (v.t != T_UNSET) ab = to_dbl(v);
+    if (a == b) return TRUE_V;
+    if (a - a != 0 || b - b != 0) return FALSE_V;
+    diff = fabs(b - a);
+    return mkbool(diff <= fabs(rel * b) || diff <= fabs(rel * a) || diff <= ab);
+}
+BI(m_fsum)
+{
+    double *p = (double *)xmalloc(sizeof(double) * 64), xv, y, hi, lo = 0.0, yr;
+    long np = 0, cap = 64, i, j, n;
+    Value it, v;
+    need(x, 1, 1, "fsum");
+    it = get_iter(A(0));
+    VPUSH(it);
+    while (iter_next(it, &v)) {
+        xv = to_dbl(v);
+        for (i = j = 0; j < np; j++) {
+            y = p[j];
+            if (fabs(xv) < fabs(y)) { double t = xv; xv = y; y = t; }
+            hi = xv + y;
+            yr = hi - xv;
+            lo = y - yr;
+            if (lo != 0.0) p[i++] = lo;
+            xv = hi;
+        }
+        np = i;
+        if (np >= cap) { cap *= 2; p = (double *)xrealloc(p, sizeof(double) * (size_t)cap); }
+        p[np++] = xv;
+    }
+    vsp--;
+    n = np;
+    hi = 0.0;
+    if (n > 0) {
+        hi = p[--n];
+        lo = 0.0;
+        while (n > 0) {
+            xv = hi;
+            y = p[--n];
+            hi = xv + y;
+            yr = hi - xv;
+            lo = y - yr;
+            if (lo != 0.0) break;
+        }
+        if (n > 0 && ((lo < 0.0 && p[n - 1] < 0.0) || (lo > 0.0 && p[n - 1] > 0.0))) {
+            y = lo * 2.0;
+            xv = hi + y;
+            yr = xv - hi;
+            if (y == yr) hi = xv;
+        }
+    }
+    free(p);
+    return mkfloat(hi);
+}
+static double d_log1p(double x)
+{
+    double u = 1.0 + x;
+    if (u == 1.0) return x;
+    return log(u) * x / (u - 1.0);
+}
+static double d_expm1(double x)
+{
+    double u = exp(x), um1;
+    if (u == 1.0) return x;
+    um1 = u - 1.0;
+    if (um1 == -1.0) return -1.0;
+    if (u - u != 0) return u;
+    return um1 * x / log(u);
+}
+static double d_erf_series(double x)
+{
+    double term = x, sum = x, x2 = x * x;
+    int n;
+    for (n = 0; n < 400; n++) {
+        term *= 2.0 * x2 / (2.0 * n + 3.0);
+        sum += term;
+        if (fabs(term) < 1e-17 * fabs(sum)) break;
+    }
+    return 1.1283791670955126 * exp(-x2) * sum;
+}
+static double d_erfc_cf(double x)
+{
+    /* continued fraction for x > 0, modified Lentz */
+    double tiny = 1e-300, f, c, d, delta;
+    int n;
+    f = x; if (f == 0) f = tiny;
+    c = f; d = 0.0;
+    for (n = 1; n < 2000; n++) {
+        double an = n * 0.5;
+        d = x + an * d; if (d == 0) d = tiny;
+        c = x + an / c; if (c == 0) c = tiny;
+        d = 1.0 / d;
+        delta = c * d;
+        f *= delta;
+        if (fabs(delta - 1.0) < 1e-16) break;
+    }
+    return exp(-x * x) / f * 0.5641895835477563;
+}
+static double d_erf(double x)
+{
+    double a = fabs(x), r;
+    if (x != x) return x;
+    if (a < 2.0) r = d_erf_series(a);
+    else if (a > 6.0) r = 1.0;
+    else r = 1.0 - d_erfc_cf(a);
+    return x < 0 ? -r : r;
+}
+static double d_erfc(double x)
+{
+    if (x != x) return x;
+    if (x < 0.5) return 1.0 - d_erf(x);
+    if (x > 27.0) return 0.0;
+    return d_erfc_cf(x);
+}
+static double d_lanczos_sum(double x)
+{
+    static const double c[9] = { 0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+        771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012,
+        9.9843695780195716e-6, 1.5056327351493116e-7 };
+    double a = c[0];
+    int i;
+    for (i = 1; i < 9; i++) a += c[i] / (x + i);
+    return a;
+}
+static double d_gamma(double x)
+{
+    double PI = 3.14159265358979323846;
+    if (x == floor(x) && x > 0 && x < 171.0) {
+        double r = 1.0;
+        int i, n = (int)x;
+        for (i = 2; i < n; i++) r *= (double)i;
+        return r;
+    }
+    if (x < 0.5) return PI / (sin(PI * x) * d_gamma(1.0 - x));
+    x -= 1.0;
+    {
+        double t = x + 7.5;
+        return sqrt(2.0 * PI) * pow(t, x + 0.5) * exp(-t) * d_lanczos_sum(x);
+    }
+}
+static double d_lgamma(double x)
+{
+    double PI = 3.14159265358979323846;
+    if (x < 0.5) return log(PI / fabs(sin(PI * x))) - d_lgamma(1.0 - x);
+    x -= 1.0;
+    {
+        double t = x + 7.5;
+        return 0.5 * log(2.0 * PI) + (x + 0.5) * log(t) - t + log(d_lanczos_sum(x));
+    }
+}
+#define MATH1B(name, expr) \
+    BI(name) { double v; need(x, 1, 1, "math"); v = dbl_arg(x, 0); return mkfloat(expr); }
+MATH1B(m_log1p, d_log1p(v))
+MATH1B(m_expm1, d_expm1(v))
+MATH1B(m_erf, d_erf(v))
+MATH1B(m_erfc, d_erfc(v))
+MATH1B(m_exp2, pow(2.0, v))
+BI(m_gamma)
+{
+    double v;
+    need(x, 1, 1, "gamma");
+    v = dbl_arg(x, 0);
+    if (v == floor(v) && v <= 0) throw_new(cls_ValueError, "math domain error");
+    if (v > 171.7) throw_new(cls_OverflowError, "math range error");
+    return mkfloat(d_gamma(v));
+}
+BI(m_lgamma)
+{
+    double v;
+    need(x, 1, 1, "lgamma");
+    v = dbl_arg(x, 0);
+    if (v == floor(v) && v <= 0) throw_new(cls_ValueError, "math domain error");
+    return mkfloat(d_lgamma(v));
+}
+BI(m_asinh)
+{
+    double v, a, r;
+    need(x, 1, 1, "asinh");
+    v = dbl_arg(x, 0);
+    a = fabs(v);
+    if (a < 1e-8) return mkfloat(v);
+    r = a > 1e8 ? log(a) + 0.69314718055994530942 : d_log1p(a + a * a / (1.0 + sqrt(1.0 + a * a)));
+    return mkfloat(v < 0 ? -r : r);
+}
+BI(m_acosh)
+{
+    double v;
+    need(x, 1, 1, "acosh");
+    v = dbl_arg(x, 0);
+    domain_check(v >= 1.0);
+    if (v > 1e8) return mkfloat(log(v) + 0.69314718055994530942);
+    return mkfloat(d_log1p((v - 1.0) + sqrt((v - 1.0) * (v + 1.0))));
+}
+BI(m_atanh)
+{
+    double v;
+    need(x, 1, 1, "atanh");
+    v = dbl_arg(x, 0);
+    domain_check(v > -1.0 && v < 1.0);
+    return mkfloat(0.5 * d_log1p(2.0 * v / (1.0 - v)));
+}
+BI(m_cbrt)
+{
+    double v, a, r;
+    need(x, 1, 1, "cbrt");
+    v = dbl_arg(x, 0);
+    if (v == 0 || v - v != 0) return mkfloat(v);
+    a = fabs(v);
+    r = pow(a, 1.0 / 3.0);
+    r = r - (r * r * r - a) / (3.0 * r * r);
+    return mkfloat(v < 0 ? -r : r);
+}
+BI(m_remainder)
+{
+    double a, b, r, q;
+    need(x, 2, 2, "remainder");
+    a = dbl_arg(x, 0); b = dbl_arg(x, 1);
+    if (b == 0) throw_new(cls_ValueError, "math domain error");
+    r = fmod(a, b);
+    q = (a - r) / b;
+    if (fabs(r) * 2.0 > fabs(b) || (fabs(r) * 2.0 == fabs(b) && fmod(q, 2.0) != 0.0))
+        r -= (r < 0 ? -fabs(b) : fabs(b));
+    return mkfloat(r);
+}
+BI(m_modf)
+{
+    double ip, fp;
+    need(x, 1, 1, "modf");
+    fp = modf(dbl_arg(x, 0), &ip);
+    return mktuple2(mkfloat(fp), mkfloat(ip));
+}
+BI(m_frexp)
+{
+    int e;
+    double m;
+    need(x, 1, 1, "frexp");
+    m = frexp(dbl_arg(x, 0), &e);
+    return mktuple2(mkfloat(m), mkint(e));
+}
+BI(m_ldexp)
+{
+    need(x, 2, 2, "ldexp");
+    return mkfloat(ldexp(dbl_arg(x, 0), (int)to_index(A(1))));
+}
+BI(m_perm)
+{
+    Value r = mkint(1);
+    long n, k, i;
+    need(x, 1, 2, "perm");
+    n = to_index(A(0));
+    k = x->n > 1 && A(1).t != T_NONE ? to_index(A(1)) : n;
+    if (n < 0 || k < 0) throw_new(cls_ValueError, "n and k must be non-negative integers");
+    if (k > n) return mkint(0);
+    for (i = 0; i < k; i++) r = int_mul(r, mkint(n - i));
+    return r;
+}
+BI(m_dist)
+{
+    Value p, q;
+    double s = 0.0;
+    long i;
+    need(x, 2, 2, "dist");
+    p = iter_to_list(A(0));
+    VPUSH(p);
+    q = iter_to_list(A(1));
+    VPUSH(q);
+    if (AS_LIST(p)->n != AS_LIST(q)->n)
+        throw_new(cls_ValueError, "both points must have the same number of dimensions");
+    for (i = 0; i < AS_LIST(p)->n; i++) {
+        double d = to_dbl(AS_LIST(p)->a[i]) - to_dbl(AS_LIST(q)->a[i]);
+        s += d * d;
+    }
+    vsp -= 2;
+    return mkfloat(sqrt(s));
+}
+
 /* ---- random ----------------------------------------------------------- */
 static unsigned long rng_state = 2463534242UL;
 static unsigned long rng_next(void)
@@ -11409,6 +16803,7 @@ BI(sys_setrec)
 }
 
 /* ---- initialisation --------------------------------------------------- */
+static Class *cls_dummy_exc[40];
 static struct { const char *name; Class **var; Class **base; } exc_table[] = {
     { "BaseException", &cls_BaseException, NULL },
     { "Exception", &cls_Exception, &cls_BaseException },
@@ -11436,6 +16831,35 @@ static struct { const char *name; Class **var; Class **base; } exc_table[] = {
     { "EOFError", &cls_EOFError, &cls_Exception },
     { "SyntaxError", &cls_SyntaxError, &cls_Exception },
     { "FileNotFoundError", &cls_FileNotFoundError, &cls_OSError },
+    { "ModuleNotFoundError", &cls_ModuleNotFoundError, &cls_ImportError },
+    { "FloatingPointError", &cls_dummy_exc[0], &cls_ArithmeticError },
+    { "UnicodeError", &cls_dummy_exc[1], &cls_ValueError },
+    { "UnicodeDecodeError", &cls_dummy_exc[2], &cls_dummy_exc[1] },
+    { "UnicodeEncodeError", &cls_dummy_exc[3], &cls_dummy_exc[1] },
+    { "MemoryError", &cls_dummy_exc[4], &cls_Exception },
+    { "ReferenceError", &cls_dummy_exc[5], &cls_Exception },
+    { "BufferError", &cls_dummy_exc[6], &cls_Exception },
+    { "SystemError", &cls_dummy_exc[7], &cls_Exception },
+    { "StopAsyncIteration", &cls_dummy_exc[8], &cls_Exception },
+    { "PermissionError", &cls_dummy_exc[9], &cls_OSError },
+    { "FileExistsError", &cls_dummy_exc[10], &cls_OSError },
+    { "IsADirectoryError", &cls_dummy_exc[11], &cls_OSError },
+    { "NotADirectoryError", &cls_dummy_exc[12], &cls_OSError },
+    { "TimeoutError", &cls_dummy_exc[13], &cls_OSError },
+    { "ConnectionError", &cls_dummy_exc[14], &cls_OSError },
+    { "IndentationError", &cls_dummy_exc[15], &cls_SyntaxError },
+    { "TabError", &cls_dummy_exc[16], &cls_dummy_exc[15] },
+    { "Warning", &cls_dummy_exc[17], &cls_Exception },
+    { "UserWarning", &cls_dummy_exc[18], &cls_dummy_exc[17] },
+    { "DeprecationWarning", &cls_dummy_exc[19], &cls_dummy_exc[17] },
+    { "PendingDeprecationWarning", &cls_dummy_exc[20], &cls_dummy_exc[17] },
+    { "RuntimeWarning", &cls_dummy_exc[21], &cls_dummy_exc[17] },
+    { "FutureWarning", &cls_dummy_exc[22], &cls_dummy_exc[17] },
+    { "SyntaxWarning", &cls_dummy_exc[23], &cls_dummy_exc[17] },
+    { "ImportWarning", &cls_dummy_exc[24], &cls_dummy_exc[17] },
+    { "UnicodeWarning", &cls_dummy_exc[25], &cls_dummy_exc[17] },
+    { "BytesWarning", &cls_dummy_exc[26], &cls_dummy_exc[17] },
+    { "ResourceWarning", &cls_dummy_exc[27], &cls_dummy_exc[17] },
     { NULL, NULL, NULL }
 };
 
@@ -11448,6 +16872,7 @@ static Class *mk_type(const char *name, Class *base, BFn ctor)
 
 static void init_runtime(int argc, char **argv)
 {
+    const char *sargv0 = argc > 0 ? argv[0] : "";
     int i;
     Module *m;
     List *av;
@@ -11479,7 +16904,8 @@ static void init_runtime(int argc, char **argv)
     SN(S_rshift, "__rshift__"); SN(S_dict, "__dict__"); SN(S_mro, "__mro__");
     SN(S_doc, "__doc__"); SN(S_setter, "setter"); SN(S_main, "__main__");
     SN(S_getattr, "__getattr__"); SN(S_format, "__format__"); SN(S_self, "self");
-    SN(S_super, "super");
+    SN(S_super, "super"); SN(S_setattr, "__setattr__"); SN(S_new, "__new__");
+    SN(S_module, "__module__"); SN(S_reversed, "__reversed__");
 #undef SN
     /* classes */
     cls_object = new_class("object", NULL, CF_BUILTIN);
@@ -11514,8 +16940,6 @@ static void init_runtime(int argc, char **argv)
     }
     cls_BaseException->flags |= CF_EXC;
     set_global(intern_c("IOError"), mkobj(cls_OSError, T_CLASS));
-    set_global(intern_c("__name__"), mkobj(S_main, T_STR));
-    set_global(intern_c("__doc__"), NONE_V);
     set_global(intern_c("None"), NONE_V);
     set_global(intern_c("True"), TRUE_V);
     set_global(intern_c("False"), FALSE_V);
@@ -11535,9 +16959,11 @@ static void init_runtime(int argc, char **argv)
     def_bi(NULL, "delattr", bi_delattr); def_bi(NULL, "callable", bi_callable);
     def_bi(NULL, "iter", bi_iter); def_bi(NULL, "next", bi_next); def_bi(NULL, "id", bi_id);
     def_bi(NULL, "hash", bi_hash); def_bi(NULL, "input", bi_input); def_bi(NULL, "open", bi_open);
-    def_bi(NULL, "format", bi_format); def_bi(NULL, "vars", bi_vars);
+    def_bi(NULL, "format", bi_format);
     def_bi(NULL, "exit", bi_exit_fn); def_bi(NULL, "quit", bi_exit_fn);
     propsetter_fn = mkbuiltin("setter", bi_propsetter);
+    propdeleter_fn = mkbuiltin("deleter", bi_propdeleter);
+    propgetter_fn = mkbuiltin("getter", bi_propgetter);
     set_global(S_super, mkbuiltin("super", bi_super));
 
     /* exception methods */
@@ -11551,6 +16977,9 @@ static void init_runtime(int argc, char **argv)
     obj_hash_v = mkbuiltin("__hash__", obj_hash);
     def_bi(cls_object, "__repr__", obj_repr);
     def_bi(cls_object, "__str__", obj_str);
+    def_bi(cls_object, "__new__", nat_new);
+    def_bi(cls_object, "__setattr__", obj_setattr);
+    obj_str_v = *amap_get(&cls_object->ns, S_str);
 
     /* str */
     def_bi(cls_str, "upper", s_upper); def_bi(cls_str, "lower", s_lower);
@@ -11573,6 +17002,40 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_str, "format", s_format); def_bi(cls_str, "encode", s_encode);
     def_bi(cls_str, "removeprefix", s_removeprefix); def_bi(cls_str, "removesuffix", s_removesuffix);
     def_bi(cls_str, "expandtabs", s_expandtabs); def_bi(cls_str, "casefold", s_lower);
+    def_bi(cls_str, "isidentifier", s_isidentifier); def_bi(cls_str, "istitle", s_istitle);
+    def_bi(cls_str, "isprintable", s_isprintable); def_bi(cls_str, "isascii", s_isascii);
+    /* protocol methods of the native base types (also used by subclasses) */
+    {
+        Class *nc[5];
+        int k;
+        nc[0] = cls_str; nc[1] = cls_list; nc[2] = cls_tuple; nc[3] = cls_dict; nc[4] = cls_set;
+        for (k = 0; k < 5; k++) {
+            def_bi(nc[k], "__len__", nat_len); def_bi(nc[k], "__iter__", nat_iter);
+            def_bi(nc[k], "__contains__", nat_contains); def_bi(nc[k], "__repr__", nat_repr);
+            def_bi(nc[k], "__eq__", nat_eq); def_bi(nc[k], "__ne__", nat_ne);
+            if (nc[k] != cls_set && nc[k] != cls_dict) {
+                def_bi(nc[k], "__getitem__", nat_getitem);
+                def_bi(nc[k], "__add__", nat_add); def_bi(nc[k], "__mul__", nat_mul);
+                def_bi(nc[k], "__rmul__", nat_mul);
+            }
+            if (nc[k] != cls_dict) {
+                def_bi(nc[k], "__lt__", nat_lt); def_bi(nc[k], "__le__", nat_le);
+                def_bi(nc[k], "__gt__", nat_gt); def_bi(nc[k], "__ge__", nat_ge);
+            }
+            if (nc[k] == cls_str || nc[k] == cls_tuple) def_bi(nc[k], "__hash__", nat_hash);
+        }
+        def_bi(cls_str, "__str__", nat_str); def_bi(cls_str, "__mod__", nat_mod);
+        def_bi(cls_str, "__format__", nat_format);
+        def_bi(cls_list, "__setitem__", nat_setitem); def_bi(cls_list, "__delitem__", nat_delitem);
+        def_bi(cls_dict, "__getitem__", nat_getitem);
+        def_bi(cls_dict, "__setitem__", nat_setitem); def_bi(cls_dict, "__delitem__", nat_delitem);
+        def_bi(cls_dict, "__or__", nat_or);
+        def_bi(cls_set, "__or__", nat_or); def_bi(cls_set, "__and__", nat_and);
+        def_bi(cls_set, "__sub__", nat_sub); def_bi(cls_set, "__xor__", nat_xor);
+        def_bi(cls_dict, "__init__", d_update);
+        def_bi(cls_list, "__init__", list_init);
+        def_bi(cls_set, "__init__", set_init);
+    }
     /* list, tuple */
     def_bi(cls_list, "append", l_append); def_bi(cls_list, "extend", l_extend);
     def_bi(cls_list, "insert", l_insert); def_bi(cls_list, "pop", l_pop);
@@ -11601,7 +17064,8 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_float, "is_integer", f_is_integer);
     /* generators / iterators */
     def_bi(cls_gen, "__next__", g_next); def_bi(cls_gen, "__iter__", g_iter);
-    def_bi(cls_gen, "close", g_close); def_bi(cls_gen, "send", g_next);
+    def_bi(cls_gen, "close", g_close); def_bi(cls_gen, "send", g_send);
+    def_bi(cls_gen, "throw", g_throw);
     def_bi(cls_iter, "__next__", g_next); def_bi(cls_iter, "__iter__", g_iter);
     /* files */
     def_bi(cls_file, "read", fl_read); def_bi(cls_file, "readline", fl_readline);
@@ -11610,7 +17074,44 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_file, "close", fl_close); def_bi(cls_file, "__enter__", fl_enter);
     def_bi(cls_file, "__exit__", fl_exit);
 
+    /* bytes */
+    cls_bytes = mk_type("bytes", cls_object, bi_bytes);
+    def_bi(cls_bytes, "decode", b_decode); def_bi(cls_bytes, "hex", b_hex);
+    def_bi(cls_bytes, "fromhex", b_fromhex);
+    def_bi(cls_bytes, "upper", b_upper); def_bi(cls_bytes, "lower", b_lower);
+    def_bi(cls_bytes, "strip", b_strip); def_bi(cls_bytes, "lstrip", b_lstrip);
+    def_bi(cls_bytes, "rstrip", b_rstrip); def_bi(cls_bytes, "split", b_split);
+    def_bi(cls_bytes, "join", b_join); def_bi(cls_bytes, "replace", b_replace);
+    def_bi(cls_bytes, "find", b_find); def_bi(cls_bytes, "count", b_count);
+    def_bi(cls_bytes, "startswith", b_startswith); def_bi(cls_bytes, "endswith", b_endswith);
+    def_bi(cls_bytes, "rfind", b_rfind); def_bi(cls_bytes, "index", b_index);
+    def_bi(cls_bytes, "splitlines", b_splitlines); def_bi(cls_bytes, "isdigit", b_isdigit);
+    def_bi(cls_bytes, "isalpha", b_isalpha);
+    def_bi(cls_int, "to_bytes", i_to_bytes); def_bi(cls_int, "from_bytes", i_from_bytes);
+    set_global(intern_c("bytearray"), mkobj(cls_bytes, T_CLASS));
+    /* misc types */
+    cls_slice = mk_type("slice", cls_object, bi_slice);
+    def_bi(cls_slice, "indices", sl_indices);
+    cls_notimpl = mk_type("NotImplementedType", cls_object, NULL);
+    NotImpl_V = mkobj(new_inst(cls_notimpl), T_INST);
+    set_global(intern_c("NotImplemented"), NotImpl_V);
+    {
+        Class *ce = mk_type("ellipsis", cls_object, NULL);
+        Ellipsis_V = mkobj(new_inst(ce), T_INST);
+        set_global(intern_c("Ellipsis"), Ellipsis_V);
+        def_bi(ce, "__repr__", ellipsis_repr);
+    }
+    cls_dview[0] = mk_type("dict_keys", cls_object, NULL);
+    cls_dview[1] = mk_type("dict_values", cls_object, NULL);
+    cls_dview[2] = mk_type("dict_items", cls_object, NULL);
+    def_bi(cls_notimpl, "__repr__", notimpl_repr);
+    def_bi(NULL, "globals", bi_globals); def_bi(NULL, "locals", bi_locals);
+    def_bi(NULL, "vars", bi_vars2); def_bi(NULL, "dir", bi_dir);
+    def_bi(NULL, "exec", bi_exec); def_bi(NULL, "eval", bi_eval);
+    def_bi(NULL, "__import__", bi_import);
+
     /* modules */
+    sys_modules_v = mkobj(dict_new(), T_DICT);
     m = new_module("math");
     mod_def(m, "sqrt", m_sqrt); mod_def(m, "sin", m_sin); mod_def(m, "cos", m_cos);
     mod_def(m, "tan", m_tan); mod_def(m, "asin", m_asin); mod_def(m, "acos", m_acos);
@@ -11624,6 +17125,13 @@ static void init_runtime(int argc, char **argv)
     mod_def(m, "isfinite", m_isfinite); mod_def(m, "fmod", m_fmod);
     mod_def(m, "copysign", m_copysign); mod_def(m, "degrees", m_degrees);
     mod_def(m, "radians", m_radians); mod_def(m, "comb", m_comb); mod_def(m, "prod", m_prod);
+    mod_def(m, "isclose", m_isclose); mod_def(m, "fsum", m_fsum); mod_def(m, "log1p", m_log1p);
+    mod_def(m, "expm1", m_expm1); mod_def(m, "erf", m_erf); mod_def(m, "erfc", m_erfc);
+    mod_def(m, "exp2", m_exp2); mod_def(m, "gamma", m_gamma); mod_def(m, "lgamma", m_lgamma);
+    mod_def(m, "asinh", m_asinh); mod_def(m, "acosh", m_acosh); mod_def(m, "atanh", m_atanh);
+    mod_def(m, "cbrt", m_cbrt); mod_def(m, "remainder", m_remainder); mod_def(m, "modf", m_modf);
+    mod_def(m, "frexp", m_frexp); mod_def(m, "ldexp", m_ldexp); mod_def(m, "perm", m_perm);
+    mod_def(m, "dist", m_dist);
     mod_val(m, "pi", mkfloat(3.14159265358979323846));
     mod_val(m, "e", mkfloat(2.71828182845904523536));
     mod_val(m, "tau", mkfloat(6.28318530717958647692));
@@ -11644,6 +17152,7 @@ static void init_runtime(int argc, char **argv)
     mod_def(m, "monotonic", t_clock); mod_def(m, "process_time", t_clock);
     mod_def(m, "sleep", t_sleep);
     m = new_module("sys");
+    sys_mod = m;
     av = list_new(argc + 1);
     for (i = 0; i < argc; i++) list_push(av, mkcstr(argv[i]));
     mod_val(m, "argv", mklist(av));
@@ -11655,31 +17164,55 @@ static void init_runtime(int argc, char **argv)
     mod_val(m, "maxsize", mkint(SI_MAX));
     mod_val(m, "version", mkcstr("3.12.0 (C89 subset interpreter)"));
     mod_val(m, "platform", mkcstr("c89"));
-    mod_val(m, "path", mklist(list_new(1)));
+    mod_def(m, "exc_info", bi_exc_info);
+    mod_val(m, "modules", sys_modules_v);
+    init_sys_path(sargv0);
+    mod_val(m, "path", sys_path_v);
+    {
+        Value vi[5];
+        vi[0] = mkint(3); vi[1] = mkint(12); vi[2] = mkint(0); vi[3] = mkcstr("final"); vi[4] = mkint(0);
+        mod_val(m, "version_info", mktuple_from(vi, 5));
+    }
+    mod_val(m, "byteorder", mkcstr("little"));
+    mod_val(m, "executable", mkcstr(exe_path));
+    mod_val(m, "builtin_module_names", mktuple_from(NULL, 0));
+    m = new_module("os");
+    {
+        Module *pm = new_module("os.path");
+        mod_def(m, "getenv", os_getenv); mod_def(m, "getcwd", os_getcwd);
+        mod_def(m, "remove", os_remove); mod_def(m, "unlink", os_remove);
+        mod_def(m, "rename", os_rename);
+        mod_val(m, "sep", mkcstr("/")); mod_val(m, "pathsep", mkcstr(":"));
+        mod_val(m, "linesep", mkcstr("\n")); mod_val(m, "name", mkcstr("posix"));
+        mod_val(m, "curdir", mkcstr(".")); mod_val(m, "pardir", mkcstr(".."));
+        mod_val(m, "devnull", mkcstr("/dev/null"));
+        mod_val(m, "environ", init_environ());
+        mod_val(m, "path", mkobj(pm, T_MODULE));
+        mod_def(pm, "join", osp_join); mod_def(pm, "exists", osp_exists);
+        mod_def(pm, "basename", osp_basename); mod_def(pm, "dirname", osp_dirname);
+        mod_def(pm, "split", osp_split); mod_def(pm, "splitext", osp_splitext);
+        mod_def(pm, "isabs", osp_isabs); mod_def(pm, "normpath", osp_normpath);
+        mod_def(pm, "abspath", osp_abspath); mod_def(pm, "expanduser", osp_expanduser);
+        mod_def(pm, "isdir", osp_isdir); mod_def(pm, "isfile", osp_isfile);
+        mod_def(pm, "getsize", osp_getsize);
+        mod_val(pm, "sep", mkcstr("/")); mod_val(pm, "curdir", mkcstr("."));
+        mod_val(pm, "pardir", mkcstr("..")); mod_val(pm, "pathsep", mkcstr(":"));
+    }
+    {
+        Module *mm = module_new_py(S_main);
+        Value mv = mkobj(mm, T_MODULE);
+        main_gp = mm->gp;
+        dict_set(AS_DICT(sys_modules_v), mkobj(S_main, T_STR), mv);
+        mod_gset(mm, "__name__", mkobj(S_main, T_STR));
+        mod_gset(mm, "__doc__", NONE_V);
+        mod_gset(mm, "__package__", NONE_V);
+    }
     gc_perm = 0;
 }
 /* ===== p8_main.c ===== */
 /* =========================================================================
    p8_main.c   command line, REPL, main
    ========================================================================= */
-static char *read_whole(const char *path, long *len)
-{
-    FILE *fp = fopen(path, "rb");
-    char *buf;
-    long n = 0, cap = 4096;
-    int c;
-    if (!fp) return NULL;
-    buf = (char *)xmalloc((size_t)cap);
-    while ((c = getc(fp)) != EOF) {
-        if (n + 2 >= cap) { cap *= 2; buf = (char *)xrealloc(buf, (size_t)cap); }
-        buf[n++] = (char)c;
-    }
-    buf[n] = 0;
-    fclose(fp);
-    *len = n;
-    return buf;
-}
-
 static int line_opens_block(const char *s, long n)
 {
     long i = 0, e = n;
@@ -11791,6 +17324,7 @@ int main(int argc, char **argv)
         sargv = dummy;
         sargc = 1;
     }
+    exe_path = argv[0];
     init_runtime(sargc, sargv);
     if (code) {
         script_name = "<string>";

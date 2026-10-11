@@ -574,6 +574,10 @@ fmt_format: procedure = .int
   n = length(fs)
   i = 1
   auto = 0
+  if fmt_nested = 1 then do
+    auto = fmt_auto_in
+    fmt_nested = 0
+  end
   do while i <= n
     c = substr(fs, i, 1)
     if c == "{" then do
@@ -651,7 +655,10 @@ fmt_format: procedure = .int
       else if conv == "s" then v = mkstr(str_of(v))
       if pos("{", spec) > 0 then do
         /* nested replacement fields in the spec */
+        fmt_auto_in = auto
+        fmt_nested = 1
         sp = ob_s[fmt_format(spec, base, na, nk) % 2]
+        auto = fmt_auto_out
         spec = sp
       end
       r = r || format_value(v, spec)
@@ -667,6 +674,7 @@ fmt_format: procedure = .int
     r = r || c
     i = i + 1
   end
+  fmt_auto_out = auto
   return mkstr(r)
 
 /* the idx-th positional argument (or the keyword name) of a format call */

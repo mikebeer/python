@@ -4,7 +4,7 @@
 enum {
     TK_EOF = 1000, TK_NEWLINE, TK_INDENT, TK_DEDENT, TK_NAME, TK_NUM, TK_FLOAT, TK_STR,
     TK_FSTR, TK_KW, TK_EQ, TK_NE, TK_LE, TK_GE, TK_POW, TK_FDIV, TK_LSH, TK_RSH,
-    TK_ARROW, TK_ELLIPSIS, TK_AUG
+    TK_ARROW, TK_ELLIPSIS, TK_AUG, TK_WALRUS
 };
 enum {
     B_NONE = 0, B_ADD, B_SUB, B_MUL, B_DIV, B_FDIV, B_MOD, B_POW, B_AND, B_OR, B_XOR,
@@ -278,11 +278,12 @@ static void lex_source(const char *src, long len)
         }
         if (c == '"' || c == '\'' || ch_alpha[c]) {
             long st = pos;
-            int fl = 0, rw = 0, q, triple = 0;
+            int fl = 0, rw = 0, q, triple = 0, isb = 0;
             long bs, be;
             while (pos < len && src[pos] != '"' && src[pos] != '\'') {
                 if (src[pos] == 'f' || src[pos] == 'F') fl = 1;
                 if (src[pos] == 'r' || src[pos] == 'R') rw = 1;
+                if (src[pos] == 'b' || src[pos] == 'B') isb = 1;
                 pos++;
             }
             q = src[pos];
@@ -291,6 +292,37 @@ static void lex_source(const char *src, long len)
             bs = pos;
             for (;;) {
                 if (pos >= len) syntax_error(line, "unterminated string literal");
+                if (fl && !rw && src[pos] == '{' && pos + 1 < len && src[pos + 1] == '{') { pos += 2; continue; }
+                if (fl && src[pos] == '{') {
+                    /* replacement field: quotes inside may be nested strings (PEP 701) */
+                    int d = 1, pd = 0, inspec = 0;
+                    pos++;
+                    while (pos < len && d > 0) {
+                        int ch = (unsigned char)src[pos];
+                        if (!inspec && (ch == '\'' || ch == '"')) {
+                            int q2 = ch, tr2 = 0;
+                            if (pos + 2 < len && src[pos + 1] == q2 && src[pos + 2] == q2) tr2 = 1;
+                            pos += tr2 ? 3 : 1;
+                            while (pos < len) {
+                                if (src[pos] == '\\') { pos += 2; continue; }
+                                if (src[pos] == '\n') line++;
+                                if (src[pos] == q2 && (!tr2 || (pos + 2 < len && src[pos + 1] == q2 &&
+                                                                 src[pos + 2] == q2))) break;
+                                pos++;
+                            }
+                            pos += tr2 ? 3 : 1;
+                            continue;
+                        }
+                        if (ch == '\n') line++;
+                        if (!inspec && (ch == '(' || ch == '[')) pd++;
+                        else if (!inspec && (ch == ')' || ch == ']')) pd--;
+                        else if (ch == '{') { d++; if (inspec) { /* nested field in a spec */ } }
+                        else if (ch == '}') d--;
+                        else if (ch == ':' && d == 1 && pd == 0 && !inspec) inspec = 1;
+                        pos++;
+                    }
+                    continue;
+                }
                 if (src[pos] == '\\' && pos + 1 < len) {
                     if (src[pos + 1] == '\n') line++;
                     pos += 2;
@@ -312,6 +344,7 @@ static void lex_source(const char *src, long len)
             (void)st;
             t = tok_new(fl ? TK_FSTR : TK_STR, line);
             t->raw = rw;
+            t->op = isb;
             if (fl) {
                 t->s = str_new(src + bs, be - bs);
             } else if (rw) {
@@ -333,7 +366,7 @@ static void lex_source(const char *src, long len)
                 "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "@=", ":=", NULL };
             static const int ttype[] = { TK_EQ, TK_NE, TK_LE, TK_GE, TK_POW, TK_FDIV, TK_LSH,
                 TK_RSH, TK_ARROW, TK_AUG, TK_AUG, TK_AUG, TK_AUG, TK_AUG, TK_AUG, TK_AUG,
-                TK_AUG, TK_AUG, ':' };
+                TK_AUG, TK_AUG, TK_WALRUS };
             static const int tbop2[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, B_ADD, B_SUB, B_MUL, B_DIV,
                 B_MOD, B_AND, B_OR, B_XOR, B_MATMUL, 0 };
             int k, found = 0;
