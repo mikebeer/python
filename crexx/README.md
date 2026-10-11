@@ -8,7 +8,7 @@ and passes the tests in `../tests` (stage 1 and the language / import / linalg s
     ./py                      read the program from stdin
 
 Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
-`py.crexx` to bytecode (about two minutes); later runs start in about 1.2 s.
+`py.crexx` to bytecode (about two minutes); later runs start in about 2 s with a stock VM, 0.4 s with the patched one (see `STARTUP.md`, `CREXX_VM`).
 
 ## Layout
 
@@ -72,7 +72,7 @@ results of any type, `__abs__ __round__ __format__ __call__ __enter__ __exit__`,
 - `globals()` / `locals()` are snapshots; `exec` inside a function does not write back to its locals.
 - Sets keep insertion order; `random` does not reproduce CPython's sequence; `time.time` is approximate.
 - Float literals near the end of the range and denormals print with fewer digits.
-- Recursion limit is about 900 frames; every run pays about 2 s to load the 2.7 MB bytecode.
+- Recursion limit is about 900 frames; a stock VM pays about 2 s per run linking the 2.7 MB bytecode (see `STARTUP.md`).
 
 ## CREXX pitfalls found
 

@@ -14,4 +14,6 @@
 #include "p7_rnd.c"
 #include "p7_imp.c"
 #include "p7_mod.c"
+#include "p7_re.c"
+#include "p7_json.c"
 #include "p8_main.c"

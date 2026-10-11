@@ -33,8 +33,10 @@ Uncaught exceptions print a traceback and exit with status 1.
     src/p7_rnd.c    numpy.random (xoshiro256**; legacy functions, default_rng, RandomState)
     src/p7_imp.c    import system (files, packages, relative imports), exec/eval/globals, os
     src/p7_mod.c    math, random, sys, time; exception hierarchy
+    src/p7_re.c     native re: parser (CPython messages), compiler, explicit-stack backtracking VM
+    src/p7_json.c   native json: dumps/loads/dump/load, JSONEncoder/JSONDecoder, JSONDecodeError
     src/p8_main.c   REPL and command line
-    bench/          fib, loop, collections, strings, numpy_bench + run.sh
+    bench/          fib, loop, collections, strings, numpy_bench, re_bench, json_bench + run.sh
 
 ## Portability rules
 
@@ -59,7 +61,7 @@ all functions static except `main`; character classes use literal sets
 `__all__`, skips `_names`), packages (`__init__.py`), relative imports (`from . import m`,
 `from .m import f`, `from .. import n`), `sys.modules` caching, `__name__` (`'__main__'` for the
 script), `__file__`, `__path__`, CPython-style circular-import tolerance (a module is in
-`sys.modules` before its body runs). Native modules (math random sys time os numpy) win
+`sys.modules` before its body runs). Native modules (math random sys time os numpy re json) win
 over files. Every module has its own global namespace (globals are name-prefixed `pkg.mod.x`
 in one table; builtins live under plain names).
 
@@ -91,6 +93,28 @@ unsupported; no match statement, async, complex numbers; `r = yield from g()` (a
 expression) and chained assignment with `yield` are not supported; no generator finalization
 on garbage collection; random does not reproduce CPython's sequence (nor numpy's);
 `math.erf/erfc/gamma/lgamma` are within about 1e-15 of libm, not bit-identical.
+
+## re and json (src/p7_re.c, src/p7_json.c)
+
+`re` is a native backtracking engine: tokenizer + parser ported from CPython's `_parser.py`
+(same error messages and positions), compiled to a flat instruction array and run by a VM with an
+explicit backtrack stack (no C recursion per character; capped at 6M entries, after which
+`RuntimeError: regular expression too complex` is raised instead of crashing). Compiled patterns are
+cached. API: compile match search fullmatch findall finditer sub subn split escape purge, Pattern and
+Match objects, flags I M S X A, `re.error`, classes/escapes, anchors, \b \B, (named/non-capturing)
+groups, backrefs, lookahead/lookbehind (fixed width), atomic groups, possessive and lazy quantifiers,
+conditionals `(?(1)a|b)`, inline flags, templates (\1 \g<name>) and callable repl.
+`json` is native too: dumps (indent sort_keys separators ensure_ascii default allow_nan skipkeys cls),
+loads (object_hook object_pairs_hook parse_float/int/constant strict, CPython 3.13 error messages),
+dump/load, JSONEncoder/JSONDecoder (overridable `default`), JSONDecodeError.
+Differences: strings are UTF-8 bytes, so match offsets, `pos/endpos` and re error positions are byte
+offsets (json error positions are in characters); case folding and `\w`/`\s` for non-ASCII are
+approximate (ASCII for `\d`); no bytes patterns, `\N{name}`, re.RegexFlag enum or `Scanner` beyond a
+minimal one; catastrophic patterns stop at the stack limit with RuntimeError where CPython would keep
+going; `endpos < pos` is not emulated. `tests/tools/fuzz_re_json.py` is a differential fuzzer against
+CPython (not part of the suite): about 30000 random patterns/inputs and 40000 JSON cases agree.
+Speed (bench/run.sh): re_bench native 0.2 s vs pure-Python pylib 19.8 s vs CPython 0.5 s; json_bench
+native 0.2 s vs pylib 3.1 s vs CPython 0.16 s.
 
 ## numpy subset (src/p7_np.c)
 

@@ -1,6 +1,8 @@
 /* =========================================================================
    p7_mod.c   builtin modules (math random sys time) and initialisation
    ========================================================================= */
+static void re_init(void);
+static void json_init(void);
 static Module *new_module(const char *name)
 {
     Module *m = (Module *)gc_alloc(sizeof(Module), T_MODULE);
@@ -1046,6 +1048,8 @@ static void init_runtime(int argc, char **argv)
         seedargs.n = 0; seedargs.a = NULL; seedargs.nk = 0; seedargs.kw = NULL;
         r_seed(&seedargs);
     }
+    re_init();
+    json_init();
     m = new_module("time");
     mod_def(m, "time", t_time); mod_def(m, "perf_counter", t_clock);
     mod_def(m, "monotonic", t_clock); mod_def(m, "process_time", t_clock);
