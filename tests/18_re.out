@@ -1,0 +1,131 @@
+'abc' 'xxabcxx' -> (2, 5) abc ()
+'a.c' 'a\nc' -> None
+'a.c' 'a\nc' -> (0, 3) a
+c ()
+'[a-c]+' 'xxabcabcxx' -> (2, 8) abcabc ()
+'[^a-c]+' 'abcxyzabc' -> (3, 6) xyz ()
+'[\\d.]+' 'v1.25.3b' -> (1, 7) 1.25.3 ()
+'[\\w-]+' 'foo-bar baz' -> (0, 7) foo-bar ()
+'[]a]+' 'x]a]' -> (1, 4) ]a] ()
+'[a\\]]+' 'x]a]' -> (1, 4) ]a] ()
+'[\\-a]+' '-a-' -> (0, 3) -a- ()
+'\\d{3}-\\d{4}' 'call 555-1234 now' -> (5, 13) 555-1234 ()
+'\\bfoo\\b' 'a foo b' -> (2, 5) foo ()
+'\\bfoo\\b' 'afoob' -> None
+'\\Bfoo' 'afoo' -> (1, 4) foo ()
+'^abc$' 'abc' -> (0, 3) abc ()
+'^abc$' 'abc\n' -> (0, 3) abc ()
+'^abc$' 'x\nabc\ny' -> None
+'^abc$' 'x\nabc\ny' -> (2, 5) abc ()
+'\\Aabc\\Z' 'abc' -> (0, 3) abc ()
+'\\Aabc\\Z' 'abc\n' -> None
+'\\s+' 'a \t\nb' -> (1, 4)  	
+ ()
+'\\S+' '  ab  ' -> (2, 4) ab ()
+'\\W+' 'ab, cd' -> (2, 4) ,  ()
+'\\D+' '12ab34' -> (2, 4) ab ()
+'\\x41B\\t' 'AB\t' -> (0, 3) AB	 ()
+'a\\.b' 'a.b' -> (0, 3) a.b ()
+'a\\.b' 'axb' -> None
+'a*' 'aaa' -> (0, 3) aaa ()
+'a*?' 'aaa' -> (0, 0)  ()
+'a+?' 'aaa' -> (0, 1) a ()
+'a??b' 'ab' -> (0, 2) ab ()
+'a{2}' 'aaaa' -> (0, 2) aa ()
+'a{2,}' 'aaaa' -> (0, 4) aaaa ()
+'a{2,3}' 'aaaa' -> (0, 3) aaa ()
+'a{,2}' 'aaaa' -> (0, 2) aa ()
+'a{2,3}?' 'aaaa' -> (0, 2) aa ()
+'a{' 'a{' -> (0, 2) a{ ()
+'a{x}' 'a{x}' -> (0, 4) a{x} ()
+'x{0}y' 'xy' -> (1, 2) y ()
+'(ab){2}' 'ababab' -> (0, 4) abab ('ab',)
+'(ab)*' 'ababab' -> (0, 6) ababab ('ab',)
+'(ab)+?' 'ababab' -> (0, 2) ab ('ab',)
+'(a|ab)(c|bcd)(d*)' 'abcd' -> (0, 4) abcd ('a', 'bcd', '')
+'<.*>' '<a><b>' -> (0, 6) <a><b> ()
+'<.*?>' '<a><b>' -> (0, 3) <a> ()
+'<[^>]*>' '<a><b>' -> (0, 3) <a> ()
+'(a*)*' 'aaa' -> (0, 3) aaa ('',)
+'(a*)+' 'aaa' -> (0, 3) aaa ('',)
+'(a|b)*c' 'abababc' -> (0, 7) abababc ('b',)
+'(?:a|b)*?c' 'abababc' -> (0, 7) abababc ()
+'(a?)*?b' 'aab' -> (0, 3) aab ('a',)
+'(\\w+)\\s(\\w+)' 'hello world' -> (0, 11) hello world ('hello', 'world')
+'(x)?y' 'y' -> (0, 1) y (None,)
+'(x)?y' 'xy' -> (0, 2) xy ('x',)
+'(x)*y' 'xxy' -> (0, 3) xxy ('x',)
+'((a)|(b))+' 'ab' -> (0, 2) ab ('b', 'a', 'b')
+'cat|dog|bird' 'hotdog' -> (3, 6) dog ()
+'a|' 'b' -> (0, 0)  ()
+'(|a)+' 'aa' -> (0, 0)  ('',)
+'(?:)' 'abc' -> (0, 0)  ()
+'(?P<w>\\w+) (?P=w)' 'hello hello world' -> (0, 11) hello hello ('hello',)
+'(\\w)\\1' 'hello' -> (2, 4) ll ('l',)
+'(?i)(\\w)\\1' 'heLlo' -> (2, 4) Ll ('L',)
+'(a)(b)?(c)' 'ac' -> (0, 2) ac ('a', None, 'c')
+'((a)(b))' 'ab' -> (0, 2) ab ('ab', 'a', 'b')
+'(?:(a)|b)+' 'ab' -> (0, 2) ab ('a',)
+'(a)|(b)' 'b' -> (0, 1) b (None, 'b')
+'foo(?=bar)' 'foobar' -> (0, 3) foo ()
+'foo(?=bar)' 'foobaz' -> None
+'foo(?!bar)' 'foobaz' -> (0, 3) foo ()
+'(?<=\\$)\\d+' 'cost $42' -> (6, 8) 42 ()
+'(?<!\\$)\\b\\d+' 'cost $42 or 17' -> (12, 14) 17 ()
+'(?<=ab|cd)x' 'cdx' -> (2, 3) x ()
+'(?=(\\d+))\\w+' '123abc' -> (0, 6) 123abc ('123',)
+'\\w+(?=\\s)' 'ab cd' -> (0, 2) ab ()
+'(?<=a)(?<=ba)b' 'bab' -> (2, 3) b ()
+'abc' 'ABC' -> (0, 3) ABC ()
+'(?i)abc' 'ABC' -> (0, 3) ABC ()
+'a(?i:b)c' 'aBc' -> (0, 3) aBc ()
+'a(?i:b)c' 'aBC' -> None
+'[a-z]+' 'ABC' -> (0, 3) ABC ()
+'[^a-z]+' 'ABC1' -> (3, 4) 1 ()
+'a  b # comment\n         c' 'abc' -> (0, 3) abc ()
+'a\\ b' 'a b' -> (0, 3) a b ()
+'a[ ]b' 'a b' -> (0, 3) a b ()
+'^b' 'a\nb' -> (2, 3) b ()
+'a$' 'a\nb' -> (0, 1) a ()
+'(?s).+' 'a\nb' -> (0, 3) a
+b ()
+'(?m)^b$' 'a\nb\nc' -> (2, 3) b ()
+'a(?#comment)b' 'ab' -> (0, 2) ab ()
+'' 'abc' -> (0, 0)  ()
+'$' 'abc' -> (3, 3)  ()
+'^' 'abc' -> (0, 0)  ()
+error (
+error )
+error [a
+error *a
+error a**
+error (?P<n>a)(?P<n>b)
+error \1
+error a{2,1}
+error (?<=a+)b
+error [z-a]
+error \q
+error (?P=x)
+error (?<n>a)
+['1', '22', '333'] [('1', 'a'), ('2', 'b')] ['1', '2'] ['', 'x', '', '']
+['ab', '', 'cd', ''] ['a', 'c'] [('a', ''), ('', 'b')]
+[(1, 2), (2, 3), (5, 6), (6, 7)] ['f', 'b']
+bbb bba -a-b--d- a-bc-d
+a2 b44 c666 ('bnn', 3)
+[a][] \ True aa
+['a', 'b', 'c'] ['a', ' ', 'b'] ['', 'a', '', 'b', 'c', ''] ['a', 'b,c'] ['a', ',', None, 'b', None, ';', 'c']
+['', 'ab', ' ', 'cd', ''] ['', 'a', 'b', 'c', ''] ['', 'a\n', 'b']
+key=12 key=12 ('key', '12') key ('key', '12') {'k': 'key', 'v': '12'} (4, 6) 4 3 2 v
+(?P<k>\w+)=(?P<v>\d*) 2 [('k', 1), ('v', 2)] 32 34 34
+True ('k', '') k= k= True
+('a', None) ('a', '-') None (-1, -1) -1 {}
+a=1 [('a', '1'), ('b', '2')] 1:a 2:b <re.Match object; span=(0, 3), match='a=1'> None
+True (1, 2) None None
+<a> a\.b\*c\ d\-e ab
+False True True
+5000 10000 10000 15000
+10000 (0, 10000) True 2
+('bob', 'example') ['Hello', 'World', 'Foo']
+1,234,567 ['this', 'some', 'text', 'with', 'four'] ['a,', 'b,', 'c']
+[('12', ''), ('', 'ab')] ('b',) (1, 2)
+trim me a<12>b<3> Hello Big World

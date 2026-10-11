@@ -44,7 +44,9 @@ eval_cargs: procedure = .int
   j = .int
   e = .int
   d = .int
-  ea_nk = 0
+  npp = .int
+  nkk = .int
+  nkk = 0
   do i = 0 to n_c[n] - 1
     a = al[n_b[n] + i]
     t = n_t[a]
@@ -63,7 +65,7 @@ eval_cargs: procedure = .int
       call push v
     end
   end
-  ea_np = asp - base
+  npp = asp - base
   do i = 0 to n_c[n] - 1
     a = al[n_b[n] + i]
     t = n_t[a]
@@ -72,7 +74,7 @@ eval_cargs: procedure = .int
       if v = 0 then return 0
       call push v
       asn[asp] = n_s[a]
-      ea_nk = ea_nk + 1
+      nkk = nkk + 1
     end
     else if t = N_DSTAR then do
       v = ev(n_a[a], fb)
@@ -90,12 +92,14 @@ eval_cargs: procedure = .int
           end
           call push de_val[e]
           asn[asp] = ob_s[de_key[e] % 2]
-          ea_nk = ea_nk + 1
+          nkk = nkk + 1
         end
         e = de_next[e]
       end
     end
   end
+  ea_np = npp
+  ea_nk = nkk
   return 1
 
 ev: procedure = .int
@@ -1044,6 +1048,7 @@ exec_class: procedure = .void
   size = .int
   nb = .int
   b = .int
+  isf = .int
   cd = n_a[n]
   bc = C_OBJECT
   bl_n = 0
@@ -1084,6 +1089,16 @@ exec_class: procedure = .void
     if cv_scope[j] = cd_sc[cd] then do
       v = vp[nf + cv_slot[j]]
       if v \= 0 then call cls_set c, nameid(cv_name[j]), v
+    end
+  end
+  if bc \= C_OBJECT then do
+    isf = cls_find(bc, nameid("__init_subclass__"))
+    if isf > 0 then do
+      if kind_of(isf) = K_CLSM then isf = ob_x[isf % 2]
+      if kind_of(isf) = K_FUNC then do
+        r = call1(isf, cobj)
+        if r = 0 then return
+      end
     end
   end
   v = cobj

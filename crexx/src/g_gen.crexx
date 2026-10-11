@@ -236,6 +236,21 @@ gx_unw: procedure = .int
 
 gen_resume: procedure = .int
   arg g = .int, sent = .int
+  mi = .int
+  sv = .int
+  r = .int
+  mi = fd_mod[gn_fd[g]]
+  if mi = cur_mi then return gen_resume0(g, sent)
+  sv = cur_mi
+  cur_mi = mi
+  gfb = mod_fb[mi]
+  r = gen_resume0(g, sent)
+  cur_mi = sv
+  gfb = mod_fb[sv]
+  return r
+
+gen_resume0: procedure = .int
+  arg g = .int, sent = .int
   rb = .int
   sp = .int
   fb = .int

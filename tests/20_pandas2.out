@@ -1,0 +1,973 @@
+   h    x    y
+g             
+a  4  4.0  100
+b  3  6.0   60
+c  1  5.0   50
+          h    x          y
+g                          
+a  1.333333  2.0  33.333333
+b  1.500000  3.0  30.000000
+c  1.000000  5.0  50.000000
+g
+a    4.0
+b    6.0
+c    5.0
+Name: x, dtype: float64
+     x   y
+g         
+a  3.0  60
+b  4.0  40
+c  5.0  50
+   h  x  y
+g         
+a  3  2  3
+b  2  2  2
+c  1  1  1
+g
+a    3
+b    2
+c    1
+dtype: int64
+   h    x   y
+g            
+a  1  1.0  10
+b  1  2.0  20
+c  1  5.0  50
+   h    x   y
+g            
+a  1  3.0  60
+b  2  4.0  40
+c  1  5.0  50
+          h         x          y
+g                               
+a  0.577350  1.414214  25.166115
+b  0.707107  1.414214  14.142136
+c       NaN       NaN        NaN
+   h    x    y
+g             
+a  4  4.0  100
+b  3  6.0   60
+c  1  5.0   50
+    h              x         y           
+  sum      mean  sum mean  sum       mean
+g                                        
+a   4  1.333333  4.0  2.0  100  33.333333
+b   3  1.500000  6.0  3.0   60  30.000000
+c   1  1.000000  5.0  5.0   50  50.000000
+     x   y    
+   sum min max
+g             
+a  4.0  10  60
+b  6.0  20  40
+c  5.0  50  50
+     x    y
+g          
+a  2.0  100
+b  3.0   60
+c  5.0   50
+   tot  avg
+g          
+a  100  2.0
+b   60  3.0
+c   50  5.0
+       x   y
+g h         
+a 1  1.0  70
+  2  3.0  30
+b 1  2.0  20
+  2  4.0  40
+c 1  5.0  50
+g  h
+a  1    35.0
+   2    30.0
+b  1    20.0
+   2    40.0
+c  1    50.0
+Name: y, dtype: float64
+g  h
+a  1    2
+   2    1
+b  1    1
+   2    1
+c  1    1
+dtype: int64
+   g  h    x    y
+0  a  4  4.0  100
+1  b  3  6.0   60
+2  c  1  5.0   50
+   g    y
+0  a  100
+1  b   60
+2  c   50
+   min  max  count
+g                 
+a   10   60      3
+b   20   40      2
+c   50   50      1
+g
+a    50
+b    20
+c     0
+Name: y, dtype: int64
+g
+a    100
+b     60
+c     50
+dtype: int64
+0    100
+1     60
+2    100
+3     60
+4     50
+5    100
+Name: y, dtype: int64
+0   -23.333333
+1   -10.000000
+2    -3.333333
+3    10.000000
+4     0.000000
+5    26.666667
+Name: y, dtype: float64
+0     10
+1     20
+2     40
+3     60
+4     50
+5    100
+Name: y, dtype: int64
+3 3
+a 3
+b 2
+c 1
+   g  h    x   y
+0  a  1  1.0  10
+2  a  2  3.0  30
+5  a  1  NaN  60
+g
+a    50.0
+b    30.0
+c    25.0
+Name: y, dtype: float64
+   g  h    x   y
+0  a  1  1.0  10
+1  b  1  2.0  20
+2  a  2  3.0  30
+3  b  2  4.0  40
+5  a  1  NaN  60
+     h    x     y
+g                
+a  1.0  2.0  30.0
+b  1.5  3.0  30.0
+c  1.0  5.0  50.0
+g
+a    3
+b    2
+c    1
+Name: y, dtype: int64
+0    10
+1    20
+4    50
+Name: y, dtype: int64
+0    1.0
+1    2.0
+2    1.0
+3    2.0
+4    3.0
+5    4.0
+Name: y, dtype: float64
+g
+a    100
+b     60
+c     50
+Name: y, dtype: int64
+   mean   std
+g            
+a   2.0  1.41
+b   3.0  1.41
+c   5.0   NaN
+   g    y
+0  a  100
+1  b   60
+2  c   50
+   g    y
+0  a  100
+1  b   60
+2  c   50
+g
+a    100
+b     60
+c     50
+Name: y, dtype: int64
+{'a': 33.333333333333336, 'b': 30.0, 'c': 50.0}
+   k  v     w
+0  2  b  20.0
+1  4  d  40.0
+   k  v     w
+0  1  a   NaN
+1  2  b  20.0
+2  3  c   NaN
+3  4  d  40.0
+   k    v     w
+0  2    b  20.0
+1  4    d  40.0
+2  5  NaN  50.0
+3  6  NaN  60.0
+   k    v     w
+0  1    a   NaN
+1  2    b  20.0
+2  3    c   NaN
+3  4    d  40.0
+4  5  NaN  50.0
+5  6  NaN  60.0
+   k  v     w
+0  2  b  20.0
+1  4  d  40.0
+   k v_x  key v_y
+0  2   b    2   X
+1  3   c    3   Y
+   k v_l  key  v_r
+0  1   a  NaN  NaN
+1  2   b  2.0    X
+2  3   c  3.0    Y
+3  4   d  NaN  NaN
+   k  v  z
+0  1  a  1
+1  1  a  2
+2  2  b  3
+   a  b    c    d
+0  x  1  1.0  9.0
+1  x  2  2.0  NaN
+2  y  1  3.0  8.0
+3  y  2  NaN  7.0
+   v     w
+k         
+1  a   NaN
+2  b  20.0
+3  c   NaN
+4  d  40.0
+   v     w
+k         
+2  b  20.0
+4  d  40.0
+   k  v
+0  1  a
+1  2  b
+2  3  c
+3  4  d
+0  1  a
+1  2  b
+2  3  c
+3  4  d
+   k  v
+0  1  a
+1  2  b
+2  3  c
+3  4  d
+4  1  a
+5  2  b
+6  3  c
+7  4  d
+   k  v  k     w
+0  1  a  2  20.0
+1  2  b  4  40.0
+2  3  c  5  50.0
+3  4  d  6  60.0
+   k    v     w
+0  1    a   NaN
+1  2    b   NaN
+2  3    c   NaN
+3  4    d   NaN
+0  2  NaN  20.0
+1  4  NaN  40.0
+2  5  NaN  50.0
+3  6  NaN  60.0
+0    1
+1    2
+2    3
+3    4
+0    2
+1    4
+2    5
+3    6
+Name: k, dtype: int64
+   k     w
+0  1  20.0
+1  2  40.0
+2  3  50.0
+3  4  60.0
+   v
+0  a
+1  b
+2  c
+3  d
+0  X
+1  Y
+       k  v
+one 0  1  a
+    1  2  b
+    2  3  c
+    3  4  d
+two 0  1  a
+    1  2  b
+    2  3  c
+    3  4  d
+     k  v
+p 0  1  a
+  1  2  b
+  2  3  c
+  3  4  d
+q 0  1  a
+  1  2  b
+  2  3  c
+  3  4  d
+   k_x  v  k_y     w
+0    1  a    2  20.0
+1    1  a    4  40.0
+2    1  a    5  50.0
+   k    v     w      _merge
+0  1    a   NaN   left_only
+1  2    b  20.0        both
+2  3    c   NaN   left_only
+3  4    d  40.0        both
+4  5  NaN  50.0  right_only
+5  6  NaN  60.0  right_only
+h  x  y
+g      
+a  6  2
+b  3  4
+h    x    y
+g          
+a  3.0  2.0
+b  3.0  4.0
+  sum      mean
+    v         v
+g              
+a   8  2.666667
+b   7  3.500000
+h  x  y
+g      
+a  6  2
+b  3  4
+     v
+g h   
+a x  6
+  y  2
+b x  3
+  y  4
+h  x  y
+g      
+a  2  1
+b  1  1
+
+   g variable  value
+0  a        v      1
+1  a        v      2
+2  b        v      3
+3  b        v      4
+4  a        v      5
+h  x  y
+g      
+a  2  1
+b  1  1
+g
+a    3
+b    2
+Name: count, dtype: int64 g
+a    0.6
+b    0.4
+Name: proportion, dtype: float64
+   g  h  v
+4  a  x  5
+1  a  y  2
+0  a  x  1
+3  b  y  4
+2  b  x  3
+   g  h  v
+0  a  x  5
+1  b  y  4
+2  b  x  3
+3  a  y  2
+4  a  x  1
+   g  h  v
+0  a  x  1
+2  b  x  3
+[False, True, False, True, True]
+   g  h  v
+4  a  x  5
+3  b  y  4    g  h  v
+0  a  x  1
+1  a  y  2
+      G  h  v
+zero  a  x  1
+1     a  y  2
+2     b  x  3
+3     b  y  4
+4     a  x  5
+   g  v
+0  a  1
+1  a  2
+2  b  3
+3  b  4
+4  a  5    g  h  v
+2  b  x  3
+3  b  y  4
+4  a  x  5    g  v
+0  a  1
+1  a  2
+2  b  3
+3  b  4
+4  a  5
+   0  1  2  3  4
+g  a  a  b  b  a
+h  x  y  x  y  x
+v  1  2  3  4  5
+h    x  y  All
+g             
+a    6  2    8
+b    3  4    7
+All  9  6   15
+     a  b    c
+0  1.0  4    x
+1  NaN  5  NaN
+2  3.0  6    z
+3  NaN  7    w
+       a      b      c
+0  False  False  False
+1   True  False   True
+2  False  False  False
+3   True  False  False
+a    2
+b    0
+c    1
+dtype: int64
+a    2
+b    4
+c    3
+dtype: int64
+     a  b  c
+0  1.0  4  x
+1  0.0  5  0
+2  3.0  6  z
+3  0.0  7  w
+     a  b        c
+0  1.0  4        x
+1 -1.0  5  missing
+2  3.0  6        z
+3 -1.0  7        w
+     a  b  c
+0  1.0  4  x
+2  3.0  6  z
+     a  b  c
+0  1.0  4  x
+2  3.0  6  z
+     a  b    c
+0  1.0  4    x
+1  NaN  5  NaN
+2  3.0  6    z
+3  NaN  7    w
+   b
+0  4
+1  5
+2  6
+3  7
+0    1.0
+1    1.0
+2    3.0
+3    3.0
+Name: a, dtype: float64 0    1.0
+1    3.0
+2    3.0
+3    NaN
+Name: a, dtype: float64
+2.0 4.0 2 1.0 1.4142135623730951 2.0
+[False, True, False, True] [False, True, False, False]
+0    1.0
+1    2.0
+2    3.0
+3    2.0
+Name: a, dtype: float64
+a    2
+b    4
+c    3
+dtype: int64
+0    5.0
+1    NaN
+2    9.0
+3    NaN
+dtype: float64 0    False
+1    False
+2     True
+3    False
+Name: a, dtype: bool 0     True
+1    False
+2     True
+3    False
+Name: a, dtype: bool
+0    1.0
+1    0.0
+2    3.0
+3    0.0
+Name: a, dtype: float64 0    40
+1    50
+2     6
+3     7
+Name: b, dtype: int64
+              a         b
+count  2.000000  4.000000
+mean   2.000000  5.500000
+std    1.414214  1.290994
+min    1.000000  4.000000
+25%    1.500000  4.750000
+50%    2.000000  5.500000
+75%    2.500000  6.250000
+max    3.000000  7.000000
+               a         b    c
+count   2.000000  4.000000    3
+unique       NaN       NaN    3
+top          NaN       NaN    x
+freq         NaN       NaN    1
+mean    2.000000  5.500000  NaN
+std     1.414214  1.290994  NaN
+min     1.000000  4.000000  NaN
+25%     1.500000  4.750000  NaN
+50%     2.000000  5.500000  NaN
+75%     2.500000  6.250000  NaN
+max     3.000000  7.000000  NaN
+count     3
+unique    3
+top       x
+freq      1
+Name: c, dtype: object
+count    4.000000
+mean     5.500000
+std      1.290994
+min      4.000000
+25%      4.750000
+50%      5.500000
+75%      6.250000
+max      7.000000
+Name: b, dtype: float64
+a    2.0
+b    5.5
+dtype: float64 a     4.0
+b    22.0
+dtype: float64
+0    1.0
+1    NaN
+2    4.0
+3    NaN
+Name: a, dtype: float64 0     4
+1     9
+2    15
+3    22
+Name: b, dtype: int64 0      4
+1     20
+2    120
+3    840
+Name: b, dtype: int64 0    NaN
+1    1.0
+2    1.0
+3    1.0
+Name: b, dtype: float64 0    NaN
+1    4.0
+2    5.0
+3    6.0
+Name: b, dtype: float64 0    5.0
+1    6.0
+2    7.0
+3    NaN
+Name: b, dtype: float64 0         NaN
+1    0.250000
+2    0.200000
+3    0.166667
+Name: b, dtype: float64
+0    NaN
+1    4.5
+2    5.5
+3    6.5
+Name: b, dtype: float64
+0     NaN
+1     NaN
+2    15.0
+3    18.0
+Name: b, dtype: float64 0    4.0
+1    5.0
+2    6.0
+3    7.0
+Name: b, dtype: float64 0    4.0
+1    4.5
+2    5.0
+3    5.5
+Name: b, dtype: float64
+0    1.0
+1    2.0
+2    3.0
+3    4.0
+Name: b, dtype: float64 0    1.0
+1    NaN
+2    2.0
+3    NaN
+Name: a, dtype: float64
+0    5
+1    5
+2    6
+3    6
+Name: b, dtype: int64 0    False
+1     True
+2     True
+3    False
+Name: b, dtype: bool 0    4
+1    5
+2    6
+3    7
+Name: b, dtype: int64 0   -2.0
+1   -0.0
+2    0.0
+3    2.0
+Name: b, dtype: float64 0    1.0
+1    NaN
+2    3.0
+3    NaN
+Name: a, dtype: float64
+3 0 3    7
+2    6
+Name: b, dtype: int64 0    4
+1    5
+Name: b, dtype: int64
+0    4.0
+1    5.0
+2    6.0
+3    7.0
+Name: b, dtype: float64 0    4
+1    5
+2    6
+3    7
+Name: b, dtype: str 
+5.5 0.25    4.75
+0.75    6.25
+Name: b, dtype: float64 1.6666666666666667 840
+0    1
+1    2
+2    3
+dtype: int64
+0    1.0
+1    NaN
+dtype: float64
+True True [False  True]
+[4 5 6 7] ['x', nan, 'z', 'w'] 4 3
+[4, 5, 6, 7] 22 7 4
+     a    b
+a  1.0  1.0
+b  1.0  1.0
+     a         b
+a  2.0  2.000000
+b  2.0  1.666667
+True True False True
+a    3.0
+b      7
+c      z
+dtype: object
+0    5.0
+1    NaN
+2    9.0
+3    NaN
+dtype: float64
+
+0    5.0
+1    5.0
+2    9.0
+3    7.0
+dtype: float64 0    4.0
+1    5.0
+2    6.0
+3    7.0
+dtype: float64
+[1.0, 4, 'x']
+Pandas(Index=0, a=1.0, b=4, c='x')
+Pandas(Index=1, a=nan, b=5, c=nan)
+Pandas(Index=2, a=3.0, b=6, c='z')
+Pandas(Index=3, a=nan, b=7, c='w')
+1.0 4
+nan 5
+3.0 6
+nan 7
+{'a': {0: 1.0, 1: nan, 2: 3.0, 3: nan}, 'b': {0: 4, 1: 5, 2: 6, 3: 7}, 'c': {0: 'x', 1: nan, 2: 'z', 3: 'w'}} {'a': [1.0, nan, 3.0, nan], 'b': [4, 5, 6, 7], 'c': ['x', nan, 'z', 'w']} [{'a': 1.0, 'b': 4, 'c': 'x'}, {'a': nan, 'b': 5, 'c': nan}, {'a': 3.0, 'b': 6, 'c': 'z'}, {'a': nan, 'b': 7, 'c': 'w'}] {0: 4, 1: 5, 2: 6, 3: 7}
+   b
+0  4
+1  5
+2  6
+3  7 [[1.0 4 'x']
+ [nan 5 nan]
+ [3.0 6 'z']
+ [nan 7 'w']] [4 5 6 7] [[1.0, 4.0], [nan, 5.0], [3.0, 6.0], [nan, 7.0]]
+     a  b    c
+0  1.0  4    x
+2  3.0  6    z
+1  NaN  5  NaN
+3  NaN  7    w      a  b    c
+1  NaN  5  NaN
+3  NaN  7    w
+0  1.0  4    x
+2  3.0  6    z
+     a  b    c
+3  NaN  7    w
+2  3.0  6    z
+1  NaN  5  NaN
+0  1.0  4    x
+0      X
+1    NaN
+2      Z
+3      W
+Name: c, dtype: str 0    1.0
+1    NaN
+2    1.0
+3    1.0
+Name: c, dtype: float64
+   a    b    c      d    e
+0  1    x  1.5   True  NaN
+1  2    y  NaN  False  3.0
+2  3  q,r  2.5   True  4.0
+a      int64
+b        str
+c    float64
+d       bool
+e    float64
+dtype: object
+   y
+x   
+1  2
+3  4
+     x  y
+0  1.0  2
+1  3.0  4
+   x  y
+0  1  2
+1  3  4
+   0  1
+0  1  2
+1  3  4
+   p  q
+0  1  2
+1  3  4
+   x    y
+0  1  NaN
+1  3  4.0
+   y
+0  a
+1  b
+   x  y
+0  1  a
+1  3  b
+      v
+name   
+Ann   1
+Bob   2
+,a,b,c,d,e
+0,1,x,1.5,True,
+1,2,y,,False,3.0
+2,3,"q,r",2.5,True,4.0
+
+a,b,c,d,e
+1,x,1.5,True,
+2,y,,False,3.0
+3,"q,r",2.5,True,4.0
+
+;a;b;c;d;e
+0;1;x;1.5;True;NA
+1;2;y;NA;False;3.0
+2;3;q,r;2.5;True;4.0
+
+a,b
+1,x
+2,y
+3,"q,r"
+
+,x
+0,1
+1,2
+2,3
+
+a,b
+"x,y",1.5
+"q""r",2.0
+plain,0.30000000000000004
+
+a,b,c,d,e
+1,x,1.50,True,
+2,y,,False,3.00
+3,"q,r",2.50,True,4.00
+
+True
+0    hello world
+1        foo bar
+2            NaN
+3          pad  
+4            abc
+dtype: str 0    HELLO WORLD
+1        FOO BAR
+2            NaN
+3          PAD  
+4            ABC
+dtype: str 0    11.0
+1     7.0
+2     NaN
+3     7.0
+4     3.0
+dtype: float64 0    Hello World
+1        foo bar
+2            NaN
+3            pad
+4            ABC
+dtype: str 0    Hello World
+1        Foo Bar
+2            NaN
+3          Pad  
+4            Abc
+dtype: str
+0     True
+1     True
+2    False
+3    False
+4    False
+dtype: bool 0     True
+1     True
+2    False
+3    False
+4    False
+dtype: bool 0    False
+1     True
+2    False
+3    False
+4    False
+dtype: bool 0    False
+1    False
+2    False
+3    False
+4     True
+dtype: bool
+0    Hell0 W0rld
+1        f00 bar
+2            NaN
+3          pad  
+4            ABC
+dtype: str 0    Hell0 W0rld
+1        f00 bar
+2            NaN
+3          pad  
+4            ABC
+dtype: str
+0    [Hello, World]
+1        [foo, bar]
+2               NaN
+3     [, , pad, , ]
+4             [ABC]
+dtype: object        0      1    2    3    4
+0  Hello  World  NaN  NaN  NaN
+1    foo    bar  NaN  NaN  NaN
+2    NaN    NaN  NaN  NaN  NaN
+3                pad          
+4    ABC    NaN  NaN  NaN  NaN
+0    Hel
+1    foo
+2    NaN
+3      p
+4    ABC
+dtype: str 0      H
+1      f
+2    NaN
+3       
+4      A
+dtype: str 0      e
+1      o
+2    NaN
+3       
+4      B
+dtype: str Hello World|foo bar|  pad  |ABC
+0    False
+1    False
+2    False
+3    False
+4    False
+dtype: bool 0    2.0
+1    2.0
+2    NaN
+3    0.0
+4    0.0
+dtype: float64 0    4.0
+1    1.0
+2    NaN
+3   -1.0
+4   -1.0
+dtype: float64
+0    False
+1     True
+2    False
+3    False
+4    False
+dtype: bool 0    Hello_World
+1        foo_bar
+2            NaN
+3          _pad_
+4            ABC
+dtype: str
+       0      1
+0  Hello  World
+1    foo    bar
+2    NaN    NaN
+3    NaN    NaN
+4    NaN    NaN
+0    0Hello World
+1    00000foo bar
+2             NaN
+3    00000  pad  
+4    000000000ABC
+dtype: str 0     Hello World
+1         foo bar
+2             NaN
+3           pad  
+4             ABC
+dtype: str 0    Hello WorldHello World
+1            foo barfoo bar
+2                       NaN
+3              pad    pad  
+4                    ABCABC
+dtype: str 0    False
+1    False
+2    False
+3    False
+4    False
+dtype: bool 0    False
+1    False
+2    False
+3    False
+4     True
+dtype: bool 0    False
+1    False
+2    False
+3    False
+4     True
+dtype: bool
+0    a
+1    c
+dtype: object 0    b
+1    d
+dtype: object
+
+     t  n  p  q
+0  a b  1  a  b
+1  c d  2  c  d
+       a      b
+0   True  False
+1  False   True
+2   True  False
+[1, 2, 3] [0, 2, 1]
+['a', 'b', 'c'] 
+[1 2 3] [1.5 2. ] ['a', 'b']
+[[1.  3.5]
+ [2.  4.5]]
+[[1 'x']
+ [2 'y']]
+[[1, 'x'], [2, 'y']]
+[1, 2, 3] [1, 2] ['a']
+RangeIndex(start=0, stop=2, step=1) RangeIndex(start=0, stop=3, step=1) Index([1, 2, 3], dtype='int64') Index(['a', 'b'], dtype='str', name='n')
+Index([1, 2, 3], dtype='int64') Index([1, 2, 3], dtype='int64') [False  True False]

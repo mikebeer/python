@@ -204,3 +204,51 @@ def lgamma(x):
     for i in range(1, 9):
         a += _LG[i] / (xm + i)
     return 0.5 * _log(2.0 * _pi) + (xm + 0.5) * _log(t) - t + _log(a)
+
+
+def sumprod(p, q):
+    p = list(p)
+    q = list(q)
+    if len(p) != len(q):
+        raise ValueError("Inputs are not the same length")
+    t = 0
+    for i in range(len(p)):
+        t += p[i] * q[i]
+    return t
+
+
+def ulp(x):
+    if x != x or x in (inf, -inf):
+        return abs(x)
+    x = abs(x)
+    if x == 0.0:
+        return 5e-324
+    m, e = frexp(x)
+    if e - 53 < -1074:
+        return 5e-324
+    return ldexp(1.0, e - 53)
+
+
+def nextafter(x, y, steps=1):
+    for _ in range(steps):
+        if x != x or y != y:
+            return nan
+        if x == y:
+            return y
+        if x == 0.0:
+            x = 5e-324 if y > 0 else -5e-324
+            continue
+        m, e = frexp(abs(x))
+        away = (y > x) == (x > 0)
+        if away:
+            d = ulp(x)
+        elif m == 0.5 and e - 54 >= -1074:
+            d = ldexp(1.0, e - 54)
+        else:
+            d = ulp(x)
+        x = x + d if y > x else x - d
+    return x
+
+
+def fma(x, y, z):
+    return x * y + z

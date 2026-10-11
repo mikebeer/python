@@ -301,6 +301,20 @@ BI(bi_divmod)
         if (b == 0) throw_new(cls_ZeroDivisionError, "float divmod()");
         return mktuple2(mkfloat(fl_floordiv(a, b)), mkfloat(fl_mod(a, b)));
     }
+    if (A(0).t == T_INST) {
+        Value *m = class_find(AS_INST(A(0))->cls, intern_c("__divmod__"));
+        if (m) {
+            q = call2(*m, A(0), A(1));
+            if (!IS_NOTIMPL(q)) return q;
+        }
+    }
+    if (A(1).t == T_INST) {
+        Value *m = class_find(AS_INST(A(1))->cls, intern_c("__rdivmod__"));
+        if (m) {
+            q = call2(*m, A(1), A(0));
+            if (!IS_NOTIMPL(q)) return q;
+        }
+    }
     throw_new(cls_TypeError, "unsupported operand type(s) for divmod(): '%.40s' and '%.40s'",
               type_name(A(0)), type_name(A(1)));
     return NONE_V;
@@ -396,6 +410,20 @@ static void dict_update_from(Dict *d, Value src)
         long i;
         for (i = 0; i < s->used; i++)
             if (s->e[i].k.t != T_UNSET) dict_set(d, s->e[i].k, s->e[i].v);
+    } else if (src.t == T_INST && class_find(AS_INST(src)->cls, intern_c("keys"))) {
+        Value *base = vsp;
+        Value ks, it, k;
+        VPUSH(src);
+        ks = call0(get_attr(src, intern_c("keys")));
+        VPUSH(ks);
+        it = get_iter(ks);
+        VPUSH(it);
+        while (iter_next(it, &k)) {
+            VPUSH(k);
+            dict_set(d, k, subscr(src, k));
+            vsp--;
+        }
+        vsp = base;
     } else {
         Value it, item;
         Value *base = vsp;
@@ -785,6 +813,7 @@ BI(bi_type)
             amap_set(&c->ns, intern_str(AS_STR(ns->e[i].k)), ns->e[i].v);
         }
         finish_class(c);
+        run_init_subclass(c, c->base, cv);
         vsp--;
         return cv;
     }
@@ -996,22 +1025,43 @@ BI(obj_hash)
 #define SELF astr(A(0), "self")
 static int ws(int c) { return ch_space[(unsigned char)c]; }
 
-BI(s_upper)
+/* two-byte UTF-8 case mapping (Latin-1, Greek, Cyrillic basics); returns 1 if mapped */
+static int u8_case(unsigned char *p, int up)
 {
-    Str *s = SELF;
+    unsigned char c = p[0], d = p[1];
+    if (up) {
+        if (c == 0xC3 && d >= 0xA0 && d <= 0xBE && d != 0xB7) { p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xC3 && d == 0xBF) { p[0] = 0xC5; p[1] = 0xB8; return 1; }
+        if (c == 0xCE && d >= 0xB1 && d <= 0xBF) { p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xCF && d >= 0x80 && d <= 0x89 && d != 0x82) {
+            p[0] = (unsigned char)(d >= 0x80 && d <= 0x89 ? 0xCE : c);
+            p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xD0 && d >= 0xB0 && d <= 0xBF) { p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xD1 && d >= 0x80 && d <= 0x8F) { p[0] = 0xD0; p[1] = (unsigned char)(d + 0x20); return 1; }
+    } else {
+        if (c == 0xC3 && d >= 0x80 && d <= 0x9E && d != 0x97) { p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xCE && d >= 0x91 && d <= 0x9F) { p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xCE && d >= 0xA0 && d <= 0xA9 && d != 0xA2) {
+            p[0] = 0xCF; p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xD0 && d >= 0x90 && d <= 0x9F) { p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xD0 && d >= 0xA0 && d <= 0xAF) { p[0] = 0xD1; p[1] = (unsigned char)(d - 0x20); return 1; }
+    }
+    return 0;
+}
+static Value str_case(Str *s, int up)
+{
     Value r = mkstr(s->s, s->len);
+    unsigned char *p = (unsigned char *)AS_STR(r)->s;
     long i;
-    for (i = 0; i < s->len; i++) AS_STR(r)->s[i] = (char)to_up[(unsigned char)s->s[i]];
+    for (i = 0; i < s->len; i++) {
+        if (p[i] >= 0xC3 && p[i] <= 0xD1 && i + 1 < s->len && (p[i + 1] & 0xC0) == 0x80 &&
+            u8_case(p + i, up)) { i++; continue; }
+        p[i] = up ? to_up[p[i]] : to_low[p[i]];
+    }
     return r;
 }
-BI(s_lower)
-{
-    Str *s = SELF;
-    Value r = mkstr(s->s, s->len);
-    long i;
-    for (i = 0; i < s->len; i++) AS_STR(r)->s[i] = (char)to_low[(unsigned char)s->s[i]];
-    return r;
-}
+BI(s_upper) { return str_case(SELF, 1); }
+BI(s_lower) { return str_case(SELF, 0); }
 BI(s_swapcase)
 {
     Str *s = SELF;
@@ -2046,6 +2096,36 @@ BI(nat_or) { need(x, 2, 2, "__or__"); return binop(B_OR, A(0), unpay(A(1))); }
 BI(nat_and) { need(x, 2, 2, "__and__"); return binop(B_AND, A(0), unpay(A(1))); }
 BI(nat_sub) { need(x, 2, 2, "__sub__"); return binop(B_SUB, A(0), unpay(A(1))); }
 BI(nat_xor) { need(x, 2, 2, "__xor__"); return binop(B_XOR, A(0), unpay(A(1))); }
+/* arithmetic dunders of int/float (called as methods) */
+BI(num_add) { need(x, 2, 2, "__add__"); return binop(B_ADD, unpay(A(0)), unpay(A(1))); }
+BI(num_radd) { need(x, 2, 2, "__radd__"); return binop(B_ADD, unpay(A(1)), unpay(A(0))); }
+BI(num_sub) { need(x, 2, 2, "__sub__"); return binop(B_SUB, unpay(A(0)), unpay(A(1))); }
+BI(num_rsub) { need(x, 2, 2, "__rsub__"); return binop(B_SUB, unpay(A(1)), unpay(A(0))); }
+BI(num_mul) { need(x, 2, 2, "__mul__"); return binop(B_MUL, unpay(A(0)), unpay(A(1))); }
+BI(num_rmul) { need(x, 2, 2, "__rmul__"); return binop(B_MUL, unpay(A(1)), unpay(A(0))); }
+BI(num_truediv) { need(x, 2, 2, "__truediv__"); return binop(B_DIV, unpay(A(0)), unpay(A(1))); }
+BI(num_rtruediv) { need(x, 2, 2, "__rtruediv__"); return binop(B_DIV, unpay(A(1)), unpay(A(0))); }
+BI(num_floordiv) { need(x, 2, 2, "__floordiv__"); return binop(B_FDIV, unpay(A(0)), unpay(A(1))); }
+BI(num_rfloordiv) { need(x, 2, 2, "__rfloordiv__"); return binop(B_FDIV, unpay(A(1)), unpay(A(0))); }
+BI(num_mod) { need(x, 2, 2, "__mod__"); return binop(B_MOD, unpay(A(0)), unpay(A(1))); }
+BI(num_rmod) { need(x, 2, 2, "__rmod__"); return binop(B_MOD, unpay(A(1)), unpay(A(0))); }
+BI(num_pow) { need(x, 2, 2, "__pow__"); return binop(B_POW, unpay(A(0)), unpay(A(1))); }
+BI(num_rpow) { need(x, 2, 2, "__rpow__"); return binop(B_POW, unpay(A(1)), unpay(A(0))); }
+BI(num_and) { need(x, 2, 2, "__and__"); return binop(B_AND, unpay(A(0)), unpay(A(1))); }
+BI(num_rand) { need(x, 2, 2, "__rand__"); return binop(B_AND, unpay(A(1)), unpay(A(0))); }
+BI(num_or) { need(x, 2, 2, "__or__"); return binop(B_OR, unpay(A(0)), unpay(A(1))); }
+BI(num_ror) { need(x, 2, 2, "__ror__"); return binop(B_OR, unpay(A(1)), unpay(A(0))); }
+BI(num_xor) { need(x, 2, 2, "__xor__"); return binop(B_XOR, unpay(A(0)), unpay(A(1))); }
+BI(num_rxor) { need(x, 2, 2, "__rxor__"); return binop(B_XOR, unpay(A(1)), unpay(A(0))); }
+BI(num_lshift) { need(x, 2, 2, "__lshift__"); return binop(B_LSH, unpay(A(0)), unpay(A(1))); }
+BI(num_rlshift) { need(x, 2, 2, "__rlshift__"); return binop(B_LSH, unpay(A(1)), unpay(A(0))); }
+BI(num_rshift) { need(x, 2, 2, "__rshift__"); return binop(B_RSH, unpay(A(0)), unpay(A(1))); }
+BI(num_rrshift) { need(x, 2, 2, "__rrshift__"); return binop(B_RSH, unpay(A(1)), unpay(A(0))); }
+BI(num_neg) { return unop('-', unpay(A(0))); }
+BI(num_pos) { return unop('+', unpay(A(0))); }
+BI(num_invert) { return unop('~', unpay(A(0))); }
+BI(num_abs) { Value v = unpay(A(0)); return rich_cmp(C_LT, v, mkint(0)) ? unop('-', v) : unop('+', v); }
+BI(num_conj) { return unpay(A(0)); }
 BI(nat_format)
 {
     need(x, 2, 2, "__format__");

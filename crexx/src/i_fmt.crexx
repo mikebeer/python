@@ -227,7 +227,10 @@ format_value: procedure = .string
     x = 0.0 - f
   end
   else if f = 0.0 then do
-    if fl_negzero(f) = 1 then neg = 1
+    if fl_negzero(f) = 1 then do
+      neg = 1
+      x = 0.0
+    end
   end
   if f \= f then body = "nan"
   else if finf(x) = 1 then body = "inf"
@@ -515,7 +518,10 @@ fmt_percent: procedure = .int
           neg = 1
           x_ = 0.0 - x_
         end
-        else if x_ = 0.0 & fl_negzero(x_) = 1 then neg = 1
+        else if x_ = 0.0 & fl_negzero(x_) = 1 then do
+          neg = 1
+          x_ = 0.0
+        end
         if prec < 0 then prec = 6
         if x_ \= x_ then body = "nan"
         else if finf(x_) = 1 then body = "inf"

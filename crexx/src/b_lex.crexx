@@ -81,10 +81,7 @@ unescape: procedure = .string
 
 utf8_chr: procedure = .string
   arg v = .int
-  if v < 128 then return d2c(v)
-  if v < 2048 then return d2c(192 + v % 64) || d2c(128 + v // 64)
-  if v < 65536 then return d2c(224 + v % 4096) || d2c(128 + (v % 64) // 64) || d2c(128 + v // 64)
-  return d2c(240 + v % 262144) || d2c(128 + (v % 4096) // 64) || d2c(128 + (v % 64) // 64) || d2c(128 + v // 64)
+  return d2c(v)
 
 /* lex the text src into tokens appended to the token arrays.
    sub = 1: a fragment (no indentation processing) */

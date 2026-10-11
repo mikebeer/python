@@ -1102,6 +1102,7 @@ np_fmt_all: procedure = .void
   expf = .int
   padl = .int
   padr = .int
+  nfl = .int
   wnf = .int
   fr = .string
   ic = c % 2
@@ -1156,22 +1157,26 @@ np_fmt_all: procedure = .void
   end
   padl = 0
   padr = 0
+  nfl = 0
   do i = 1 to n
     f = npf[p + i - 1]
     npnf[i] = 0
     if f \= f then do
       npnf[i] = 1
       npip[i] = "nan"
+      if nfl < 3 then nfl = 3
       iterate
     end
     if finf(f) = 1 then do
       npnf[i] = 1
       npip[i] = "inf"
+      if nfl < 3 then nfl = 3
       iterate
     end
     if finf(f) = 2 then do
       npnf[i] = 1
       npip[i] = "-inf"
+      if nfl < 4 then nfl = 4
       iterate
     end
     if expf = 1 then call np_expo f
@@ -1185,6 +1190,10 @@ np_fmt_all: procedure = .void
     if length(np_ip) > padl then padl = length(np_ip)
     if length(np_fp) > padr then padr = length(np_fp)
   end
+  if expf = 1 then do
+    if nfl - padr - 5 > padl then padl = nfl - padr - 5
+  end
+  else if nfl - padr - 1 > padl then padl = nfl - padr - 1
   wnf = padl + 1 + padr
   if expf = 1 then wnf = wnf + 4
   do i = 1 to n

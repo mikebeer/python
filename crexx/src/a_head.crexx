@@ -437,7 +437,7 @@ init: procedure = .void
   imp_ispkg = 0
   imp_pdir = ""
   imp_quiet = 0
-  natives = " math random sys time itertools functools collections string copy typing __future__ os os.path numpy numpy.linalg numpy.random warnings abc "
+  natives = " math random sys time typing __future__ os os.path numpy numpy.linalg numpy.random warnings abc "
   shadow = " functools.wraps functools.lru_cache functools.cache "
   /* ---- class linearisation ---- */
   cl_mod = .int[]

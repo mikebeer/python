@@ -933,6 +933,31 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_set, "update", st_update); def_bi(cls_set, "issubset", st_issubset);
     def_bi(cls_set, "issuperset", st_issuperset); def_bi(cls_set, "isdisjoint", st_isdisjoint);
     def_bi(cls_set, "copy", st_copy); def_bi(cls_set, "clear", st_clear);
+    {
+        Class *nk[2];
+        int k;
+        nk[0] = cls_int; nk[1] = cls_float;
+        for (k = 0; k < 2; k++) {
+            def_bi(nk[k], "__add__", num_add); def_bi(nk[k], "__radd__", num_radd);
+            def_bi(nk[k], "__sub__", num_sub); def_bi(nk[k], "__rsub__", num_rsub);
+            def_bi(nk[k], "__mul__", num_mul); def_bi(nk[k], "__rmul__", num_rmul);
+            def_bi(nk[k], "__truediv__", num_truediv); def_bi(nk[k], "__rtruediv__", num_rtruediv);
+            def_bi(nk[k], "__floordiv__", num_floordiv); def_bi(nk[k], "__rfloordiv__", num_rfloordiv);
+            def_bi(nk[k], "__mod__", num_mod); def_bi(nk[k], "__rmod__", num_rmod);
+            def_bi(nk[k], "__pow__", num_pow); def_bi(nk[k], "__rpow__", num_rpow);
+            def_bi(nk[k], "__neg__", num_neg); def_bi(nk[k], "__pos__", num_pos);
+            def_bi(nk[k], "__abs__", num_abs); def_bi(nk[k], "conjugate", num_conj);
+            def_bi(nk[k], "__eq__", nat_eq); def_bi(nk[k], "__ne__", nat_ne);
+            def_bi(nk[k], "__lt__", nat_lt); def_bi(nk[k], "__le__", nat_le);
+            def_bi(nk[k], "__gt__", nat_gt); def_bi(nk[k], "__ge__", nat_ge);
+        }
+        def_bi(cls_int, "__and__", num_and); def_bi(cls_int, "__rand__", num_rand);
+        def_bi(cls_int, "__or__", num_or); def_bi(cls_int, "__ror__", num_ror);
+        def_bi(cls_int, "__xor__", num_xor); def_bi(cls_int, "__rxor__", num_rxor);
+        def_bi(cls_int, "__lshift__", num_lshift); def_bi(cls_int, "__rlshift__", num_rlshift);
+        def_bi(cls_int, "__rshift__", num_rshift); def_bi(cls_int, "__rrshift__", num_rrshift);
+        def_bi(cls_int, "__invert__", num_invert);
+    }
     /* numbers */
     def_bi(cls_int, "bit_length", i_bit_length);
     def_bi(cls_float, "is_integer", f_is_integer);

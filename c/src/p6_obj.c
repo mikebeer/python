@@ -305,7 +305,7 @@ static int py_eq(Value a, Value b)
     case T_STR: case T_BYTES:
         return a.u.o == b.u.o || (AS_STR(a)->len == AS_STR(b)->len &&
             memcmp(AS_STR(a)->s, AS_STR(b)->s, (size_t)AS_STR(a)->len) == 0);
-    case T_LIST: case T_TUPLE: {
+    case T_LIST: case T_TUPLE: case T_SLICE: {
         List *x = AS_LIST(a), *y = AS_LIST(b);
         long i;
         if (x == y) return 1;
@@ -531,6 +531,26 @@ static int rich_cmp(int op, Value a, Value b)
         case C_GT: return c > 0; default: return c >= 0;
         }
     }
+}
+/* rich comparison on instances: return the raw result of the dunder method (pandas style masks) */
+static int inst_cmp_value(int op, Value a, Value b, Value *out)
+{
+    Value *m, r;
+    if (a.t == T_INST) {
+        m = class_find(AS_INST(a)->cls, *op_names(op, 0));
+        if (m) {
+            r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) { *out = r; return 1; }
+        }
+    }
+    if (b.t == T_INST) {
+        m = class_find(AS_INST(b)->cls, *op_names(op, 1));
+        if (m) {
+            r = call2(*m, b, a);
+            if (!IS_NOTIMPL(r)) { *out = r; return 1; }
+        }
+    }
+    return 0;
 }
 static int rich_lt_hook(Value a, Value b)
 {
@@ -965,6 +985,7 @@ static Value get_attr(Value o, Str *nm)
         } else {
             p = amap_get(&md->ns, nm);
             if (p) return *p;
+            { Value ov; if (module_overlay(md, nm, &ov)) return ov; }
         }
         if (nm == S_name) return mkobj(md->name, T_STR);
         break; }
@@ -1901,7 +1922,7 @@ static Value set_op(int op, Value a, Value b)
 static Value binop(int op, Value a, Value b)
 {
     if (is_num(a) && is_num(b)) return num_binop(op, a, b);
-    if (a.t == T_ND || b.t == T_ND) return nd_binop(op, a, b);
+    if ((a.t == T_ND || b.t == T_ND) && a.t != T_INST && b.t != T_INST) return nd_binop(op, a, b);
     if (a.t == T_STR && b.t == T_STR && op == B_ADD) {
         Str *x = AS_STR(a), *y = AS_STR(b);
         Str *r = (Str *)gc_alloc(sizeof(Str) + (size_t)(x->len + y->len), T_STR);
@@ -1994,6 +2015,7 @@ static Value binop(int op, Value a, Value b)
             if (!IS_NOTIMPL(r)) return r;
         }
     }
+    if (a.t == T_ND || b.t == T_ND) return nd_binop(op, a, b);
     if (op == B_ADD && a.t == T_STR)
         throw_new(cls_TypeError, "can only concatenate str (not \"%.40s\") to str", type_name(b));
     if (op == B_ADD && a.t == T_LIST)

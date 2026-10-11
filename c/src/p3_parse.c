@@ -1295,7 +1295,6 @@ static Node *parse_simple(void)
                     Node *y;
                     if (as->n != 1) perr("yield in chained assignment is not supported");
                     y = parse_yield_stmt(line);
-                    if (y->kind != S_YIELD) perr("'yield from' in assignment is not supported");
                     y->b = as->list[0];
                     return y;
                 }

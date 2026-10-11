@@ -509,6 +509,22 @@ bi_divmod: procedure = .int
   q = .int
   r = .int
   t = .int
+  if kind_of(a) = K_INST then do
+    q = cls_find(ob_c[a % 2], M___DIVMOD__)
+    if q > 0 then do
+      r = call2(q, a, b)
+      if r \= NOTIMPL_OOP then return r
+      if unw > 0 then return 0
+    end
+  end
+  if kind_of(b) = K_INST then do
+    q = cls_find(ob_c[b % 2], M___RDIVMOD__)
+    if q > 0 then do
+      r = call2(q, b, a)
+      if r \= NOTIMPL_OOP then return r
+      if unw > 0 then return 0
+    end
+  end
   q = arith(O_FLOORDIV, a, b)
   if q = 0 then return 0
   r = arith(O_MOD, a, b)
@@ -1106,6 +1122,18 @@ ctor_dict: procedure = .int
   if na = 1 then do
     x = ast[base + 1]
     if kind_of(x) = K_DICT then call dict_update o, x
+    else if kind_of(x) = K_INST & cls_find(ob_c[x % 2], M_KEYS) > 0 then do
+      it = iter_new(callz(getattr_obj(x, M_KEYS, 0)))
+      if it = 0 then return 0
+      do forever
+        v = iter_next(it)
+        if v = 0 then leave
+        p = getitem(x, v)
+        if p = 0 then return 0
+        call dset o, v, p
+      end
+      if unw > 0 then return 0
+    end
     else do
       it = iter_new(x)
       if it = 0 then return 0

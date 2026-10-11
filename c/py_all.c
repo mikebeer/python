@@ -354,6 +354,9 @@ static Value call2(Value fn, Value a, Value b);
 static Value py_repr(Value v);
 static Value py_str(Value v);
 static int py_eq(Value a, Value b);
+static int inst_cmp_value(int op, Value a, Value b, Value *out);
+struct Module;
+static int module_overlay(struct Module *md, Str *nm, Value *out);
 static unsigned long py_hash(Value v);
 static Value get_attr(Value o, Str *nm);
 static Value get_iter(Value o);
@@ -3244,7 +3247,6 @@ static Node *parse_simple(void)
                     Node *y;
                     if (as->n != 1) perr("yield in chained assignment is not supported");
                     y = parse_yield_stmt(line);
-                    if (y->kind != S_YIELD) perr("'yield from' in assignment is not supported");
                     y->b = as->list[0];
                     return y;
                 }
@@ -3954,7 +3956,7 @@ static int py_eq(Value a, Value b)
     case T_STR: case T_BYTES:
         return a.u.o == b.u.o || (AS_STR(a)->len == AS_STR(b)->len &&
             memcmp(AS_STR(a)->s, AS_STR(b)->s, (size_t)AS_STR(a)->len) == 0);
-    case T_LIST: case T_TUPLE: {
+    case T_LIST: case T_TUPLE: case T_SLICE: {
         List *x = AS_LIST(a), *y = AS_LIST(b);
         long i;
         if (x == y) return 1;
@@ -4180,6 +4182,26 @@ static int rich_cmp(int op, Value a, Value b)
         case C_GT: return c > 0; default: return c >= 0;
         }
     }
+}
+/* rich comparison on instances: return the raw result of the dunder method (pandas style masks) */
+static int inst_cmp_value(int op, Value a, Value b, Value *out)
+{
+    Value *m, r;
+    if (a.t == T_INST) {
+        m = class_find(AS_INST(a)->cls, *op_names(op, 0));
+        if (m) {
+            r = call2(*m, a, b);
+            if (!IS_NOTIMPL(r)) { *out = r; return 1; }
+        }
+    }
+    if (b.t == T_INST) {
+        m = class_find(AS_INST(b)->cls, *op_names(op, 1));
+        if (m) {
+            r = call2(*m, b, a);
+            if (!IS_NOTIMPL(r)) { *out = r; return 1; }
+        }
+    }
+    return 0;
 }
 static int rich_lt_hook(Value a, Value b)
 {
@@ -4614,6 +4636,7 @@ static Value get_attr(Value o, Str *nm)
         } else {
             p = amap_get(&md->ns, nm);
             if (p) return *p;
+            { Value ov; if (module_overlay(md, nm, &ov)) return ov; }
         }
         if (nm == S_name) return mkobj(md->name, T_STR);
         break; }
@@ -5550,7 +5573,7 @@ static Value set_op(int op, Value a, Value b)
 static Value binop(int op, Value a, Value b)
 {
     if (is_num(a) && is_num(b)) return num_binop(op, a, b);
-    if (a.t == T_ND || b.t == T_ND) return nd_binop(op, a, b);
+    if ((a.t == T_ND || b.t == T_ND) && a.t != T_INST && b.t != T_INST) return nd_binop(op, a, b);
     if (a.t == T_STR && b.t == T_STR && op == B_ADD) {
         Str *x = AS_STR(a), *y = AS_STR(b);
         Str *r = (Str *)gc_alloc(sizeof(Str) + (size_t)(x->len + y->len), T_STR);
@@ -5643,6 +5666,7 @@ static Value binop(int op, Value a, Value b)
             if (!IS_NOTIMPL(r)) return r;
         }
     }
+    if (a.t == T_ND || b.t == T_ND) return nd_binop(op, a, b);
     if (op == B_ADD && a.t == T_STR)
         throw_new(cls_TypeError, "can only concatenate str (not \"%.40s\") to str", type_name(b));
     if (op == B_ADD && a.t == T_LIST)
@@ -6582,10 +6606,22 @@ static Value eval(Frame *f, Node *n)
                 case C_EQ: r = x == y; break;
                 default: r = x != y; break;
                 }
-            } else if ((left.t == T_ND || right.t == T_ND) && n->name->s[i] <= C_NE) {
+            } else if ((left.t == T_ND || right.t == T_ND) && left.t != T_INST && right.t != T_INST && n->name->s[i] <= C_NE) {
                 Value cv = nd_compare(n->name->s[i], left, right);
                 vsp = base;
                 return cv;
+            } else if (nops == 1 && n->name->s[i] <= C_NE && (left.t == T_INST || right.t == T_INST)) {
+                Value rv;
+                if (inst_cmp_value(n->name->s[i], left, right, &rv)) {
+                    vsp = base;
+                    return rv;
+                }
+                if (left.t == T_ND || right.t == T_ND) {
+                    Value cv = nd_compare(n->name->s[i], left, right);
+                    vsp = base;
+                    return cv;
+                }
+                r = cmp_one(n->name->s[i], left, right);
             } else {
                 r = cmp_one(n->name->s[i], left, right);
             }
@@ -6945,6 +6981,15 @@ static void finish_class(Class *c)
     if (amap_get(&c->ns, S_setattr)) c->flags |= CF_SETATTR;
     class_epoch++;
 }
+/* call __init_subclass__ of the first base (implicit classmethod) */
+static void run_init_subclass(Class *c, Class *base, Value cv)
+{
+    Value *m = class_find(base, intern_c("__init_subclass__"));
+    if (!m) return;
+    if (m->t == T_CMETH) call1(((Prop *)m->u.o)->get, cv);
+    else if (m->t == T_FUNC) call1(*m, cv);
+    (void)c;
+}
 static void exec_class(Frame *f, Node *n)
 {
     FuncDef *fd = n->fd;
@@ -6987,6 +7032,7 @@ static void exec_class(Frame *f, Node *n)
     cur_frame = cf.up;
     free(cells);
     finish_class(c);
+    run_init_subclass(c, c->base, cv);
     /* decorators (rare) */
     for (i = n->n - 1; i >= nbases; i--) {
         Value d = eval(f, n->list[i]);
@@ -7148,16 +7194,38 @@ static void exec_del(Frame *f, Node *t)
 static int exec_yieldfrom(Frame *f, Node *n)
 {
     Value it, x;
+    Gen *g = f->gen;
+    int more;
     if (f->resuming) {
         it = STATE(f, n, 0);
         f->resuming = 0;
+        if (g->thrown.t == T_INST) {
+            Value e = g->thrown;
+            g->thrown = NONE_V;
+            if (it.t != T_GEN) throw_val(e);
+            ((Gen *)it.u.o)->thrown = e;
+        }
+        if (it.t == T_GEN) {
+            ((Gen *)it.u.o)->sent = g->sent;
+            g->sent = NONE_V;
+            more = gen_resume((Gen *)it.u.o, &x);
+        } else {
+            g->sent = NONE_V;
+            more = iter_next(it, &x);
+        }
     } else {
         it = get_iter(eval(f, n->a));
         STATE(f, n, 0) = it;
+        more = iter_next(it, &x);
     }
-    if (iter_next(it, &x)) {
-        f->gen->yielded = x;
+    if (more) {
+        g->yielded = x;
         return ST_YIELD;
+    }
+    if (n->b) {
+        Value rv = NONE_V;
+        if (it.t == T_GEN) rv = ((Gen *)it.u.o)->ret;
+        assign_target(f, n->b, rv);
     }
     return 0;
 }
@@ -8088,6 +8156,20 @@ BI(bi_divmod)
         if (b == 0) throw_new(cls_ZeroDivisionError, "float divmod()");
         return mktuple2(mkfloat(fl_floordiv(a, b)), mkfloat(fl_mod(a, b)));
     }
+    if (A(0).t == T_INST) {
+        Value *m = class_find(AS_INST(A(0))->cls, intern_c("__divmod__"));
+        if (m) {
+            q = call2(*m, A(0), A(1));
+            if (!IS_NOTIMPL(q)) return q;
+        }
+    }
+    if (A(1).t == T_INST) {
+        Value *m = class_find(AS_INST(A(1))->cls, intern_c("__rdivmod__"));
+        if (m) {
+            q = call2(*m, A(1), A(0));
+            if (!IS_NOTIMPL(q)) return q;
+        }
+    }
     throw_new(cls_TypeError, "unsupported operand type(s) for divmod(): '%.40s' and '%.40s'",
               type_name(A(0)), type_name(A(1)));
     return NONE_V;
@@ -8183,6 +8265,20 @@ static void dict_update_from(Dict *d, Value src)
         long i;
         for (i = 0; i < s->used; i++)
             if (s->e[i].k.t != T_UNSET) dict_set(d, s->e[i].k, s->e[i].v);
+    } else if (src.t == T_INST && class_find(AS_INST(src)->cls, intern_c("keys"))) {
+        Value *base = vsp;
+        Value ks, it, k;
+        VPUSH(src);
+        ks = call0(get_attr(src, intern_c("keys")));
+        VPUSH(ks);
+        it = get_iter(ks);
+        VPUSH(it);
+        while (iter_next(it, &k)) {
+            VPUSH(k);
+            dict_set(d, k, subscr(src, k));
+            vsp--;
+        }
+        vsp = base;
     } else {
         Value it, item;
         Value *base = vsp;
@@ -8572,6 +8668,7 @@ BI(bi_type)
             amap_set(&c->ns, intern_str(AS_STR(ns->e[i].k)), ns->e[i].v);
         }
         finish_class(c);
+        run_init_subclass(c, c->base, cv);
         vsp--;
         return cv;
     }
@@ -8783,22 +8880,43 @@ BI(obj_hash)
 #define SELF astr(A(0), "self")
 static int ws(int c) { return ch_space[(unsigned char)c]; }
 
-BI(s_upper)
+/* two-byte UTF-8 case mapping (Latin-1, Greek, Cyrillic basics); returns 1 if mapped */
+static int u8_case(unsigned char *p, int up)
 {
-    Str *s = SELF;
+    unsigned char c = p[0], d = p[1];
+    if (up) {
+        if (c == 0xC3 && d >= 0xA0 && d <= 0xBE && d != 0xB7) { p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xC3 && d == 0xBF) { p[0] = 0xC5; p[1] = 0xB8; return 1; }
+        if (c == 0xCE && d >= 0xB1 && d <= 0xBF) { p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xCF && d >= 0x80 && d <= 0x89 && d != 0x82) {
+            p[0] = (unsigned char)(d >= 0x80 && d <= 0x89 ? 0xCE : c);
+            p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xD0 && d >= 0xB0 && d <= 0xBF) { p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xD1 && d >= 0x80 && d <= 0x8F) { p[0] = 0xD0; p[1] = (unsigned char)(d + 0x20); return 1; }
+    } else {
+        if (c == 0xC3 && d >= 0x80 && d <= 0x9E && d != 0x97) { p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xCE && d >= 0x91 && d <= 0x9F) { p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xCE && d >= 0xA0 && d <= 0xA9 && d != 0xA2) {
+            p[0] = 0xCF; p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xD0 && d >= 0x90 && d <= 0x9F) { p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xD0 && d >= 0xA0 && d <= 0xAF) { p[0] = 0xD1; p[1] = (unsigned char)(d - 0x20); return 1; }
+    }
+    return 0;
+}
+static Value str_case(Str *s, int up)
+{
     Value r = mkstr(s->s, s->len);
+    unsigned char *p = (unsigned char *)AS_STR(r)->s;
     long i;
-    for (i = 0; i < s->len; i++) AS_STR(r)->s[i] = (char)to_up[(unsigned char)s->s[i]];
+    for (i = 0; i < s->len; i++) {
+        if (p[i] >= 0xC3 && p[i] <= 0xD1 && i + 1 < s->len && (p[i + 1] & 0xC0) == 0x80 &&
+            u8_case(p + i, up)) { i++; continue; }
+        p[i] = up ? to_up[p[i]] : to_low[p[i]];
+    }
     return r;
 }
-BI(s_lower)
-{
-    Str *s = SELF;
-    Value r = mkstr(s->s, s->len);
-    long i;
-    for (i = 0; i < s->len; i++) AS_STR(r)->s[i] = (char)to_low[(unsigned char)s->s[i]];
-    return r;
-}
+BI(s_upper) { return str_case(SELF, 1); }
+BI(s_lower) { return str_case(SELF, 0); }
 BI(s_swapcase)
 {
     Str *s = SELF;
@@ -9833,6 +9951,36 @@ BI(nat_or) { need(x, 2, 2, "__or__"); return binop(B_OR, A(0), unpay(A(1))); }
 BI(nat_and) { need(x, 2, 2, "__and__"); return binop(B_AND, A(0), unpay(A(1))); }
 BI(nat_sub) { need(x, 2, 2, "__sub__"); return binop(B_SUB, A(0), unpay(A(1))); }
 BI(nat_xor) { need(x, 2, 2, "__xor__"); return binop(B_XOR, A(0), unpay(A(1))); }
+/* arithmetic dunders of int/float (called as methods) */
+BI(num_add) { need(x, 2, 2, "__add__"); return binop(B_ADD, unpay(A(0)), unpay(A(1))); }
+BI(num_radd) { need(x, 2, 2, "__radd__"); return binop(B_ADD, unpay(A(1)), unpay(A(0))); }
+BI(num_sub) { need(x, 2, 2, "__sub__"); return binop(B_SUB, unpay(A(0)), unpay(A(1))); }
+BI(num_rsub) { need(x, 2, 2, "__rsub__"); return binop(B_SUB, unpay(A(1)), unpay(A(0))); }
+BI(num_mul) { need(x, 2, 2, "__mul__"); return binop(B_MUL, unpay(A(0)), unpay(A(1))); }
+BI(num_rmul) { need(x, 2, 2, "__rmul__"); return binop(B_MUL, unpay(A(1)), unpay(A(0))); }
+BI(num_truediv) { need(x, 2, 2, "__truediv__"); return binop(B_DIV, unpay(A(0)), unpay(A(1))); }
+BI(num_rtruediv) { need(x, 2, 2, "__rtruediv__"); return binop(B_DIV, unpay(A(1)), unpay(A(0))); }
+BI(num_floordiv) { need(x, 2, 2, "__floordiv__"); return binop(B_FDIV, unpay(A(0)), unpay(A(1))); }
+BI(num_rfloordiv) { need(x, 2, 2, "__rfloordiv__"); return binop(B_FDIV, unpay(A(1)), unpay(A(0))); }
+BI(num_mod) { need(x, 2, 2, "__mod__"); return binop(B_MOD, unpay(A(0)), unpay(A(1))); }
+BI(num_rmod) { need(x, 2, 2, "__rmod__"); return binop(B_MOD, unpay(A(1)), unpay(A(0))); }
+BI(num_pow) { need(x, 2, 2, "__pow__"); return binop(B_POW, unpay(A(0)), unpay(A(1))); }
+BI(num_rpow) { need(x, 2, 2, "__rpow__"); return binop(B_POW, unpay(A(1)), unpay(A(0))); }
+BI(num_and) { need(x, 2, 2, "__and__"); return binop(B_AND, unpay(A(0)), unpay(A(1))); }
+BI(num_rand) { need(x, 2, 2, "__rand__"); return binop(B_AND, unpay(A(1)), unpay(A(0))); }
+BI(num_or) { need(x, 2, 2, "__or__"); return binop(B_OR, unpay(A(0)), unpay(A(1))); }
+BI(num_ror) { need(x, 2, 2, "__ror__"); return binop(B_OR, unpay(A(1)), unpay(A(0))); }
+BI(num_xor) { need(x, 2, 2, "__xor__"); return binop(B_XOR, unpay(A(0)), unpay(A(1))); }
+BI(num_rxor) { need(x, 2, 2, "__rxor__"); return binop(B_XOR, unpay(A(1)), unpay(A(0))); }
+BI(num_lshift) { need(x, 2, 2, "__lshift__"); return binop(B_LSH, unpay(A(0)), unpay(A(1))); }
+BI(num_rlshift) { need(x, 2, 2, "__rlshift__"); return binop(B_LSH, unpay(A(1)), unpay(A(0))); }
+BI(num_rshift) { need(x, 2, 2, "__rshift__"); return binop(B_RSH, unpay(A(0)), unpay(A(1))); }
+BI(num_rrshift) { need(x, 2, 2, "__rrshift__"); return binop(B_RSH, unpay(A(1)), unpay(A(0))); }
+BI(num_neg) { return unop('-', unpay(A(0))); }
+BI(num_pos) { return unop('+', unpay(A(0))); }
+BI(num_invert) { return unop('~', unpay(A(0))); }
+BI(num_abs) { Value v = unpay(A(0)); return rich_cmp(C_LT, v, mkint(0)) ? unop('-', v) : unop('+', v); }
+BI(num_conj) { return unpay(A(0)); }
 BI(nat_format)
 {
     need(x, 2, 2, "__format__");
@@ -15505,8 +15653,52 @@ static Value module_getattr_opt(Value mv, Str *nm)
     } else {
         Value *p = amap_get(&m->ns, nm);
         if (p) return *p;
+        { Value ov; if (module_overlay(m, nm, &ov)) return ov; }
     }
     return UNSET_V;
+}
+
+/* native numpy falls back to the pure-Python overlay pylib/numpy/__init__.py (loaded once as the
+   hidden module numpy._overlay) for names it does not provide */
+static int overlay_state;   /* 0 not tried, 1 loading, 2 loaded, 3 unavailable */
+static Value overlay_mod;
+static int module_overlay(Module *md, Str *nm, Value *out)
+{
+    Value r, full;
+    if (md->gp || md->name->len != 5 || memcmp(md->name->s, "numpy", 5) != 0) return 0;
+    if (nm->len >= 2 && nm->s[0] == '_' && nm->s[1] == '_') return 0;
+    if (overlay_state == 1 || overlay_state == 3) return 0;
+    if (overlay_state == 0) {
+        long k;
+        Str *ovn = intern_c("numpy._overlay");
+        Str *leaf = intern_c("numpy");
+        overlay_state = 1;
+        overlay_mod = UNSET_V;
+        for (k = 0; k < AS_LIST(sys_path_v)->n && overlay_mod.t == T_UNSET; k++) {
+            Value cand = AS_LIST(sys_path_v)->a[k];
+            Value sub;
+            Buf pb;
+            char *src;
+            long len;
+            if (cand.t != T_STR) continue;
+            sub = path_join_v(cand, "numpy");
+            VPUSH(sub);
+            buf_init(&pb);
+            path_join(&pb, AS_STR(sub)->s, AS_STR(sub)->len, "__init__.py", 11);
+            src = read_whole(pb.s, &len);
+            buf_free(&pb);
+            vsp--;
+            if (src) { free(src); overlay_mod = try_dir(cand, leaf, ovn, NULL); }
+        }
+        if (overlay_mod.t == T_UNSET) { overlay_state = 3; return 0; }
+        overlay_state = 2;
+    }
+    full = overlay_mod;
+    r = module_getattr_opt(full, nm);
+    if (r.t == T_UNSET) return 0;
+    amap_set(&md->ns, nm, r);
+    *out = r;
+    return 1;
 }
 
 /* package that the code with global prefix `pfx` belongs to */
@@ -15796,12 +15988,20 @@ static Value exec_eval(Args *x, int is_eval)
     Node *blk;
     Buf b;
     long i, k;
-    int usedict = 0;
+    int usedict = 0, pushed = 0;
     need(x, 1, 3, is_eval ? "eval" : "exec");
     srcv = A(0);
     if (srcv.t != T_STR) throw_new(cls_TypeError, "%s() arg 1 must be a string", is_eval ? "eval" : "exec");
     if (x->n > 1) gd = A(1); else gd = kwget(x, "globals");
     if (x->n > 2) ld = A(2); else ld = kwget(x, "locals");
+    if (gd.t != T_DICT && ld.t != T_DICT && cur_frame && cur_frame->fn && cur_frame->loc) {
+        /* eval/exec inside a function: see its locals through a scratch namespace */
+        ld = locals_dict();
+        gd = globals_of(cur_gp());
+        VPUSH(gd);
+        VPUSH(ld);
+        pushed = 2;
+    }
     if (gd.t == T_DICT) {
         usedict = 1;
         gp = intern_c("<exec>.");
@@ -15867,6 +16067,7 @@ static Value exec_eval(Args *x, int is_eval)
         }
         vsp--;
     }
+    vsp -= pushed;
     return result;
 }
 BI(bi_exec) { exec_eval(x, 0); return NONE_V; }
@@ -17059,6 +17260,31 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_set, "update", st_update); def_bi(cls_set, "issubset", st_issubset);
     def_bi(cls_set, "issuperset", st_issuperset); def_bi(cls_set, "isdisjoint", st_isdisjoint);
     def_bi(cls_set, "copy", st_copy); def_bi(cls_set, "clear", st_clear);
+    {
+        Class *nk[2];
+        int k;
+        nk[0] = cls_int; nk[1] = cls_float;
+        for (k = 0; k < 2; k++) {
+            def_bi(nk[k], "__add__", num_add); def_bi(nk[k], "__radd__", num_radd);
+            def_bi(nk[k], "__sub__", num_sub); def_bi(nk[k], "__rsub__", num_rsub);
+            def_bi(nk[k], "__mul__", num_mul); def_bi(nk[k], "__rmul__", num_rmul);
+            def_bi(nk[k], "__truediv__", num_truediv); def_bi(nk[k], "__rtruediv__", num_rtruediv);
+            def_bi(nk[k], "__floordiv__", num_floordiv); def_bi(nk[k], "__rfloordiv__", num_rfloordiv);
+            def_bi(nk[k], "__mod__", num_mod); def_bi(nk[k], "__rmod__", num_rmod);
+            def_bi(nk[k], "__pow__", num_pow); def_bi(nk[k], "__rpow__", num_rpow);
+            def_bi(nk[k], "__neg__", num_neg); def_bi(nk[k], "__pos__", num_pos);
+            def_bi(nk[k], "__abs__", num_abs); def_bi(nk[k], "conjugate", num_conj);
+            def_bi(nk[k], "__eq__", nat_eq); def_bi(nk[k], "__ne__", nat_ne);
+            def_bi(nk[k], "__lt__", nat_lt); def_bi(nk[k], "__le__", nat_le);
+            def_bi(nk[k], "__gt__", nat_gt); def_bi(nk[k], "__ge__", nat_ge);
+        }
+        def_bi(cls_int, "__and__", num_and); def_bi(cls_int, "__rand__", num_rand);
+        def_bi(cls_int, "__or__", num_or); def_bi(cls_int, "__ror__", num_ror);
+        def_bi(cls_int, "__xor__", num_xor); def_bi(cls_int, "__rxor__", num_rxor);
+        def_bi(cls_int, "__lshift__", num_lshift); def_bi(cls_int, "__rlshift__", num_rlshift);
+        def_bi(cls_int, "__rshift__", num_rshift); def_bi(cls_int, "__rrshift__", num_rrshift);
+        def_bi(cls_int, "__invert__", num_invert);
+    }
     /* numbers */
     def_bi(cls_int, "bit_length", i_bit_length);
     def_bi(cls_float, "is_integer", f_is_integer);

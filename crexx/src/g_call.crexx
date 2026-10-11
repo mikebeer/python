@@ -393,6 +393,7 @@ getattr_obj: procedure = .int
       return v
     end
     if nid = M___MRO__ then return cls_mro(c)
+    if nid = M___DICT__ then return cls_dict(c)
     if nid = M___MODULE__ then return mkstr(modname_of(cl_mod[c]))
     if nid = M___DOC__ then return NONE_OOP
     if nid = M___CLASS__ then return cl_obj[C_TYPE]
@@ -460,7 +461,33 @@ getattr_obj: procedure = .int
     v = np_attr(o, nid)
     if v \= 0 then return v
   end
+  if k = K_STR | k = K_LIST | k = K_DICT | k = K_SET | k = K_TUPLE | k = K_INT | k = K_BIG | k = K_BOOL | k = K_FLOAT then do
+    if known_meth(k, nid_name[nid]) = 0 then return no_attr(o, nid)
+  end
   return mkbmethb(o, nid)
+
+/* is nm a method of the built-in type of kind k? */
+known_meth: procedure = .int
+  arg k = .int, nm = .string
+  l = .string
+  if left(nm, 2) == "__" then do
+    if k = K_INT | k = K_BIG | k = K_BOOL | k = K_FLOAT then do
+      if nm == "__len__" | nm == "__iter__" | nm == "__getitem__" | nm == "__contains__" | nm == "__next__" | nm == "__call__" then return 0
+    end
+    else if nm == "__next__" | nm == "__call__" then return 0
+    return 1
+  end
+  select
+    when k = K_STR then l = " capitalize casefold center count encode endswith expandtabs find format format_map index isalnum isalpha isascii isdecimal isdigit isidentifier islower isnumeric isprintable isspace istitle isupper join ljust lower lstrip maketrans partition removeprefix removesuffix replace rfind rindex rjust rpartition rsplit rstrip split splitlines startswith strip swapcase title translate upper zfill "
+    when k = K_LIST then l = " append clear copy count extend index insert pop remove reverse sort "
+    when k = K_TUPLE then l = " count index "
+    when k = K_DICT then l = " clear copy fromkeys get items keys pop popitem setdefault update values "
+    when k = K_SET then l = " add clear copy difference difference_update discard intersection intersection_update isdisjoint issubset issuperset pop remove symmetric_difference symmetric_difference_update union update "
+    when k = K_FLOAT then l = " is_integer hex fromhex as_integer_ratio conjugate "
+    otherwise l = " bit_length bit_count conjugate to_bytes from_bytes as_integer_ratio is_integer "
+  end
+  if pos(" " || nm || " ", l) > 0 then return 1
+  return 0
 
 cls_mro: procedure = .int
   arg c = .int

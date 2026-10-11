@@ -419,11 +419,11 @@ p_factor: procedure = .int
   if at("-") = 1 then do
     tpp = tpp + 1
     x = p_factor()
-    if n_t[x] = N_CONST & n_a[x] // 2 \= 0 & n_a[x] > -1000000000000000 & n_a[x] < 1000000000000000 then do
+    if n_t[x] = N_CONST & n_a[x] // 2 \= 0 then do
       n_a[x] = 1 - (n_a[x] - 1)
       return x
     end
-    if n_t[x] = N_CONST then do
+    if n_t[x] = N_CONST & n_a[x] // 2 = 0 then do
       if ob_k[n_a[x] % 2] = K_FLOAT then do
         f = ob_f[n_a[x] % 2]
         return mkc(mkfloat(fneg(f)))

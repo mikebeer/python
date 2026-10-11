@@ -883,10 +883,22 @@ static Value eval(Frame *f, Node *n)
                 case C_EQ: r = x == y; break;
                 default: r = x != y; break;
                 }
-            } else if ((left.t == T_ND || right.t == T_ND) && n->name->s[i] <= C_NE) {
+            } else if ((left.t == T_ND || right.t == T_ND) && left.t != T_INST && right.t != T_INST && n->name->s[i] <= C_NE) {
                 Value cv = nd_compare(n->name->s[i], left, right);
                 vsp = base;
                 return cv;
+            } else if (nops == 1 && n->name->s[i] <= C_NE && (left.t == T_INST || right.t == T_INST)) {
+                Value rv;
+                if (inst_cmp_value(n->name->s[i], left, right, &rv)) {
+                    vsp = base;
+                    return rv;
+                }
+                if (left.t == T_ND || right.t == T_ND) {
+                    Value cv = nd_compare(n->name->s[i], left, right);
+                    vsp = base;
+                    return cv;
+                }
+                r = cmp_one(n->name->s[i], left, right);
             } else {
                 r = cmp_one(n->name->s[i], left, right);
             }
@@ -1246,6 +1258,15 @@ static void finish_class(Class *c)
     if (amap_get(&c->ns, S_setattr)) c->flags |= CF_SETATTR;
     class_epoch++;
 }
+/* call __init_subclass__ of the first base (implicit classmethod) */
+static void run_init_subclass(Class *c, Class *base, Value cv)
+{
+    Value *m = class_find(base, intern_c("__init_subclass__"));
+    if (!m) return;
+    if (m->t == T_CMETH) call1(((Prop *)m->u.o)->get, cv);
+    else if (m->t == T_FUNC) call1(*m, cv);
+    (void)c;
+}
 static void exec_class(Frame *f, Node *n)
 {
     FuncDef *fd = n->fd;
@@ -1288,6 +1309,7 @@ static void exec_class(Frame *f, Node *n)
     cur_frame = cf.up;
     free(cells);
     finish_class(c);
+    run_init_subclass(c, c->base, cv);
     /* decorators (rare) */
     for (i = n->n - 1; i >= nbases; i--) {
         Value d = eval(f, n->list[i]);
@@ -1449,16 +1471,38 @@ static void exec_del(Frame *f, Node *t)
 static int exec_yieldfrom(Frame *f, Node *n)
 {
     Value it, x;
+    Gen *g = f->gen;
+    int more;
     if (f->resuming) {
         it = STATE(f, n, 0);
         f->resuming = 0;
+        if (g->thrown.t == T_INST) {
+            Value e = g->thrown;
+            g->thrown = NONE_V;
+            if (it.t != T_GEN) throw_val(e);
+            ((Gen *)it.u.o)->thrown = e;
+        }
+        if (it.t == T_GEN) {
+            ((Gen *)it.u.o)->sent = g->sent;
+            g->sent = NONE_V;
+            more = gen_resume((Gen *)it.u.o, &x);
+        } else {
+            g->sent = NONE_V;
+            more = iter_next(it, &x);
+        }
     } else {
         it = get_iter(eval(f, n->a));
         STATE(f, n, 0) = it;
+        more = iter_next(it, &x);
     }
-    if (iter_next(it, &x)) {
-        f->gen->yielded = x;
+    if (more) {
+        g->yielded = x;
         return ST_YIELD;
+    }
+    if (n->b) {
+        Value rv = NONE_V;
+        if (it.t == T_GEN) rv = ((Gen *)it.u.o)->ret;
+        assign_target(f, n->b, rv);
     }
     return 0;
 }

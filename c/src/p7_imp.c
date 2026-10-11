@@ -278,8 +278,52 @@ static Value module_getattr_opt(Value mv, Str *nm)
     } else {
         Value *p = amap_get(&m->ns, nm);
         if (p) return *p;
+        { Value ov; if (module_overlay(m, nm, &ov)) return ov; }
     }
     return UNSET_V;
+}
+
+/* native numpy falls back to the pure-Python overlay pylib/numpy/__init__.py (loaded once as the
+   hidden module numpy._overlay) for names it does not provide */
+static int overlay_state;   /* 0 not tried, 1 loading, 2 loaded, 3 unavailable */
+static Value overlay_mod;
+static int module_overlay(Module *md, Str *nm, Value *out)
+{
+    Value r, full;
+    if (md->gp || md->name->len != 5 || memcmp(md->name->s, "numpy", 5) != 0) return 0;
+    if (nm->len >= 2 && nm->s[0] == '_' && nm->s[1] == '_') return 0;
+    if (overlay_state == 1 || overlay_state == 3) return 0;
+    if (overlay_state == 0) {
+        long k;
+        Str *ovn = intern_c("numpy._overlay");
+        Str *leaf = intern_c("numpy");
+        overlay_state = 1;
+        overlay_mod = UNSET_V;
+        for (k = 0; k < AS_LIST(sys_path_v)->n && overlay_mod.t == T_UNSET; k++) {
+            Value cand = AS_LIST(sys_path_v)->a[k];
+            Value sub;
+            Buf pb;
+            char *src;
+            long len;
+            if (cand.t != T_STR) continue;
+            sub = path_join_v(cand, "numpy");
+            VPUSH(sub);
+            buf_init(&pb);
+            path_join(&pb, AS_STR(sub)->s, AS_STR(sub)->len, "__init__.py", 11);
+            src = read_whole(pb.s, &len);
+            buf_free(&pb);
+            vsp--;
+            if (src) { free(src); overlay_mod = try_dir(cand, leaf, ovn, NULL); }
+        }
+        if (overlay_mod.t == T_UNSET) { overlay_state = 3; return 0; }
+        overlay_state = 2;
+    }
+    full = overlay_mod;
+    r = module_getattr_opt(full, nm);
+    if (r.t == T_UNSET) return 0;
+    amap_set(&md->ns, nm, r);
+    *out = r;
+    return 1;
 }
 
 /* package that the code with global prefix `pfx` belongs to */
@@ -569,12 +613,20 @@ static Value exec_eval(Args *x, int is_eval)
     Node *blk;
     Buf b;
     long i, k;
-    int usedict = 0;
+    int usedict = 0, pushed = 0;
     need(x, 1, 3, is_eval ? "eval" : "exec");
     srcv = A(0);
     if (srcv.t != T_STR) throw_new(cls_TypeError, "%s() arg 1 must be a string", is_eval ? "eval" : "exec");
     if (x->n > 1) gd = A(1); else gd = kwget(x, "globals");
     if (x->n > 2) ld = A(2); else ld = kwget(x, "locals");
+    if (gd.t != T_DICT && ld.t != T_DICT && cur_frame && cur_frame->fn && cur_frame->loc) {
+        /* eval/exec inside a function: see its locals through a scratch namespace */
+        ld = locals_dict();
+        gd = globals_of(cur_gp());
+        VPUSH(gd);
+        VPUSH(ld);
+        pushed = 2;
+    }
     if (gd.t == T_DICT) {
         usedict = 1;
         gp = intern_c("<exec>.");
@@ -640,6 +692,7 @@ static Value exec_eval(Args *x, int is_eval)
         }
         vsp--;
     }
+    vsp -= pushed;
     return result;
 }
 BI(bi_exec) { exec_eval(x, 0); return NONE_V; }
