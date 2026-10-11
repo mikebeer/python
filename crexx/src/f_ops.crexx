@@ -247,6 +247,7 @@ arith: procedure = .int
   kx = kind_of(x)
   ky = kind_of(y)
   if numkind(x) > 0 & numkind(y) > 0 then return numarith(op, x, y)
+  if kx = K_ARRAY | ky = K_ARRAY then return np_binop(op, x, y)
   if kx = K_INST | ky = K_INST then do
     if kx = K_INST then do
       m = cls_find(ob_c[x % 2], opd[op])
@@ -412,6 +413,7 @@ unary: procedure = .int
   a = .int
   r = .int
   m = .int
+  if kind_of(x) = K_ARRAY then return np_unary(op, x)
   k = numkind(x)
   if op = 1 then do
     if k = 1 then return mkint(0 - ival(x))
@@ -724,6 +726,13 @@ py_contains: procedure = .int
       if dict_find(ob_x[c % 2], hashkey(x)) > 0 then return 1
       return 0
     end
+    when k = K_ARRAY then do
+      n = ob_n[c % 2]
+      do i = 0 to n - 1
+        if py_eq(np_scalar(c, i), x) = 1 then return 1
+      end
+      return 0
+    end
     when k = K_RANGE then do
       if numkind(x) \= 1 then return 0
       v = ival(x)
@@ -895,6 +904,7 @@ repr_of: procedure = .string
     when k = K_GEN then return "<generator object " || fd_name[gn_fd[ob_x[x % 2]]] || " at 0x" || right(d2x(x * 8), 12, "0") || ">"
     when k = K_ITER then return "<iterator object at 0x" || right(d2x(x * 8), 12, "0") || ">"
     when k = K_NOTIMPL then return "NotImplemented"
+    when k = K_ARRAY then return np_repr(x)
     when k = K_ELLIPSIS then return "Ellipsis"
     when k = K_INST then do
       m = cls_find(ob_c[x % 2], M___REPR__)
@@ -949,6 +959,7 @@ str_of: procedure = .string
   if x // 2 \= 0 then return ((x - 1) % 2) as .string
   k = ob_k[x % 2]
   if k = K_STR then return ob_s[x % 2]
+  if k = K_ARRAY then return np_str(x)
   if k = K_INST then do
     m = cls_find(ob_c[x % 2], M___STR__)
     if m > 0 then do

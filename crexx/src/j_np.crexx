@@ -1,0 +1,1545 @@
+/* ---------------------------------------------------------------------
+   numpy subset, part 1: ndarray objects (kind K_ARRAY), construction, broadcasting, operators.
+   Object fields:  ob_c dtype (1 int64, 2 float64, 3 bool)   ob_n size   ob_x ndim
+                   ob_y start of the shape (ndim raw integers in sl)
+                   ob_p start of the data: raw integers in sl (int, bool) or floats in npf
+   --------------------------------------------------------------------- */
+np_dtname: procedure = .string
+  arg dt = .int
+  if dt = 2 then return "float64"
+  if dt = 3 then return "bool"
+  return "int64"
+
+np_new: procedure = .int
+  arg dt = .int, nd = .int, sz = .int
+  o = .int
+  ix = .int
+  o = newobj(K_ARRAY)
+  ix = o % 2
+  ob_c[ix] = dt
+  ob_x[ix] = nd
+  ob_n[ix] = sz
+  ob_y[ix] = 0
+  if nd > 0 then ob_y[ix] = alloc_slots(nd)
+  if dt = 2 then do
+    ob_p[ix] = npn + 1
+    npn = npn + sz
+    if sz > 0 then npf[npn] = 0.0
+  end
+  else ob_p[ix] = alloc_slots(sz)
+  return o
+
+/* copy the scratch shape nprs[1..nprn] into array r */
+np_shape_from_scratch: procedure = .void
+  arg r = .int
+  d = .int
+  do d = 1 to nprn
+    sl[ob_y[r % 2] + d - 1] = nprs[d]
+  end
+  return
+
+np_scalar: procedure = .int
+  arg a = .int, i = .int
+  ix = .int
+  ix = a % 2
+  if ob_c[ix] = 2 then return mkfloat(npf[ob_p[ix] + i])
+  if ob_c[ix] = 3 then return mkbool(sl[ob_p[ix] + i])
+  return mkint(sl[ob_p[ix] + i])
+
+np_f2i: procedure = .int
+  arg f = .float
+  if f \= f then return 0
+  if f > 900000000000000000.0 then return 900000000000000000
+  if f < -900000000000000000.0 then return -900000000000000000
+  return rxfloat..trunc(f) as .int
+
+np_getf: procedure = .float
+  arg a = .int, j = .int
+  ix = .int
+  v = .int
+  ix = a % 2
+  if ob_c[ix] = 2 then return npf[ob_p[ix] + j]
+  v = sl[ob_p[ix] + j]
+  return v as .float
+
+np_geti: procedure = .int
+  arg a = .int, j = .int
+  ix = .int
+  ix = a % 2
+  if ob_c[ix] = 2 then return np_f2i(npf[ob_p[ix] + j])
+  return sl[ob_p[ix] + j]
+
+/* r[j] = s[i] converting to the dtype of r */
+np_copyel: procedure = .void
+  arg r = .int, j = .int, s = .int, i = .int
+  dr = .int
+  ds = .int
+  v = .int
+  f = .float
+  dr = ob_c[r % 2]
+  ds = ob_c[s % 2]
+  if dr = 2 then do
+    if ds = 2 then npf[ob_p[r % 2] + j] = npf[ob_p[s % 2] + i]
+    else do
+      v = sl[ob_p[s % 2] + i]
+      npf[ob_p[r % 2] + j] = v as .float
+    end
+    return
+  end
+  if dr = 1 then do
+    if ds = 2 then sl[ob_p[r % 2] + j] = np_f2i(npf[ob_p[s % 2] + i])
+    else sl[ob_p[r % 2] + j] = sl[ob_p[s % 2] + i]
+    return
+  end
+  if ds = 2 then do
+    f = npf[ob_p[s % 2] + i]
+    if f \= 0.0 then sl[ob_p[r % 2] + j] = 1
+    else sl[ob_p[r % 2] + j] = 0
+  end
+  else do
+    v = sl[ob_p[s % 2] + i]
+    if v \= 0 then sl[ob_p[r % 2] + j] = 1
+    else sl[ob_p[r % 2] + j] = 0
+  end
+  return
+
+np_shape_tuple: procedure = .int
+  arg a = .int
+  t = .int
+  d = .int
+  ix = .int
+  ix = a % 2
+  t = mktuple(ob_x[ix])
+  do d = 0 to ob_x[ix] - 1
+    sl[ob_p[t % 2] + d] = mkint(sl[ob_y[ix] + d])
+  end
+  return t
+
+np_shape_str: procedure = .string
+  arg a = .int
+  s = .string
+  d = .int
+  ix = .int
+  ix = a % 2
+  s = "("
+  do d = 0 to ob_x[ix] - 1
+    if d > 0 then s = s || ","
+    s = s || sl[ob_y[ix] + d]
+  end
+  if ob_x[ix] = 1 then s = s || ","
+  return s || ")"
+
+/* a 0-d array holding the Python number x */
+np_scalar_arr: procedure = .int
+  arg x = .int
+  o = .int
+  if numkind(x) >= 2 then do
+    o = np_new(2, 0, 1)
+    npf[ob_p[o % 2]] = tofloat(x)
+    return o
+  end
+  if kind_of(x) = K_BOOL then o = np_new(3, 0, 1)
+  else o = np_new(1, 0, 1)
+  sl[ob_p[o % 2]] = ival(x)
+  return o
+
+np_seqlen: procedure = .int
+  arg x = .int
+  k = .int
+  k = kind_of(x)
+  if k = K_LIST | k = K_TUPLE then return ob_n[x % 2]
+  if k = K_ARRAY then do
+    if ob_x[x % 2] >= 1 then return sl[ob_y[x % 2]]
+  end
+  return -1
+
+/* element i along the first axis: a scalar, or a new array */
+np_item0: procedure = .int
+  arg a = .int, i = .int
+  ix = .int
+  nd = .int
+  sub = .int
+  r = .int
+  ir = .int
+  d = .int
+  j = .int
+  ix = a % 2
+  nd = ob_x[ix]
+  if nd = 1 then return np_scalar(a, i)
+  return np_mkview(a, i, 1, 1)
+
+/* a view sharing the data of a: rows start .. start+cnt-1 of the first axis (or just row start when drop = 1) */
+np_mkview: procedure = .int
+  arg a = .int, start = .int, cnt = .int, drop = .int
+  ia = .int
+  ir = .int
+  r = .int
+  nd = .int
+  d = .int
+  sub = .int
+  ia = a % 2
+  nd = ob_x[ia]
+  sub = 1
+  do d = 1 to nd - 1
+    sub = sub * sl[ob_y[ia] + d]
+  end
+  r = newobj(K_ARRAY)
+  ir = r % 2
+  ob_c[ir] = ob_c[ia]
+  ob_p[ir] = ob_p[ia] + start * sub
+  if drop = 1 then do
+    ob_x[ir] = nd - 1
+    ob_n[ir] = sub
+    ob_y[ir] = 0
+    if nd > 1 then ob_y[ir] = alloc_slots(nd - 1)
+    do d = 1 to nd - 1
+      sl[ob_y[ir] + d - 1] = sl[ob_y[ia] + d]
+    end
+  end
+  else do
+    ob_x[ir] = nd
+    ob_n[ir] = cnt * sub
+    ob_y[ir] = alloc_slots(nd)
+    sl[ob_y[ir]] = cnt
+    do d = 1 to nd - 1
+      sl[ob_y[ir] + d] = sl[ob_y[ia] + d]
+    end
+  end
+  return r
+
+/* in-place update for augmented assignment: cur takes the values of nw */
+np_inplace: procedure = .int
+  arg cur = .int, nw = .int
+  i = .int
+  if ob_n[nw % 2] \= ob_n[cur % 2] | ob_x[nw % 2] \= ob_x[cur % 2] then return nw
+  do i = 0 to ob_n[cur % 2] - 1
+    call np_copyel cur, i, nw, i
+  end
+  return cur
+
+np_seqitem: procedure = .int
+  arg x = .int, i = .int
+  if kind_of(x) = K_ARRAY then return np_item0(x, i)
+  return sl[ob_p[x % 2] + i]
+
+np_inhom: procedure = .int
+  return raise_exc(C_VALUEERROR, "setting an array element with a sequence. The requested array has an inhomogeneous shape")
+
+/* flatten the nested sequence x (depth dep) into nti / ntf; 1 on success */
+np_walk: procedure = .int
+  arg x = .int, dep = .int
+  n = .int
+  i = .int
+  k = .int
+  v = .int
+  w = .int
+  f = .float
+  if dep < ntnd then do
+    n = np_seqlen(x)
+    if n < 0 | n \= nts[dep + 1] then return np_inhom()
+    do i = 0 to n - 1
+      v = np_seqitem(x, i)
+      if np_walk(v, dep + 1) = 0 then return 0
+    end
+    return 1
+  end
+  if np_seqlen(x) >= 0 then return np_inhom()
+  w = x
+  if kind_of(w) = K_ARRAY then w = np_scalar(w, 0)
+  k = kind_of(w)
+  if numkind(w) = 1 then do
+    ntn = ntn + 1
+    v = ival(w)
+    nti[ntn] = v
+    ntf[ntn] = v as .float
+    if k = K_BOOL then ntfb = 1
+    else ntfi = 1
+    return 1
+  end
+  if numkind(w) >= 2 then do
+    ntn = ntn + 1
+    f = tofloat(w)
+    nti[ntn] = 0
+    ntf[ntn] = f
+    ntff = 1
+    return 1
+  end
+  call raise_exc C_TYPEERROR, "unsupported array element type '" || type_name(w) || "'"
+  return 0
+
+/* a new array from a (nested) sequence or a scalar */
+np_from_obj: procedure = .int
+  arg x = .int
+  y = .int
+  n = .int
+  d = .int
+  dt = .int
+  r = .int
+  ir = .int
+  j = .int
+  ntnd = 0
+  y = x
+  do forever
+    n = np_seqlen(y)
+    if n < 0 then leave
+    ntnd = ntnd + 1
+    nts[ntnd] = n
+    if n = 0 then leave
+    y = np_seqitem(y, 0)
+  end
+  ntn = 0
+  ntfb = 0
+  ntfi = 0
+  ntff = 0
+  if np_walk(x, 0) = 0 then return 0
+  if ntff = 1 then dt = 2
+  else if ntfi = 1 then dt = 1
+  else if ntfb = 1 then dt = 3
+  else dt = 2
+  r = np_new(dt, ntnd, ntn)
+  ir = r % 2
+  do d = 1 to ntnd
+    sl[ob_y[ir] + d - 1] = nts[d]
+  end
+  if dt = 2 then do
+    do j = 1 to ntn
+      npf[ob_p[ir] + j - 1] = ntf[j]
+    end
+  end
+  else do
+    do j = 1 to ntn
+      sl[ob_p[ir] + j - 1] = nti[j]
+    end
+  end
+  return r
+
+np_coerce: procedure = .int
+  arg x = .int
+  k = .int
+  k = kind_of(x)
+  if k = K_ARRAY then return x
+  if numkind(x) > 0 then return np_scalar_arr(x)
+  if k = K_LIST | k = K_TUPLE then return np_from_obj(x)
+  return raise_exc(C_TYPEERROR, "unsupported operand type: '" || type_name(x) || "'")
+
+/* copy of a converted to dtype dt */
+np_cast: procedure = .int
+  arg a = .int, dt = .int
+  r = .int
+  ix = .int
+  ir = .int
+  n = .int
+  j = .int
+  d = .int
+  ix = a % 2
+  n = ob_n[ix]
+  r = np_new(dt, ob_x[ix], n)
+  ir = r % 2
+  do d = 0 to ob_x[ix] - 1
+    sl[ob_y[ir] + d] = sl[ob_y[ix] + d]
+  end
+  if ob_c[ix] = dt then do
+    if dt = 2 then do
+      do j = 0 to n - 1
+        npf[ob_p[ir] + j] = npf[ob_p[ix] + j]
+      end
+    end
+    else do
+      do j = 0 to n - 1
+        sl[ob_p[ir] + j] = sl[ob_p[ix] + j]
+      end
+    end
+  end
+  else do
+    do j = 0 to n - 1
+      call np_copyel r, j, a, j
+    end
+  end
+  return r
+
+/* a copy of a with a new shape taken from nprs / nprn (sizes must agree) */
+np_with_shape: procedure = .int
+  arg a = .int
+  r = .int
+  r = np_cast(a, ob_c[a % 2])
+  ob_x[r % 2] = nprn
+  ob_y[r % 2] = alloc_slots(nprn)
+  call np_shape_from_scratch r
+  return r
+
+np_flat: procedure = .int
+  arg a = .int
+  nprn = 1
+  nprs[1] = ob_n[a % 2]
+  return np_with_shape(a)
+
+/* ---- broadcasting ---- */
+np_bs_init: procedure = .void
+  arg a = .int
+  d = .int
+  nprn = ob_x[a % 2]
+  do d = 1 to nprn
+    nprs[d] = sl[ob_y[a % 2] + d - 1]
+  end
+  return
+
+np_bs_merge: procedure = .int
+  arg a = .int, b = .int
+  nda = .int
+  nd2 = .int
+  j = .int
+  da = .int
+  db = .int
+  dr = .int
+  k1 = .int
+  k2 = .int
+  ns = .int[]
+  nda = ob_x[b % 2]
+  nd2 = nprn
+  if nda > nd2 then nd2 = nda
+  do j = 1 to nd2
+    k1 = nprn - nd2 + j
+    if k1 >= 1 then da = nprs[k1]
+    else da = 1
+    k2 = nda - nd2 + j
+    if k2 >= 1 then db = sl[ob_y[b % 2] + k2 - 1]
+    else db = 1
+    if da = db then dr = da
+    else if da = 1 then dr = db
+    else if db = 1 then dr = da
+    else return raise_exc(C_VALUEERROR, "operands could not be broadcast together with shapes " || np_shape_str(a) || " " || np_shape_str(b) || " ")
+    ns[j] = dr
+  end
+  nprn = nd2
+  do j = 1 to nd2
+    nprs[j] = ns[j]
+  end
+  return 1
+
+/* 0: same shape as the scratch shape, 1: single element, 2: needs an index table */
+np_mode: procedure = .int
+  arg a = .int
+  ix = .int
+  d = .int
+  ix = a % 2
+  if ob_n[ix] = 1 then return 1
+  if ob_x[ix] \= nprn then return 2
+  do d = 1 to nprn
+    if sl[ob_y[ix] + d - 1] \= nprs[d] then return 2
+  end
+  return 0
+
+/* index table (1-based, flat source offsets) of a broadcast to the scratch shape; which = 1, 2 or 3 */
+np_btab: procedure = .int
+  arg a = .int, which = .int
+  ix = .int
+  nda = .int
+  j = .int
+  jj = .int
+  dimn = .int
+  run = .int
+  tot = .int
+  i = .int
+  off = .int
+  st = .int[]
+  cnt = .int[]
+  ix = a % 2
+  nda = ob_x[ix]
+  tot = 1
+  do j = 1 to nprn
+    tot = tot * nprs[j]
+    cnt[j] = 0
+  end
+  run = 1
+  do j = nprn to 1 by -1
+    jj = j - (nprn - nda)
+    if jj < 1 then st[j] = 0
+    else do
+      dimn = sl[ob_y[ix] + jj - 1]
+      if dimn = 1 then st[j] = 0
+      else st[j] = run
+      run = run * dimn
+    end
+  end
+  off = 0
+  do i = 1 to tot
+    if which = 1 then npta[i] = off
+    else if which = 2 then nptb[i] = off
+    else nptc[i] = off
+    j = nprn
+    do while j >= 1
+      cnt[j] = cnt[j] + 1
+      off = off + st[j]
+      if cnt[j] < nprs[j] then leave
+      off = off - st[j] * nprs[j]
+      cnt[j] = 0
+      j = j - 1
+    end
+  end
+  return tot
+
+np_divz: procedure = .float
+  arg x = .float
+  if x \= x then return x
+  if x = 0.0 then return f_nan()
+  if x > 0.0 then return f_inf()
+  return 0.0 - f_inf()
+
+np_powf: procedure = .float
+  arg x = .float, y = .float
+  if y = 0.0 then return 1.0
+  if x = 0.0 & y < 0.0 then return f_inf()
+  return rxfloat..pow(x, y)
+
+np_powi: procedure = .int
+  arg x = .int, y = .int
+  r = .int
+  b = .int
+  e = .int
+  r = 1
+  b = x
+  e = y
+  do while e > 0
+    if e // 2 = 1 then r = r * b
+    e = e % 2
+    if e > 0 then b = b * b
+  end
+  return r
+
+/* binary operation with broadcasting.  op: O_xxx, O_MAXIMUM, O_MINIMUM, or O_CEQ .. O_CGE */
+np_binop: procedure = .int
+  arg op = .int, x = .int, y = .int
+  a = .int
+  b = .int
+  ia = .int
+  ib = .int
+  ir = .int
+  r = .int
+  da = .int
+  db = .int
+  rd = .int
+  total = .int
+  ma = .int
+  mb = .int
+  i = .int
+  ja = .int
+  jb = .int
+  pa = .int
+  pb = .int
+  pr = .int
+  xa = .float
+  xb = .float
+  z = .float
+  ya = .int
+  yb = .int
+  zi = .int
+  q = .int
+  rm = .int
+  cf = .int
+  a = np_coerce(x)
+  if a = 0 then return 0
+  b = np_coerce(y)
+  if b = 0 then return 0
+  if op = O_MATMUL then return np_dot(a, b)
+  ia = a % 2
+  ib = b % 2
+  da = ob_c[ia]
+  db = ob_c[ib]
+  rd = 1
+  if da = 2 | db = 2 then rd = 2
+  if op = O_DIV then rd = 2
+  if op >= O_CEQ then rd = 3
+  if op = O_BITAND | op = O_BITOR | op = O_BITXOR then do
+    if rd = 2 then return raise_exc(C_TYPEERROR, "ufunc 'bitwise_op' not supported for the input types, and the inputs could not be safely coerced to any supported types according to the casting rule ''safe''")
+    if da = 3 & db = 3 then rd = 3
+  end
+  if (op = O_LSHIFT | op = O_RSHIFT) & rd = 2 then return raise_exc(C_TYPEERROR, "ufunc 'shift' not supported for the input types")
+  call np_bs_init a
+  if np_bs_merge(a, b) = 0 then return 0
+  total = 1
+  do i = 1 to nprn
+    total = total * nprs[i]
+  end
+  r = np_new(rd, nprn, total)
+  ir = r % 2
+  call np_shape_from_scratch r
+  ma = np_mode(a)
+  mb = np_mode(b)
+  if ma = 2 then call np_btab a, 1
+  if mb = 2 then call np_btab b, 2
+  pa = ob_p[ia]
+  pb = ob_p[ib]
+  pr = ob_p[ir]
+  if op >= O_CEQ then do
+    cf = 0
+    if da = 2 | db = 2 then cf = 1
+    do i = 0 to total - 1
+      if ma = 0 then ja = i
+      else if ma = 1 then ja = 0
+      else ja = npta[i + 1]
+      if mb = 0 then jb = i
+      else if mb = 1 then jb = 0
+      else jb = nptb[i + 1]
+      zi = 0
+      if cf = 1 then do
+        if da = 2 then xa = npf[pa + ja]
+        else do
+          ya = sl[pa + ja]
+          xa = ya as .float
+        end
+        if db = 2 then xb = npf[pb + jb]
+        else do
+          yb = sl[pb + jb]
+          xb = yb as .float
+        end
+        select
+          when op = O_CEQ then do
+            if xa = xb then zi = 1
+          end
+          when op = O_CNE then do
+            if xa \= xb then zi = 1
+          end
+          when op = O_CLT then do
+            if xa < xb then zi = 1
+          end
+          when op = O_CLE then do
+            if xa <= xb then zi = 1
+          end
+          when op = O_CGT then do
+            if xa > xb then zi = 1
+          end
+          when op = O_CGE then do
+            if xa >= xb then zi = 1
+          end
+          otherwise nop
+        end
+      end
+      else do
+        ya = sl[pa + ja]
+        yb = sl[pb + jb]
+        select
+          when op = O_CEQ then do
+            if ya = yb then zi = 1
+          end
+          when op = O_CNE then do
+            if ya \= yb then zi = 1
+          end
+          when op = O_CLT then do
+            if ya < yb then zi = 1
+          end
+          when op = O_CLE then do
+            if ya <= yb then zi = 1
+          end
+          when op = O_CGT then do
+            if ya > yb then zi = 1
+          end
+          when op = O_CGE then do
+            if ya >= yb then zi = 1
+          end
+          otherwise nop
+        end
+      end
+      sl[pr + i] = zi
+    end
+    return r
+  end
+  if rd = 2 then do
+    do i = 0 to total - 1
+      if ma = 0 then ja = i
+      else if ma = 1 then ja = 0
+      else ja = npta[i + 1]
+      if mb = 0 then jb = i
+      else if mb = 1 then jb = 0
+      else jb = nptb[i + 1]
+      if da = 2 then xa = npf[pa + ja]
+      else do
+        ya = sl[pa + ja]
+        xa = ya as .float
+      end
+      if db = 2 then xb = npf[pb + jb]
+      else do
+        yb = sl[pb + jb]
+        xb = yb as .float
+      end
+      z = 0.0
+      select
+        when op = O_ADD then z = xa + xb
+        when op = O_SUB then z = xa - xb
+        when op = O_MUL then z = xa * xb
+        when op = O_DIV then do
+          if xb = 0.0 then z = np_divz(xa)
+          else z = xa / xb
+        end
+        when op = O_FLOORDIV then do
+          if xb = 0.0 then z = np_divz(xa)
+          else z = rxfloat..floor(xa / xb)
+        end
+        when op = O_MOD then do
+          if xb = 0.0 then z = f_nan()
+          else do
+            z = rxfloat..fmod(xa, xb)
+            if z \= 0.0 then do
+              if (z < 0.0) \= (xb < 0.0) then z = z + xb
+            end
+          end
+        end
+        when op = O_POW then z = np_powf(xa, xb)
+        when op = O_MAXIMUM then do
+          if xa \= xa then z = xa
+          else if xb \= xb then z = xb
+          else if xa >= xb then z = xa
+          else z = xb
+        end
+        when op = O_MINIMUM then do
+          if xa \= xa then z = xa
+          else if xb \= xb then z = xb
+          else if xa <= xb then z = xa
+          else z = xb
+        end
+        otherwise nop
+      end
+      npf[pr + i] = z
+    end
+    return r
+  end
+  do i = 0 to total - 1
+    if ma = 0 then ja = i
+    else if ma = 1 then ja = 0
+    else ja = npta[i + 1]
+    if mb = 0 then jb = i
+    else if mb = 1 then jb = 0
+    else jb = nptb[i + 1]
+    ya = sl[pa + ja]
+    yb = sl[pb + jb]
+    zi = 0
+    select
+      when op = O_ADD then zi = ya + yb
+      when op = O_SUB then zi = ya - yb
+      when op = O_MUL then zi = ya * yb
+      when op = O_FLOORDIV | op = O_MOD then do
+        if yb = 0 then zi = 0
+        else do
+          q = ya % yb
+          rm = ya // yb
+          if rm \= 0 & ((rm < 0) \= (yb < 0)) then do
+            q = q - 1
+            rm = rm + yb
+          end
+          if op = O_FLOORDIV then zi = q
+          else zi = rm
+        end
+      end
+      when op = O_POW then do
+        if yb < 0 then return raise_exc(C_VALUEERROR, "Integers to negative integer powers are not allowed.")
+        zi = np_powi(ya, yb)
+      end
+      when op = O_BITAND then do
+        assembler iand zi, ya, yb
+      end
+      when op = O_BITOR then do
+        assembler ior zi, ya, yb
+      end
+      when op = O_BITXOR then do
+        assembler ixor zi, ya, yb
+      end
+      when op = O_LSHIFT then do
+        if yb < 0 | yb > 62 then zi = 0
+        else zi = ya * np_powi(2, yb)
+      end
+      when op = O_RSHIFT then do
+        if yb < 0 then zi = 0
+        else if yb > 62 then do
+          if ya < 0 then zi = -1
+          else zi = 0
+        end
+        else do
+          assembler ishr zi, ya, yb
+        end
+      end
+      when op = O_MAXIMUM then do
+        if ya >= yb then zi = ya
+        else zi = yb
+      end
+      when op = O_MINIMUM then do
+        if ya <= yb then zi = ya
+        else zi = yb
+      end
+      otherwise nop
+    end
+    sl[pr + i] = zi
+  end
+  return r
+
+np_unary: procedure = .int
+  arg op = .int, x = .int
+  a = .int
+  r = .int
+  ia = .int
+  ir = .int
+  n = .int
+  i = .int
+  dt = .int
+  v = .int
+  ia = x % 2
+  dt = ob_c[ia]
+  n = ob_n[ia]
+  if op = 3 & dt = 2 then return raise_exc(C_TYPEERROR, "ufunc 'invert' not supported for the input types, and the inputs could not be safely coerced to any supported types according to the casting rule ''safe''")
+  if op = 1 & dt = 3 then return raise_exc(C_TYPEERROR, "The numpy boolean negative, the `-` operator, is not supported, use the `~` operator or the logical_not function instead.")
+  r = np_cast(x, dt)
+  if op = 2 then return r
+  ir = r % 2
+  if dt = 2 then do
+    do i = 0 to n - 1
+      npf[ob_p[ir] + i] = npf[ob_p[ir] + i] * (0.0 - 1.0)
+    end
+    return r
+  end
+  do i = 0 to n - 1
+    v = sl[ob_p[ir] + i]
+    if op = 1 then sl[ob_p[ir] + i] = 0 - v
+    else if dt = 3 then sl[ob_p[ir] + i] = 1 - v
+    else sl[ob_p[ir] + i] = 0 - v - 1
+  end
+  return r
+
+/* ---- element-wise functions of one array ---- */
+np_math1: procedure = .int
+  arg fid = .int, a = .int
+  ia = .int
+  ir = .int
+  r = .int
+  n = .int
+  i = .int
+  dt = .int
+  rd = .int
+  pa = .int
+  pr = .int
+  f = .float
+  g = .float
+  v = .int
+  ia = a % 2
+  n = ob_n[ia]
+  dt = ob_c[ia]
+  pa = ob_p[ia]
+  rd = 2
+  if fid = BI_NUMPY_ABS | fid = BI_NUMPY_SQUARE then rd = dt
+  if fid = BI_NUMPY_ISNAN then rd = 3
+  r = np_new(rd, ob_x[ia], n)
+  ir = r % 2
+  pr = ob_p[ir]
+  do i = 0 to ob_x[ia] - 1
+    sl[ob_y[ir] + i] = sl[ob_y[ia] + i]
+  end
+  if fid = BI_NUMPY_ABS | fid = BI_NUMPY_SQUARE then do
+    if dt = 2 then do
+      do i = 0 to n - 1
+        f = npf[pa + i]
+        if fid = BI_NUMPY_ABS then npf[pr + i] = rxfloat..fabs(f)
+        else npf[pr + i] = f * f
+      end
+    end
+    else do
+      do i = 0 to n - 1
+        v = sl[pa + i]
+        if fid = BI_NUMPY_ABS then do
+          if v < 0 then v = 0 - v
+        end
+        else v = v * v
+        sl[pr + i] = v
+      end
+    end
+    return r
+  end
+  do i = 0 to n - 1
+    if dt = 2 then f = npf[pa + i]
+    else do
+      v = sl[pa + i]
+      f = v as .float
+    end
+    g = 0.0
+    select
+      when fid = BI_NUMPY_ISNAN then do
+        if f \= f then sl[pr + i] = 1
+        else sl[pr + i] = 0
+      end
+      when fid = BI_NUMPY_SQRT then do
+        if f \= f then g = f
+        else if f < 0.0 then g = f_nan()
+        else g = rxfloat..sqrt(f)
+      end
+      when fid = BI_NUMPY_EXP then do
+        if f \= f then g = f
+        else if f > 709.78 then g = f_inf()
+        else g = rxfloat..exp(f)
+      end
+      when fid = BI_NUMPY_SIN then g = rxfloat..sin(f)
+      when fid = BI_NUMPY_COS then g = rxfloat..cos(f)
+      when fid = BI_NUMPY_TAN then g = rxfloat..tan(f)
+      when fid = BI_NUMPY_LOG | fid = BI_NUMPY_LOG10 | fid = BI_NUMPY_LOG2 then do
+        if f \= f then g = f
+        else if f < 0.0 then g = f_nan()
+        else if f = 0.0 then g = 0.0 - f_inf()
+        else if fid = BI_NUMPY_LOG then g = rxfloat..log(f)
+        else if fid = BI_NUMPY_LOG10 then g = rxfloat..log10(f)
+        else g = rxfloat..log2(f)
+      end
+      when fid = BI_NUMPY_FLOOR then do
+        if f \= f | finf(f) \= 0 then g = f
+        else g = rxfloat..floor(f)
+      end
+      when fid = BI_NUMPY_CEIL then do
+        if f \= f | finf(f) \= 0 then g = f
+        else g = rxfloat..ceil(f)
+      end
+      otherwise nop
+    end
+    if fid \= BI_NUMPY_ISNAN then npf[pr + i] = g
+  end
+  return r
+
+/* round half to even to an integral float */
+np_rint: procedure = .float
+  arg y = .float
+  fl = .float
+  df = .float
+  fl = rxfloat..floor(y)
+  df = y - fl
+  if df < 0.5 then return fl
+  if df > 0.5 then return fl + 1.0
+  if rxfloat..floor(fl / 2.0) * 2.0 = fl then return fl
+  return fl + 1.0
+
+np_round1: procedure = .float
+  arg f = .float, d = .int
+  pw = .float
+  if f \= f | finf(f) \= 0 then return f
+  if d > 300 | d < -300 then return f
+  if d >= 0 then do
+    pw = rxfloat..pow10(d as .float)
+    return np_rint(f * pw) / pw
+  end
+  pw = rxfloat..pow10((0 - d) as .float)
+  return np_rint(f / pw) * pw
+
+np_round_arr: procedure = .int
+  arg a = .int, d = .int
+  r = .int
+  ia = .int
+  ir = .int
+  i = .int
+  n = .int
+  p = .int
+  q = .int
+  v = .int
+  rm = .int
+  ia = a % 2
+  r = np_cast(a, ob_c[ia])
+  ir = r % 2
+  n = ob_n[ia]
+  if ob_c[ia] = 2 then do
+    do i = 0 to n - 1
+      npf[ob_p[ir] + i] = np_round1(npf[ob_p[ir] + i], d)
+    end
+    return r
+  end
+  if d >= 0 | d < -17 then return r
+  p = 10 ** (0 - d)
+  do i = 0 to n - 1
+    v = sl[ob_p[ir] + i]
+    q = v % p
+    rm = v // p
+    if rm < 0 then do
+      q = q - 1
+      rm = rm + p
+    end
+    if rm * 2 > p then q = q + 1
+    else if rm * 2 = p then do
+      if q // 2 \= 0 then q = q + 1
+    end
+    sl[ob_p[ir] + i] = q * p
+  end
+  return r
+
+/* ---- dot / matmul for 1-d and 2-d arrays ---- */
+np_dot: procedure = .int
+  arg a = .int, b = .int
+  ia = .int
+  ib = .int
+  na = .int
+  nb = .int
+  m = .int
+  k = .int
+  n = .int
+  k2 = .int
+  r = .int
+  ir = .int
+  rd = .int
+  i = .int
+  j = .int
+  t = .int
+  s = .float
+  xa = .float
+  xb = .float
+  si = .int
+  ya = .int
+  yb = .int
+  pa = .int
+  pb = .int
+  pr = .int
+  da = .int
+  db = .int
+  ia = a % 2
+  ib = b % 2
+  na = ob_x[ia]
+  nb = ob_x[ib]
+  if na = 0 | nb = 0 then return np_binop(O_MUL, a, b)
+  if na > 2 | nb > 2 then return raise_exc(C_VALUEERROR, "dot of arrays with more than two dimensions is not supported")
+  if na = 1 then do
+    m = 1
+    k = sl[ob_y[ia]]
+  end
+  else do
+    m = sl[ob_y[ia]]
+    k = sl[ob_y[ia] + 1]
+  end
+  if nb = 1 then do
+    k2 = sl[ob_y[ib]]
+    n = 1
+  end
+  else do
+    k2 = sl[ob_y[ib]]
+    n = sl[ob_y[ib] + 1]
+  end
+  if k \= k2 then return raise_exc(C_VALUEERROR, "shapes " || np_shape_str(a) || " and " || np_shape_str(b) || " not aligned: " || k || " (dim " || (na - 1) || ") != " || k2 || " (dim 0)")
+  da = ob_c[ia]
+  db = ob_c[ib]
+  rd = 1
+  if da = 2 | db = 2 then rd = 2
+  nprn = 0
+  if na = 2 then do
+    nprn = nprn + 1
+    nprs[nprn] = m
+  end
+  if nb = 2 then do
+    nprn = nprn + 1
+    nprs[nprn] = n
+  end
+  r = np_new(rd, nprn, m * n)
+  ir = r % 2
+  call np_shape_from_scratch r
+  pa = ob_p[ia]
+  pb = ob_p[ib]
+  pr = ob_p[ir]
+  do i = 0 to m - 1
+    do j = 0 to n - 1
+      if rd = 2 then do
+        s = 0.0
+        do t = 0 to k - 1
+          if da = 2 then xa = npf[pa + i * k + t]
+          else do
+            ya = sl[pa + i * k + t]
+            xa = ya as .float
+          end
+          if db = 2 then xb = npf[pb + t * n + j]
+          else do
+            yb = sl[pb + t * n + j]
+            xb = yb as .float
+          end
+          s = s + xa * xb
+        end
+        npf[pr + i * n + j] = s
+      end
+      else do
+        si = 0
+        do t = 0 to k - 1
+          si = si + sl[pa + i * k + t] * sl[pb + t * n + j]
+        end
+        sl[pr + i * n + j] = si
+      end
+    end
+  end
+  if nprn = 0 then return np_scalar(r, 0)
+  return r
+
+/* ---- transpose (reverse the axes) ---- */
+np_transpose: procedure = .int
+  arg a = .int
+  ia = .int
+  ir = .int
+  r = .int
+  nd = .int
+  j = .int
+  i = .int
+  n = .int
+  off = .int
+  run = .int
+  ss = .int[]
+  st = .int[]
+  cnt = .int[]
+  rs = .int[]
+  ia = a % 2
+  nd = ob_x[ia]
+  if nd < 2 then return np_cast(a, ob_c[ia])
+  n = ob_n[ia]
+  r = np_new(ob_c[ia], nd, n)
+  ir = r % 2
+  run = 1
+  do j = nd to 1 by -1
+    ss[j] = run
+    run = run * sl[ob_y[ia] + j - 1]
+  end
+  do j = 1 to nd
+    rs[j] = sl[ob_y[ia] + nd - j]
+    st[j] = ss[nd + 1 - j]
+    sl[ob_y[ir] + j - 1] = rs[j]
+    cnt[j] = 0
+  end
+  off = 0
+  do i = 0 to n - 1
+    if ob_c[ia] = 2 then npf[ob_p[ir] + i] = npf[ob_p[ia] + off]
+    else sl[ob_p[ir] + i] = sl[ob_p[ia] + off]
+    j = nd
+    do while j >= 1
+      cnt[j] = cnt[j] + 1
+      off = off + st[j]
+      if cnt[j] < rs[j] then leave
+      off = off - st[j] * rs[j]
+      cnt[j] = 0
+      j = j - 1
+    end
+  end
+  return r
+
+/* ---- indexing ---- */
+/* tables for the axes: npco[d] first entry, npcc[d] count, npcd[d] dropped flag, npcat entries;
+   builds npsel (flat offsets), np_sc (count), and the result shape nprs / nprn */
+np_sel_build: procedure = .void
+  arg a = .int
+  ia = .int
+  nd = .int
+  d = .int
+  tot = .int
+  i = .int
+  j = .int
+  off = .int
+  old = .int
+  cur = .int[]
+  ia = a % 2
+  nd = ob_x[ia]
+  tot = 1
+  nprn = 0
+  do d = nd to 1 by -1
+    if d = nd then npcs[d] = 1
+    else npcs[d] = npcs[d + 1] * sl[ob_y[ia] + d]
+  end
+  do d = 1 to nd
+    tot = tot * npcc[d]
+    do j = 1 to npnb[d]
+      nprn = nprn + 1
+      nprs[nprn] = 1
+    end
+    if npcd[d] = 0 then do
+      nprn = nprn + 1
+      nprs[nprn] = npcc[d]
+    end
+    cur[d] = 0
+  end
+  do j = 1 to npnb[nd + 1]
+    nprn = nprn + 1
+    nprs[nprn] = 1
+  end
+  np_sc = tot
+  if tot = 0 then return
+  off = 0
+  do d = 1 to nd
+    off = off + npcat[npco[d]] * npcs[d]
+  end
+  do i = 1 to tot
+    npsel[i] = off
+    j = nd
+    do while j >= 1
+      old = npcat[npco[j] + cur[j]]
+      cur[j] = cur[j] + 1
+      if cur[j] < npcc[j] then do
+        off = off + (npcat[npco[j] + cur[j]] - old) * npcs[j]
+        leave
+      end
+      cur[j] = 0
+      off = off + (npcat[npco[j]] - old) * npcs[j]
+      j = j - 1
+    end
+  end
+  return
+
+np_plan: procedure = .int
+  arg a = .int, ix = .int
+  ia = .int
+  nd = .int
+  nit = .int
+  i = .int
+  d = .int
+  v = .int
+  nel = .int
+  real = .int
+  ax = .int
+  dimn = .int
+  k = .int
+  tq = .int
+  c = .int
+  w = .int
+  m = .int
+  r = .int
+  n = .int
+  e = .int
+  kv = .int
+  ia = a % 2
+  nd = ob_x[ia]
+  if nd = 0 then return raise_exc(C_INDEXERROR, "too many indices for array: array is 0-dimensional, but 1 were indexed")
+  if kind_of(ix) = K_TUPLE then do
+    nit = ob_n[ix % 2]
+    do i = 1 to nit
+      npit[i] = sl[ob_p[ix % 2] + i - 1]
+    end
+  end
+  else do
+    nit = 1
+    npit[1] = ix
+  end
+  nel = 0
+  real = 0
+  do i = 1 to nit
+    if npit[i] = ELLIPSIS_OOP then nel = nel + 1
+    else if npit[i] \= NONE_OOP then real = real + 1
+  end
+  do i = 1 to nd + 1
+    npnb[i] = 0
+  end
+  if nel > 1 then return raise_exc(C_INDEXERROR, "an index can only have a single ellipsis ('...')")
+  if real > nd then return raise_exc(C_INDEXERROR, "too many indices for array: array is " || nd || "-dimensional, but " || real || " were indexed")
+  ax = 0
+  do i = 1 to nit
+    if npit[i] = ELLIPSIS_OOP then do
+      do k = 1 to nd - real
+        ax = ax + 1
+        npax[ax] = 0
+      end
+    end
+    else if npit[i] = NONE_OOP then npnb[ax + 1] = npnb[ax + 1] + 1
+    else do
+      ax = ax + 1
+      npax[ax] = npit[i]
+    end
+  end
+  do while ax < nd
+    ax = ax + 1
+    npax[ax] = 0
+  end
+  tq = 0
+  do d = 1 to nd
+    dimn = sl[ob_y[ia] + d - 1]
+    v = npax[d]
+    npco[d] = tq + 1
+    npcd[d] = 0
+    kv = 0
+    if v \= 0 then kv = kind_of(v)
+    if v = 0 then do
+      do c = 0 to dimn - 1
+        npcat[tq + 1 + c] = c
+      end
+      npcc[d] = dimn
+      tq = tq + dimn
+    end
+    else if numkind(v) = 1 then do
+      w = ival(v)
+      m = w
+      if w < 0 then w = w + dimn
+      if w < 0 | w >= dimn then return raise_exc(C_INDEXERROR, "index " || m || " is out of bounds for axis " || (d - 1) || " with size " || dimn)
+      npcat[tq + 1] = w
+      npcc[d] = 1
+      npcd[d] = 1
+      tq = tq + 1
+    end
+    else if kv = K_SLICE then do
+      r = slice_calc(dimn, ob_n[v % 2], ob_x[v % 2], ob_y[v % 2])
+      if r = 0 then return 0
+      w = sl_a
+      do c = 0 to sl_n - 1
+        npcat[tq + 1 + c] = w
+        w = w + sl_b
+      end
+      npcc[d] = sl_n
+      tq = tq + sl_n
+    end
+    else if kv = K_ARRAY then do
+      if ob_c[v % 2] = 3 then do
+        if ob_x[v % 2] \= 1 | ob_n[v % 2] \= dimn then return raise_exc(C_INDEXERROR, "boolean index did not match indexed array along axis " || (d - 1) || "; size of axis is " || dimn || " but size of corresponding boolean axis is " || ob_n[v % 2])
+        n = 0
+        do c = 0 to dimn - 1
+          if sl[ob_p[v % 2] + c] \= 0 then do
+            npcat[tq + 1 + n] = c
+            n = n + 1
+          end
+        end
+        npcc[d] = n
+        tq = tq + n
+      end
+      else do
+        if ob_c[v % 2] = 2 then return raise_exc(C_INDEXERROR, "arrays used as indices must be of integer (or boolean) type")
+        if ob_x[v % 2] \= 1 then return raise_exc(C_INDEXERROR, "only one-dimensional index arrays are supported")
+        n = ob_n[v % 2]
+        do c = 0 to n - 1
+          w = sl[ob_p[v % 2] + c]
+          m = w
+          if w < 0 then w = w + dimn
+          if w < 0 | w >= dimn then return raise_exc(C_INDEXERROR, "index " || m || " is out of bounds for axis " || (d - 1) || " with size " || dimn)
+          npcat[tq + 1 + c] = w
+        end
+        npcc[d] = n
+        tq = tq + n
+      end
+    end
+    else if kv = K_LIST | kv = K_TUPLE then do
+      n = ob_n[v % 2]
+      do c = 0 to n - 1
+        e = sl[ob_p[v % 2] + c]
+        if numkind(e) \= 1 then return raise_exc(C_INDEXERROR, "arrays used as indices must be of integer (or boolean) type")
+        w = ival(e)
+        m = w
+        if w < 0 then w = w + dimn
+        if w < 0 | w >= dimn then return raise_exc(C_INDEXERROR, "index " || m || " is out of bounds for axis " || (d - 1) || " with size " || dimn)
+        npcat[tq + 1 + c] = w
+      end
+      npcc[d] = n
+      tq = tq + n
+    end
+    else return raise_exc(C_INDEXERROR, "only integers, slices (`:`), ellipsis (`...`), numpy.newaxis (`None`) and integer or boolean arrays are valid indices")
+  end
+  call np_sel_build a
+  return 1
+
+/* boolean mask of the same shape as a: selects the flat positions */
+np_maskplan: procedure = .int
+  arg a = .int, m = .int
+  ia = .int
+  im = .int
+  d = .int
+  same = .int
+  i = .int
+  n = .int
+  ia = a % 2
+  im = m % 2
+  same = 0
+  if ob_x[im] = ob_x[ia] & ob_x[ia] >= 1 then do
+    same = 1
+    do d = 0 to ob_x[ia] - 1
+      if sl[ob_y[ia] + d] \= sl[ob_y[im] + d] then same = 0
+    end
+  end
+  if same = 0 then return np_plan(a, m)
+  n = 0
+  do i = 0 to ob_n[ia] - 1
+    if sl[ob_p[im] + i] \= 0 then do
+      n = n + 1
+      npsel[n] = i
+    end
+  end
+  np_sc = n
+  nprn = 1
+  nprs[1] = n
+  return 1
+
+np_gather: procedure = .int
+  arg a = .int
+  ia = .int
+  ir = .int
+  r = .int
+  i = .int
+  pa = .int
+  pr = .int
+  ia = a % 2
+  r = np_new(ob_c[ia], nprn, np_sc)
+  ir = r % 2
+  call np_shape_from_scratch r
+  pa = ob_p[ia]
+  pr = ob_p[ir]
+  if ob_c[ia] = 2 then do
+    do i = 1 to np_sc
+      npf[pr + i - 1] = npf[pa + npsel[i]]
+    end
+  end
+  else do
+    do i = 1 to np_sc
+      sl[pr + i - 1] = sl[pa + npsel[i]]
+    end
+  end
+  return r
+
+np_getitem: procedure = .int
+  arg a = .int, ix = .int
+  ia = .int
+  i = .int
+  n = .int
+  ok = .int
+  ia = a % 2
+  if ix // 2 \= 0 & ob_x[ia] = 1 then do
+    i = (ix - 1) % 2
+    n = sl[ob_y[ia]]
+    if i < 0 then i = i + n
+    if i < 0 | i >= n then return raise_exc(C_INDEXERROR, "index " || ((ix - 1) % 2) || " is out of bounds for axis 0 with size " || n)
+    return np_scalar(a, i)
+  end
+  if ix // 2 \= 0 & ob_x[ia] >= 2 then do
+    i = (ix - 1) % 2
+    n = sl[ob_y[ia]]
+    if i < 0 then i = i + n
+    if i < 0 | i >= n then return raise_exc(C_INDEXERROR, "index " || ((ix - 1) % 2) || " is out of bounds for axis 0 with size " || n)
+    return np_mkview(a, i, 1, 1)
+  end
+  if kind_of(ix) = K_SLICE & ob_x[ia] >= 1 then do
+    ok = slice_calc(sl[ob_y[ia]], ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    if ok = 0 then return 0
+    if sl_b = 1 then return np_mkview(a, sl_a, sl_n, 0)
+  end
+  if kind_of(ix) = K_ARRAY then do
+    if ob_c[ix % 2] = 3 then ok = np_maskplan(a, ix)
+    else ok = np_plan(a, ix)
+  end
+  else ok = np_plan(a, ix)
+  if ok = 0 then return 0
+  if nprn = 0 then return np_scalar(a, npsel[1])
+  return np_gather(a)
+
+np_setitem: procedure = .void
+  arg a = .int, ix = .int, v = .int
+  ia = .int
+  iv = .int
+  vv = .int
+  ok = .int
+  mode = .int
+  i = .int
+  j = .int
+  d = .int
+  jj = .int
+  r = .int
+  ia = a % 2
+  if kind_of(ix) = K_ARRAY then do
+    if ob_c[ix % 2] = 3 then ok = np_maskplan(a, ix)
+    else ok = np_plan(a, ix)
+  end
+  else ok = np_plan(a, ix)
+  if ok = 0 then return
+  vv = np_coerce(v)
+  if vv = 0 then return
+  if vv = v & ob_n[vv % 2] > 1 then vv = np_cast(vv, ob_c[vv % 2])
+  iv = vv % 2
+  if ob_n[iv] = 1 then mode = 1
+  else do
+    mode = 2
+    if ob_x[iv] <= nprn then do
+      do d = 1 to ob_x[iv]
+        jj = nprn - ob_x[iv] + d
+        if sl[ob_y[iv] + d - 1] \= nprs[jj] & sl[ob_y[iv] + d - 1] \= 1 then do
+          r = raise_exc(C_VALUEERROR, "could not broadcast input array from shape " || np_shape_str(vv) || " into shape (" || nprs[1] || ")")
+          return
+        end
+      end
+      call np_btab vv, 1
+    end
+    else do
+      if ob_n[iv] \= np_sc then do
+        r = raise_exc(C_VALUEERROR, "could not broadcast input array from shape " || np_shape_str(vv) || " into shape (" || nprs[1] || ")")
+        return
+      end
+      mode = 0
+    end
+  end
+  do i = 1 to np_sc
+    if mode = 1 then j = 0
+    else if mode = 0 then j = i - 1
+    else j = npta[i]
+    call np_copyel a, npsel[i], vv, j
+  end
+  return
+
+/* ---- shapes and dimension arguments ---- */
+/* dimensions given as an int, a tuple/list of ints or several ints at ast[base+first ..] -> nts[1..ntnd] */
+np_dims: procedure = .int
+  arg base = .int, first = .int, cnt = .int
+  v = .int
+  i = .int
+  n = .int
+  e = .int
+  ntnd = 0
+  if cnt = 1 then do
+    v = ast[base + first]
+    if kind_of(v) = K_TUPLE | kind_of(v) = K_LIST then do
+      n = ob_n[v % 2]
+      do i = 0 to n - 1
+        e = sl[ob_p[v % 2] + i]
+        if numkind(e) \= 1 then return raise_exc(C_TYPEERROR, "'" || type_name(e) || "' object cannot be interpreted as an integer")
+        ntnd = ntnd + 1
+        nts[ntnd] = ival(e)
+      end
+      return 1
+    end
+  end
+  do i = 0 to cnt - 1
+    e = ast[base + first + i]
+    if numkind(e) \= 1 then return raise_exc(C_TYPEERROR, "'" || type_name(e) || "' object cannot be interpreted as an integer")
+    ntnd = ntnd + 1
+    nts[ntnd] = ival(e)
+  end
+  return 1
+
+/* new array with the shape nts[1..ntnd], filled with fi (int / bool) or ff (float) */
+np_make: procedure = .int
+  arg dt = .int, fi = .int, ff = .float
+  total = .int
+  d = .int
+  r = .int
+  ir = .int
+  j = .int
+  total = 1
+  do d = 1 to ntnd
+    if nts[d] < 0 then return raise_exc(C_VALUEERROR, "negative dimensions are not allowed")
+    total = total * nts[d]
+  end
+  r = np_new(dt, ntnd, total)
+  ir = r % 2
+  do d = 1 to ntnd
+    sl[ob_y[ir] + d - 1] = nts[d]
+  end
+  if dt = 2 then do
+    if ff \= 0.0 then do
+      do j = 0 to total - 1
+        npf[ob_p[ir] + j] = ff
+      end
+    end
+  end
+  else do
+    if fi \= 0 then do
+      do j = 0 to total - 1
+        sl[ob_p[ir] + j] = fi
+      end
+    end
+  end
+  return r
+
+np_dtype_of: procedure = .int
+  arg v = .int
+  k = .int
+  s = .string
+  k = kind_of(v)
+  if k = K_CLASS then do
+    if ob_x[v % 2] = C_FLOAT then return 2
+    if ob_x[v % 2] = C_INT then return 1
+    if ob_x[v % 2] = C_BOOL then return 3
+  end
+  if k = K_STR then do
+    s = ob_s[v % 2]
+    if left(s, 5) == "float" | s == "f8" | s == "double" then return 2
+    if left(s, 3) == "int" | s == "i8" | s == "long" then return 1
+    if left(s, 4) == "bool" | s == "?" then return 3
+  end
+  call raise_exc C_TYPEERROR, "data type not understood"
+  return 0

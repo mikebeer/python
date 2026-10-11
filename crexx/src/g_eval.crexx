@@ -462,6 +462,7 @@ ev: procedure = .int
     return o
   end
   if t = N_NAMEERR then return unbound(n)
+  if t = N_SLICE then return eval_slice(n, fb)
   if t = N_STARRED then return raise_exc(C_SYNTAXERROR, "can't use starred expression here")
   if t = N_YIELD | t = N_YIELDFROM then return raise_exc(C_RUNTIMEERROR, "yield used in an unsupported position")
   return raise_exc(C_RUNTIMEERROR, "cannot evaluate node " || t)
@@ -470,6 +471,9 @@ ev: procedure = .int
 cmp_general: procedure = .int
   arg op = .int, l = .int, r = .int
   v = .int
+  if op <= CMP_GE then do
+    if kind_of(l) = K_ARRAY | kind_of(r) = K_ARRAY then return np_binop(30 + op, l, r)
+  end
   if op = CMP_EQ | op = CMP_NE then do
     v = py_eq(l, r)
     if unw > 0 then return 0
@@ -592,6 +596,11 @@ aug_op_apply: procedure = .int
   if k = K_DICT & op = O_BITOR & kind_of(v) = K_DICT then do
     call dict_update cur, v
     return cur
+  end
+  if k = K_ARRAY then do
+    l = arith(op, cur, v)
+    if l = 0 then return 0
+    return np_inplace(cur, l)
   end
   if k = K_INST then do
     m = cls_find(ob_c[cur % 2], iopd[op])

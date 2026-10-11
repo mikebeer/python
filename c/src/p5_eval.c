@@ -775,6 +775,10 @@ static Value eval(Frame *f, Node *n)
         o = subscr(o, idx);
         vsp = base;
         return o; }
+    case N_SLICE: {
+        Value lo, hi, st;
+        eval_slice(f, n, &lo, &hi, &st);
+        return mkslice(lo, hi, st); }
     case N_CALL: return eval_call(f, n);
     case N_BINOP: return eval_binop_fast(f, n);
     case N_UNARY: return unop(n->op, eval(f, n->a));
@@ -808,6 +812,10 @@ static Value eval(Frame *f, Node *n)
                 case C_EQ: r = x == y; break;
                 default: r = x != y; break;
                 }
+            } else if ((left.t == T_ND || right.t == T_ND) && n->name->s[i] <= C_NE) {
+                Value cv = nd_compare(n->name->s[i], left, right);
+                vsp = base;
+                return cv;
             } else {
                 r = cmp_one(n->name->s[i], left, right);
             }
@@ -1302,6 +1310,7 @@ static void exec_aug(Frame *f, Node *n)
             for (i = 0; i < m; i++) list_push(l, s->a[i]);
             r = cur;
         } else r = binop(n->op, cur, rhs);
+        if (cur.t == T_ND && r.t == T_ND && n->op != B_MATMUL) { nd_assign_all(cur, r); r = cur; }
         store_var(f, t->var, r);
         break; }
     case N_ATTR: {

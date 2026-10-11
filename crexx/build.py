@@ -4,7 +4,7 @@ import re, os, sys
 root = os.path.dirname(os.path.abspath(__file__))
 d = os.path.join(root, 'src')
 order = ['a_head', 'b_lex', 'c_parse', 'd_obj', 'e_big', 'f_ops', 'g_call', 'g_item', 'g_eval', 'g_gen',
-         'h_builtins', 'h_meth', 'h_mod', 'i_fmt']
+         'h_builtins', 'h_meth', 'h_mod', 'i_fmt', 'j_np', 'k_np2']
 src = ''.join(open(os.path.join(d, f + '.crexx')).read() + '\n' for f in order)
 
 consts = {}

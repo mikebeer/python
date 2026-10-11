@@ -8,5 +8,6 @@
 #include "p5_eval.c"
 #include "p7_fmt.c"
 #include "p7_bi.c"
+#include "p7_np.c"
 #include "p7_mod.c"
 #include "p8_main.c"

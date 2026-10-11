@@ -8,7 +8,7 @@ enum {
 };
 enum {
     B_NONE = 0, B_ADD, B_SUB, B_MUL, B_DIV, B_FDIV, B_MOD, B_POW, B_AND, B_OR, B_XOR,
-    B_LSH, B_RSH
+    B_LSH, B_RSH, B_MATMUL
 };
 enum {
     KW_NONE = 0, KW_FALSE, KW_NONE_, KW_TRUE, KW_AND, KW_AS, KW_ASSERT, KW_BREAK, KW_CLASS,
@@ -335,7 +335,7 @@ static void lex_source(const char *src, long len)
                 TK_RSH, TK_ARROW, TK_AUG, TK_AUG, TK_AUG, TK_AUG, TK_AUG, TK_AUG, TK_AUG,
                 TK_AUG, TK_AUG, ':' };
             static const int tbop2[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, B_ADD, B_SUB, B_MUL, B_DIV,
-                B_MOD, B_AND, B_OR, B_XOR, B_MUL, 0 };
+                B_MOD, B_AND, B_OR, B_XOR, B_MATMUL, 0 };
             int k, found = 0;
             for (k = 0; three[k]; k++)
                 if (pos + 3 <= len && memcmp(src + pos, three[k], 3) == 0) {

@@ -522,8 +522,9 @@ static Node *parse_arith(void)
 static Node *parse_term(void)
 {
     Node *l = parse_factor();
-    while (at('*') || at('/') || at('%') || at(TK_FDIV)) {
-        int op = at('*') ? B_MUL : (at('/') ? B_DIV : (at('%') ? B_MOD : B_FDIV));
+    while (at('*') || at('/') || at('%') || at(TK_FDIV) || at('@')) {
+        int op = at('*') ? B_MUL : (at('/') ? B_DIV : (at('%') ? B_MOD :
+                 (at('@') ? B_MATMUL : B_FDIV)));
         int line = TOK.line;
         pp++;
         l = binop_node(op, l, parse_factor(), line);

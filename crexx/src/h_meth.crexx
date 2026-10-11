@@ -15,6 +15,7 @@ bmeth: procedure = .int
     when k = K_INT | k = K_BIG | k = K_BOOL | k = K_FLOAT then return meth_num(o, nid, base, na, nk)
     when k = K_GEN | k = K_ITER then return meth_gen(o, nid, base, na, nk)
     when k = K_FILE then return meth_file(o, nid, base, na, nk)
+    when k = K_ARRAY then return meth_arr(o, nid, base, na, nk)
     when k = K_PROP then do
       if nid = M_SETTER | nid = M_GETTER then do
         k = newobj(K_PROP)
@@ -1147,6 +1148,10 @@ meth_num: procedure = .int
     return FALSE_OOP
   end
   if nid = M_CONJUGATE then return o
+  if nid = M_ROUND & kind_of(o) = K_FLOAT then do
+    if na = 0 then return o
+    return mkfloat(np_round1(ob_f[o % 2], ival(ast[base + 1])))
+  end
   return meth_common(o, nid, base, na, nk)
 
 meth_gen: procedure = .int

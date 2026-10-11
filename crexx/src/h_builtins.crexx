@@ -132,6 +132,10 @@ bi_len: procedure = .int
     when k = K_LIST | k = K_TUPLE then return mkint(ob_n[x % 2])
     when k = K_DICT | k = K_SET then return mkint(dd_n[ob_x[x % 2]])
     when k = K_RANGE then return mkint(range_len(x))
+    when k = K_ARRAY then do
+      if ob_x[x % 2] = 0 then return raise_exc(C_TYPEERROR, "len() of unsized object")
+      return mkint(sl[ob_y[x % 2]])
+    end
     when k = K_INST then do
       m = cls_find(ob_c[x % 2], M___LEN__)
       if m > 0 then do
@@ -159,6 +163,7 @@ bi_abs: procedure = .int
       return x
     end
     when ob_k[x % 2] = K_BOOL then return mkint(ival(x))
+    when ob_k[x % 2] = K_ARRAY then return np_math1(BI_NUMPY_ABS, x)
     otherwise nop
   end
   return raise_exc(C_TYPEERROR, "bad operand type for abs(): '" || type_name(x) || "'")

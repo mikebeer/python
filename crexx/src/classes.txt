@@ -54,3 +54,5 @@ SyntaxError Exception 3 1
 OSError Exception 3 1
 FileNotFoundError OSError 3 1
 EOFError Exception 3 1
+ndarray object 1 0
+AxisError ValueError 3 0

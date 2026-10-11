@@ -29,6 +29,8 @@ static Class *class_of(Value v)
     case T_SUPER: return cls_super;
     case T_FILE: return cls_file;
     case T_CELL: return cls_cell;
+    case T_ND: return cls_ndarray;
+    case T_SLICE: return cls_slice;
     default: return cls_object;
     }
 }
@@ -138,6 +140,7 @@ static int py_truthy(Value v)
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n != 0;
     case T_DICT: case T_SET: return AS_DICT(v)->n != 0;
     case T_RANGE: return range_len((Range *)v.u.o) != 0;
+    case T_ND: return nd_truthy(v);
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_bool);
         if (m) return py_truthy(call1(*m, v));
@@ -154,6 +157,7 @@ static long py_len(Value v)
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n;
     case T_DICT: case T_SET: return AS_DICT(v)->n;
     case T_RANGE: return range_len((Range *)v.u.o);
+    case T_ND: return nd_len(v);
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_len);
         if (m) {
@@ -545,6 +549,8 @@ static void repr_buf(Value v, Buf *b, int depth)
         buf_add(b, "'>");
         break;
     case T_FILE: buf_add(b, "<_io.TextIOWrapper>"); break;
+    case T_ND: nd_format(v, b, 1); break;
+    case T_SLICE: buf_add(b, "slice(...)"); break;
     default:
         sprintf(t, "<object at 0x%lx>", (unsigned long)(size_t)v.u.o);
         buf_add(b, t);
@@ -579,6 +585,7 @@ static void exc_str_buf(Inst *in, Buf *b, int repr)
 static void str_buf(Value v, Buf *b)
 {
     if (v.t == T_STR) { buf_addn(b, AS_STR(v)->s, AS_STR(v)->len); return; }
+    if (v.t == T_ND) { nd_format(v, b, 0); return; }
     if (v.t == T_INST) {
         Inst *in = AS_INST(v);
         Value *m = class_find(in->cls, S_str);
@@ -719,6 +726,10 @@ static Value get_attr(Value o, Str *nm)
         if (nm == S_setter) {
             return new_bound(o, propsetter_fn);
         }
+        break; }
+    case T_ND: {
+        Value r;
+        if (nd_getattr(o, nm, &r)) return r;
         break; }
     default: break;
     }
@@ -874,6 +885,7 @@ static Value slice_get(Value o, Value lo, Value hi, Value st)
         buf_init(&b);
         for (i = 0; i < cnt; i++) buf_addc(&b, s->s[start + i * step]);
         return buf_value(&b); }
+    case T_ND: return nd_subscr(o, mkslice(lo, hi, st));
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
         long n = range_len(r);
@@ -934,6 +946,7 @@ static Value subscr(Value o, Value idx)
         if (dict_get(AS_DICT(o), idx, &r)) return r;
         throw_key(idx);
         break; }
+    case T_ND: return nd_subscr(o, idx);
     case T_RANGE:
         if (idx.t == T_INT || idx.t == T_BOOL) {
             Range *r = (Range *)o.u.o;
@@ -983,6 +996,7 @@ static void slice_set(Value o, Value lo, Value hi, Value st, Value v)
         vsp--;
         return;
     }
+    if (o.t == T_ND) { nd_setitem(o, mkslice(lo, hi, st), v); return; }
     throw_new(cls_TypeError, "'%.60s' object does not support slice assignment", type_name(o));
 }
 static void setitem(Value o, Value idx, Value v)
@@ -1000,6 +1014,7 @@ static void setitem(Value o, Value idx, Value v)
         throw_new(cls_TypeError, "list indices must be integers or slices, not %.40s", type_name(idx));
         break;
     case T_DICT: dict_set(AS_DICT(o), idx, v); return;
+    case T_ND: nd_setitem(o, idx, v); return;
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_setitem);
         if (m) {
@@ -1080,6 +1095,9 @@ static Value get_iter(Value o)
         return mkobj(it, T_ITER); }
     case T_ITER: case T_GEN: return o;
     case T_FILE: it = iter_new(IK_FILE); it->a = o; return mkobj(it, T_ITER);
+    case T_ND:
+        nd_len(o);
+        it = iter_new(IK_ND); it->a = o; return mkobj(it, T_ITER);
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_iter);
         if (m) return call1(*m, o);
@@ -1202,6 +1220,10 @@ static int iter_next(Value it, Value *out)
         } else *out = AS_LIST(t->a)->a[t->i];
         t->i--;
         return 1; }
+    case IK_ND:
+        if (t->i >= nd_len(t->a)) return 0;
+        *out = nd_item(t->a, t->i++);
+        return 1;
     case IK_FILE: {
         File *f = (File *)t->a.u.o;
         Value ln = file_readline(f);
@@ -1284,7 +1306,7 @@ static int contains(Value c, Value x)
     }
     {
         Value it, y;
-        if (c.t != T_INST && c.t != T_GEN && c.t != T_ITER)
+        if (c.t != T_INST && c.t != T_GEN && c.t != T_ITER && c.t != T_ND)
             throw_new(cls_TypeError, "argument of type '%.60s' is not iterable", type_name(c));
         it = get_iter(c);
         VPUSH(it);
@@ -1303,7 +1325,8 @@ static const char *op_str(int op)
     case B_ADD: return "+"; case B_SUB: return "-"; case B_MUL: return "*";
     case B_DIV: return "/"; case B_FDIV: return "//"; case B_MOD: return "%";
     case B_POW: return "** or pow()"; case B_AND: return "&"; case B_OR: return "|";
-    case B_XOR: return "^"; case B_LSH: return "<<"; default: return ">>";
+    case B_XOR: return "^"; case B_LSH: return "<<"; case B_MATMUL: return "@";
+    default: return ">>";
     }
 }
 static Str *dunder(int op, int rev)
@@ -1439,6 +1462,7 @@ static Value set_op(int op, Value a, Value b)
 static Value binop(int op, Value a, Value b)
 {
     if (is_num(a) && is_num(b)) return num_binop(op, a, b);
+    if (a.t == T_ND || b.t == T_ND) return nd_binop(op, a, b);
     if (a.t == T_STR && b.t == T_STR && op == B_ADD) {
         Str *x = AS_STR(a), *y = AS_STR(b);
         Str *r = (Str *)gc_alloc(sizeof(Str) + (size_t)(x->len + y->len), T_STR);
@@ -1491,6 +1515,7 @@ static Value binop(int op, Value a, Value b)
 }
 static Value unop(int op, Value a)
 {
+    if (a.t == T_ND) return nd_unop(op, a);
     if (op == '-') {
         if (a.t == T_INT || a.t == T_BOOL) return mkint(-a.u.i);
         if (a.t == T_FLOAT) return mkfloat(-a.u.d);

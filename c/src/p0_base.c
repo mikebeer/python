@@ -45,7 +45,7 @@ enum {
     T_UNSET = 0, T_NONE, T_BOOL, T_INT, T_FLOAT,
     T_STR, T_BIG, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_FUNC, T_BUILTIN,
     T_CLASS, T_INST, T_BOUND, T_GEN, T_ITER, T_CELL, T_MODULE, T_PROP,
-    T_SMETH, T_CMETH, T_SUPER, T_FILE, T_NTYPES
+    T_SMETH, T_CMETH, T_SUPER, T_FILE, T_ND, T_SLICE, T_NTYPES
 };
 #define IS_HEAP(t) ((t) >= T_STR)
 
@@ -139,6 +139,17 @@ typedef struct Builtin { Hdr h; BFn fn; const char *name; Str *sname; } Builtin;
 typedef struct Bound { Hdr h; Value self; Value fn; } Bound;
 typedef struct Module { Hdr h; Str *name; AMap ns; } Module;
 typedef struct Range { Hdr h; long start, stop, step; } Range;
+#define ND_MAXD 8
+enum { ND_BOOL = 0, ND_INT = 1, ND_FLOAT = 2 };
+typedef struct Nd {
+    Hdr h;
+    int dt, nd;
+    long shape[ND_MAXD];
+    long size;
+    long *iv;            /* bool and int data */
+    double *dv;          /* float data */
+} Nd;
+#define AS_ND(v) ((Nd *)(v).u.o)
 typedef struct Prop { Hdr h; Value get, set; } Prop;
 typedef struct Super { Hdr h; Class *start; Value obj; } Super;
 typedef struct File { Hdr h; FILE *fp; int closed; int out; } File;
@@ -157,7 +168,7 @@ typedef struct Gen {
 } Gen;
 
 enum { IK_LIST, IK_TUPLE, IK_STR, IK_RANGE, IK_DICT, IK_DVALS, IK_DITEMS, IK_SET,
-       IK_ENUM, IK_ZIP, IK_MAP, IK_FILTER, IK_REV, IK_FILE, IK_CALL, IK_LISTREV };
+       IK_ENUM, IK_ZIP, IK_MAP, IK_FILTER, IK_REV, IK_FILE, IK_CALL, IK_LISTREV, IK_ND };
 typedef struct Iter {
     Hdr h;
     int kind;
@@ -274,7 +285,7 @@ static long nglobals, gcap;
 static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, *cls_list,
     *cls_tuple, *cls_dict, *cls_set, *cls_range, *cls_none, *cls_func, *cls_builtin,
     *cls_method, *cls_gen, *cls_module, *cls_iter, *cls_prop, *cls_file, *cls_cell,
-    *cls_smeth, *cls_cmeth, *cls_super;
+    *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError, *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError, *cls_KeyError, *cls_ValueError,
     *cls_TypeError, *cls_NameError, *cls_UnboundLocalError, *cls_AttributeError,
@@ -323,6 +334,19 @@ static Class *class_of(Value v);
 static Value *class_find(Class *c, Str *nm);
 static int class_isa(Class *c, Class *base);
 static Value new_exc(Class *c, const char *msg);
+
+/* numpy subset (p7_np.c) hooks */
+static Value nd_binop(int op, Value a, Value b);
+static Value nd_unop(int op, Value a);
+static Value nd_compare(int op, Value a, Value b);
+static Value nd_subscr(Value o, Value idx);
+static void nd_setitem(Value o, Value idx, Value v);
+static long nd_len(Value o);
+static int nd_truthy(Value o);
+static Value nd_item(Value o, long i);
+static int nd_getattr(Value o, Str *nm, Value *out);
+static void nd_assign_all(Value dst, Value src);
+static Value mkslice(Value lo, Value hi, Value st);
 
 /* ---- value constructors ----------------------------------------------- */
 static Value mkint(long n)
@@ -530,6 +554,7 @@ static void buf_free(Buf *b)
     free(b->s);
     b->s = NULL;
 }
+static void nd_format(Value o, Buf *b, int repr);
 
 /* ---- lists ------------------------------------------------------------ */
 static List *list_new(long cap)
@@ -746,8 +771,9 @@ static long gc_obj_size(Hdr *h)
     switch (h->type) {
     case T_STR: return (long)sizeof(Str) + ((Str *)h)->len;
     case T_BIG: return (long)sizeof(Big) + 2L * ((Big *)h)->n;
-    case T_LIST: case T_TUPLE:
+    case T_LIST: case T_TUPLE: case T_SLICE:
         return (long)sizeof(List) + (long)sizeof(Value) * ((List *)h)->cap;
+    case T_ND: return (long)sizeof(Nd) + 8L * ((Nd *)h)->size;
     case T_DICT: case T_SET:
         return (long)sizeof(Dict) + (long)sizeof(DEnt) * ((Dict *)h)->cap +
             (long)sizeof(long) * ((Dict *)h)->isz;
@@ -762,7 +788,7 @@ static void gc_scan(Hdr *h)
     long i;
     gc_live += gc_obj_size(h);
     switch (h->type) {
-    case T_LIST: case T_TUPLE: {
+    case T_LIST: case T_TUPLE: case T_SLICE: {
         List *l = (List *)h;
         for (i = 0; i < l->n; i++) gc_push(l->a[i]);
         break; }
@@ -817,7 +843,8 @@ static void gc_scan(Hdr *h)
 static void gc_free_obj(Hdr *h)
 {
     switch (h->type) {
-    case T_LIST: case T_TUPLE: free(((List *)h)->a); break;
+    case T_LIST: case T_TUPLE: case T_SLICE: free(((List *)h)->a); break;
+    case T_ND: free(((Nd *)h)->iv); free(((Nd *)h)->dv); break;
     case T_DICT: case T_SET: free(((Dict *)h)->e); free(((Dict *)h)->idx); break;
     case T_CLASS: free(((Class *)h)->ns.k); free(((Class *)h)->ns.v); break;
     case T_INST: free(((Inst *)h)->a.k); free(((Inst *)h)->a.v); break;

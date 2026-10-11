@@ -78,6 +78,13 @@ getslice: procedure = .int
   res = .string
   t = .int
   k = kind_of(o)
+  if k = K_ARRAY then do
+    t = newobj(K_SLICE)
+    ob_n[t % 2] = lo
+    ob_x[t % 2] = hi
+    ob_y[t % 2] = st
+    return np_getitem(o, t)
+  end
   if k = K_STR then do
     s = ob_s[o % 2]
     r = slice_calc(length(s), lo, hi, st)
@@ -140,6 +147,7 @@ getitem: procedure = .int
   st = .int
   if o // 2 \= 0 then return raise_exc(C_TYPEERROR, "'int' object is not subscriptable")
   k = ob_k[o % 2]
+  if k = K_ARRAY then return np_getitem(o, ix)
   if k = K_LIST | k = K_TUPLE then do
     if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL then do
       if ob_k[ix % 2] = K_SLICE then return getslice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
@@ -222,6 +230,10 @@ setitem: procedure = .void
     return
   end
   k = ob_k[o % 2]
+  if k = K_ARRAY then do
+    call np_setitem o, ix, v
+    return
+  end
   if k = K_LIST then do
     if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then do
       call setslice o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2], v
@@ -543,6 +555,10 @@ iter_new: procedure = .int
     when k = K_FILE then do
       return mkiter(IT_FILE, x, 0)
     end
+    when k = K_ARRAY then do
+      if ob_x[x % 2] = 0 then return raise_exc(C_TYPEERROR, "iteration over a 0-d array")
+      return mkiter(IT_NP, x, 0)
+    end
     otherwise return raise_exc(C_TYPEERROR, "'" || type_name(x) || "' object is not iterable")
   end
   return 0
@@ -574,6 +590,13 @@ iter_next: procedure = .int
       if i >= ob_n[src % 2] then return 0
       ob_y[ix] = i + 1
       return sl[ob_p[src % 2] + i]
+    end
+    when sub = IT_NP then do
+      src = ob_x[ix]
+      i = ob_y[ix]
+      if i >= sl[ob_y[src % 2]] then return 0
+      ob_y[ix] = i + 1
+      return np_item0(src, i)
     end
     when sub = IT_RANGE then do
       v = ob_x[ix]

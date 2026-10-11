@@ -1,0 +1,1810 @@
+/* ---------------------------------------------------------------------
+   numpy subset, part 2: reductions, sorting, joining, printing, methods and module functions
+   --------------------------------------------------------------------- */
+/* outer / n / inner split of the array a along the axis (np_outer, np_n, np_inner, np_axn) */
+np_lanes: procedure = .int
+  arg a = .int, hasax = .int, axis = .int
+  ia = .int
+  nd = .int
+  axn = .int
+  d = .int
+  ia = a % 2
+  nd = ob_x[ia]
+  np_outer = 1
+  np_inner = 1
+  np_n = ob_n[ia]
+  np_axn = 0
+  if hasax = 0 then return 1
+  axn = axis
+  if axn < 0 then axn = axn + nd
+  if axn < 0 | axn >= nd then return raise_exc(C_AXISERROR, "axis " || axis || " is out of bounds for array of dimension " || nd)
+  np_axn = axn
+  np_n = sl[ob_y[ia] + axn]
+  do d = 0 to axn - 1
+    np_outer = np_outer * sl[ob_y[ia] + d]
+  end
+  do d = axn + 1 to nd - 1
+    np_inner = np_inner * sl[ob_y[ia] + d]
+  end
+  return 1
+
+/* numpy's pairwise summation of npfl[st .. st+n-1] */
+np_pw2: procedure = .float
+  arg st = .int, n = .int
+  r0 = .float
+  r1 = .float
+  r2 = .float
+  r3 = .float
+  r4 = .float
+  r5 = .float
+  r6 = .float
+  r7 = .float
+  res = .float
+  i = .int
+  n2 = .int
+  lim = .int
+  if n < 8 then do
+    res = 0.0
+    do i = 0 to n - 1
+      res = res + npfl[st + i]
+    end
+    return res
+  end
+  if n <= 128 then do
+    r0 = npfl[st]
+    r1 = npfl[st + 1]
+    r2 = npfl[st + 2]
+    r3 = npfl[st + 3]
+    r4 = npfl[st + 4]
+    r5 = npfl[st + 5]
+    r6 = npfl[st + 6]
+    r7 = npfl[st + 7]
+    lim = n - (n // 8)
+    i = 8
+    do while i < lim
+      r0 = r0 + npfl[st + i]
+      r1 = r1 + npfl[st + i + 1]
+      r2 = r2 + npfl[st + i + 2]
+      r3 = r3 + npfl[st + i + 3]
+      r4 = r4 + npfl[st + i + 4]
+      r5 = r5 + npfl[st + i + 5]
+      r6 = r6 + npfl[st + i + 6]
+      r7 = r7 + npfl[st + i + 7]
+      i = i + 8
+    end
+    res = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))
+    do while i < n
+      res = res + npfl[st + i]
+      i = i + 1
+    end
+    return res
+  end
+  n2 = n % 2
+  n2 = n2 - (n2 // 8)
+  return np_pw2(st, n2) + np_pw2(st + n2, n - n2)
+
+np_sumlane: procedure = .float
+  arg n = .int, inner = .int
+  s = .float
+  k = .int
+  if inner = 1 then return np_pw2(1, n)
+  s = 0.0
+  do k = 1 to n
+    s = s + npfl[k]
+  end
+  return s
+
+/* kinds: 1 sum 2 mean 3 min 4 max 5 prod 6 argmax 7 argmin 8 cumsum 9 any 10 all 11 std 12 var */
+np_reduce: procedure = .int
+  arg a = .int, kind = .int, hasax = .int, axis = .int
+  ia = .int
+  ir = .int
+  r = .int
+  nd = .int
+  dt = .int
+  sz = .int
+  p = .int
+  outer = .int
+  n = .int
+  inner = .int
+  o = .int
+  i = .int
+  k = .int
+  b0 = .int
+  rd = .int
+  rp = .int
+  ridx = .int
+  ff = .int
+  d = .int
+  total = .int
+  vi = .int
+  bi = .int
+  si = .int
+  s = .float
+  m = .float
+  t = .float
+  ia = a % 2
+  nd = ob_x[ia]
+  dt = ob_c[ia]
+  sz = ob_n[ia]
+  p = ob_p[ia]
+  if np_lanes(a, hasax, axis) = 0 then return 0
+  outer = np_outer
+  n = np_n
+  inner = np_inner
+  if kind = 3 & n = 0 then return raise_exc(C_VALUEERROR, "zero-size array to reduction operation minimum which has no identity")
+  if kind = 4 & n = 0 then return raise_exc(C_VALUEERROR, "zero-size array to reduction operation maximum which has no identity")
+  if (kind = 6 | kind = 7) & n = 0 then return raise_exc(C_VALUEERROR, "attempt to get argmax of an empty sequence")
+  ff = 0
+  if dt = 2 | kind = 2 | kind = 11 | kind = 12 then ff = 1
+  rd = 1
+  select
+    when kind = 1 | kind = 5 | kind = 8 then do
+      if dt = 2 then rd = 2
+      else rd = 1
+    end
+    when kind = 2 | kind = 11 | kind = 12 then rd = 2
+    when kind = 3 | kind = 4 then rd = dt
+    when kind = 9 | kind = 10 then rd = 3
+    otherwise rd = 1
+  end
+  nprn = 0
+  if kind = 8 then do
+    if hasax = 0 then do
+      nprn = 1
+      nprs[1] = sz
+    end
+    else do
+      nprn = nd
+      do d = 1 to nd
+        nprs[d] = sl[ob_y[ia] + d - 1]
+      end
+    end
+  end
+  else if hasax = 1 then do
+    do d = 0 to nd - 1
+      if d \= np_axn then do
+        nprn = nprn + 1
+        nprs[nprn] = sl[ob_y[ia] + d]
+      end
+    end
+  end
+  total = outer * inner
+  if kind = 8 then total = sz
+  r = np_new(rd, nprn, total)
+  ir = r % 2
+  call np_shape_from_scratch r
+  rp = ob_p[ir]
+  do o = 0 to outer - 1
+    do i = 0 to inner - 1
+      b0 = o * n * inner + i
+      ridx = o * inner + i
+      if ff = 1 then do
+        do k = 0 to n - 1
+          if dt = 2 then npfl[k + 1] = npf[p + b0 + k * inner]
+          else do
+            vi = sl[p + b0 + k * inner]
+            npfl[k + 1] = vi as .float
+          end
+        end
+      end
+      else do
+        do k = 0 to n - 1
+          npil[k + 1] = sl[p + b0 + k * inner]
+        end
+      end
+      select
+        when kind = 1 then do
+          if rd = 2 then npf[rp + ridx] = np_sumlane(n, inner)
+          else do
+            si = 0
+            do k = 1 to n
+              si = si + npil[k]
+            end
+            sl[rp + ridx] = si
+          end
+        end
+        when kind = 2 then do
+          if n = 0 then npf[rp + ridx] = f_nan()
+          else npf[rp + ridx] = np_sumlane(n, inner) / (n as .float)
+        end
+        when kind = 3 | kind = 4 then do
+          if ff = 1 then do
+            m = npfl[1]
+            do k = 2 to n
+              t = npfl[k]
+              if t \= t then m = t
+              else if m = m then do
+                if kind = 3 & t < m then m = t
+                if kind = 4 & t > m then m = t
+              end
+            end
+            npf[rp + ridx] = m
+          end
+          else do
+            bi = npil[1]
+            do k = 2 to n
+              if kind = 3 & npil[k] < bi then bi = npil[k]
+              if kind = 4 & npil[k] > bi then bi = npil[k]
+            end
+            sl[rp + ridx] = bi
+          end
+        end
+        when kind = 5 then do
+          if rd = 2 then do
+            m = 1.0
+            do k = 1 to n
+              m = m * npfl[k]
+            end
+            npf[rp + ridx] = m
+          end
+          else do
+            si = 1
+            do k = 1 to n
+              si = si * npil[k]
+            end
+            sl[rp + ridx] = si
+          end
+        end
+        when kind = 6 | kind = 7 then do
+          bi = 0
+          if ff = 1 then do
+            m = npfl[1]
+            do k = 2 to n
+              t = npfl[k]
+              if kind = 6 & t > m then do
+                m = t
+                bi = k - 1
+              end
+              if kind = 7 & t < m then do
+                m = t
+                bi = k - 1
+              end
+            end
+          end
+          else do
+            si = npil[1]
+            do k = 2 to n
+              if kind = 6 & npil[k] > si then do
+                si = npil[k]
+                bi = k - 1
+              end
+              if kind = 7 & npil[k] < si then do
+                si = npil[k]
+                bi = k - 1
+              end
+            end
+          end
+          sl[rp + ridx] = bi
+        end
+        when kind = 8 then do
+          if rd = 2 then do
+            s = 0.0
+            do k = 1 to n
+              s = s + npfl[k]
+              npf[rp + b0 + (k - 1) * inner] = s
+            end
+          end
+          else do
+            si = 0
+            do k = 1 to n
+              si = si + npil[k]
+              sl[rp + b0 + (k - 1) * inner] = si
+            end
+          end
+        end
+        when kind = 9 | kind = 10 then do
+          if kind = 9 then bi = 0
+          else bi = 1
+          do k = 1 to n
+            if ff = 1 then vi = 0
+            else vi = 0
+            if ff = 1 then do
+              if npfl[k] \= 0.0 then vi = 1
+            end
+            else do
+              if npil[k] \= 0 then vi = 1
+            end
+            if kind = 9 & vi = 1 then bi = 1
+            if kind = 10 & vi = 0 then bi = 0
+          end
+          sl[rp + ridx] = bi
+        end
+        when kind = 11 | kind = 12 then do
+          if n - np_ddof <= 0 then npf[rp + ridx] = f_nan()
+          else do
+            m = np_sumlane(n, inner) / (n as .float)
+            do k = 1 to n
+              t = npfl[k] - m
+              npfl[k] = t * t
+            end
+            s = np_sumlane(n, inner) / ((n - np_ddof) as .float)
+            if kind = 11 then s = rxfloat..sqrt(s)
+            npf[rp + ridx] = s
+          end
+        end
+        otherwise nop
+      end
+    end
+  end
+  if nprn = 0 then return np_scalar(r, 0)
+  return r
+
+/* ---- sorting ---- */
+np_shell_f: procedure = .void
+  arg n = .int
+  gap = .int
+  i = .int
+  j = .int
+  t = .float
+  ok = .int
+  gap = 1
+  do while gap < n % 3
+    gap = gap * 3 + 1
+  end
+  do while gap >= 1
+    do i = gap + 1 to n
+      t = npfl[i]
+      j = i
+      ok = 1
+      do while ok = 1
+        if j <= gap then ok = 0
+        else if npfl[j - gap] > t then do
+          npfl[j] = npfl[j - gap]
+          j = j - gap
+        end
+        else ok = 0
+      end
+      npfl[j] = t
+    end
+    gap = (gap - 1) % 3
+  end
+  return
+
+np_shell_i: procedure = .void
+  arg n = .int
+  gap = .int
+  i = .int
+  j = .int
+  t = .int
+  ok = .int
+  gap = 1
+  do while gap < n % 3
+    gap = gap * 3 + 1
+  end
+  do while gap >= 1
+    do i = gap + 1 to n
+      t = npil[i]
+      j = i
+      ok = 1
+      do while ok = 1
+        if j <= gap then ok = 0
+        else if npil[j - gap] > t then do
+          npil[j] = npil[j - gap]
+          j = j - gap
+        end
+        else ok = 0
+      end
+      npil[j] = t
+    end
+    gap = (gap - 1) % 3
+  end
+  return
+
+/* sorted copy along an axis (hasax = 0: of the flattened array) */
+np_sort: procedure = .int
+  arg a0 = .int, hasax = .int, axis = .int
+  a = .int
+  r = .int
+  ir = .int
+  dt = .int
+  outer = .int
+  n = .int
+  inner = .int
+  o = .int
+  i = .int
+  k = .int
+  b0 = .int
+  p = .int
+  ax = .int
+  a = a0
+  ax = axis
+  if hasax = 0 then do
+    a = np_flat(a0)
+    ax = 0
+  end
+  if ob_x[a % 2] = 0 then return np_cast(a, ob_c[a % 2])
+  r = np_cast(a, ob_c[a % 2])
+  ir = r % 2
+  dt = ob_c[ir]
+  if np_lanes(r, 1, ax) = 0 then return 0
+  outer = np_outer
+  n = np_n
+  inner = np_inner
+  p = ob_p[ir]
+  do o = 0 to outer - 1
+    do i = 0 to inner - 1
+      b0 = o * n * inner + i
+      if dt = 2 then do
+        do k = 0 to n - 1
+          npfl[k + 1] = npf[p + b0 + k * inner]
+        end
+        call np_shell_f n
+        do k = 0 to n - 1
+          npf[p + b0 + k * inner] = npfl[k + 1]
+        end
+      end
+      else do
+        do k = 0 to n - 1
+          npil[k + 1] = sl[p + b0 + k * inner]
+        end
+        call np_shell_i n
+        do k = 0 to n - 1
+          sl[p + b0 + k * inner] = npil[k + 1]
+        end
+      end
+    end
+  end
+  return r
+
+np_unique: procedure = .int
+  arg a = .int
+  s = .int
+  isx = .int
+  n = .int
+  i = .int
+  cnt = .int
+  r = .int
+  ir = .int
+  dt = .int
+  s = np_sort(a, 0, 0)
+  if s = 0 then return 0
+  isx = s % 2
+  n = ob_n[isx]
+  dt = ob_c[isx]
+  cnt = 0
+  do i = 0 to n - 1
+    if i = 0 then cnt = cnt + 1
+    else if dt = 2 then do
+      if npf[ob_p[isx] + i] \= npf[ob_p[isx] + i - 1] then cnt = cnt + 1
+    end
+    else do
+      if sl[ob_p[isx] + i] \= sl[ob_p[isx] + i - 1] then cnt = cnt + 1
+    end
+  end
+  r = np_new(dt, 1, cnt)
+  ir = r % 2
+  sl[ob_y[ir]] = cnt
+  cnt = 0
+  do i = 0 to n - 1
+    if i = 0 then do
+      call np_copyel r, 0, s, 0
+      cnt = 1
+    end
+    else if dt = 2 then do
+      if npf[ob_p[isx] + i] \= npf[ob_p[isx] + i - 1] then do
+        call np_copyel r, cnt, s, i
+        cnt = cnt + 1
+      end
+    end
+    else do
+      if sl[ob_p[isx] + i] \= sl[ob_p[isx] + i - 1] then do
+        call np_copyel r, cnt, s, i
+        cnt = cnt + 1
+      end
+    end
+  end
+  return r
+
+np_median: procedure = .int
+  arg a = .int
+  s = .int
+  n = .int
+  x = .float
+  y = .float
+  s = np_sort(a, 0, 0)
+  if s = 0 then return 0
+  n = ob_n[s % 2]
+  if n = 0 then return mkfloat(f_nan())
+  if n // 2 = 1 then return mkfloat(np_getf(s, n % 2))
+  x = np_getf(s, n % 2 - 1)
+  y = np_getf(s, n % 2)
+  return mkfloat((x + y) / 2.0)
+
+/* ---- joining ---- */
+np_promote: procedure = .int
+  arg d1 = .int, d2 = .int
+  if d1 = 2 | d2 = 2 then return 2
+  if d1 = 1 | d2 = 1 then return 1
+  return 3
+
+np_concat: procedure = .int
+  arg lst = .int, axis = .int
+  n = .int
+  i = .int
+  d = .int
+  j = .int
+  o = .int
+  nd = .int
+  ax = .int
+  first = .int
+  ai = .int
+  dt = .int
+  totax = .int
+  outer = .int
+  inner = .int
+  r = .int
+  ir = .int
+  chunk = .int
+  pos = .int
+  n = ob_n[lst % 2]
+  if n = 0 then return raise_exc(C_VALUEERROR, "need at least one array to concatenate")
+  first = sl[ob_p[lst % 2]]
+  nd = ob_x[first % 2]
+  if nd = 0 then return raise_exc(C_VALUEERROR, "zero-dimensional arrays cannot be concatenated")
+  ax = axis
+  if ax < 0 then ax = ax + nd
+  if ax < 0 | ax >= nd then return raise_exc(C_AXISERROR, "axis " || axis || " is out of bounds for array of dimension " || nd)
+  dt = ob_c[first % 2]
+  totax = 0
+  do i = 0 to n - 1
+    ai = sl[ob_p[lst % 2] + i]
+    if ob_x[ai % 2] \= nd then return raise_exc(C_VALUEERROR, "all the input array dimensions except for the concatenation axis must match exactly, but along dimension 0, the array at index 0 has " || nd || " dimension(s) and the array at index " || i || " has " || ob_x[ai % 2] || " dimension(s)")
+    do d = 0 to nd - 1
+      if d \= ax & sl[ob_y[ai % 2] + d] \= sl[ob_y[first % 2] + d] then return raise_exc(C_VALUEERROR, "all the input array dimensions except for the concatenation axis must match exactly, but along dimension " || d || ", the array at index 0 has size " || sl[ob_y[first % 2] + d] || " and the array at index " || i || " has size " || sl[ob_y[ai % 2] + d])
+    end
+    totax = totax + sl[ob_y[ai % 2] + ax]
+    dt = np_promote(dt, ob_c[ai % 2])
+  end
+  outer = 1
+  inner = 1
+  do d = 0 to ax - 1
+    outer = outer * sl[ob_y[first % 2] + d]
+  end
+  do d = ax + 1 to nd - 1
+    inner = inner * sl[ob_y[first % 2] + d]
+  end
+  nprn = nd
+  do d = 0 to nd - 1
+    nprs[d + 1] = sl[ob_y[first % 2] + d]
+  end
+  nprs[ax + 1] = totax
+  r = np_new(dt, nd, outer * totax * inner)
+  ir = r % 2
+  call np_shape_from_scratch r
+  pos = 0
+  do o = 0 to outer - 1
+    do i = 0 to n - 1
+      ai = sl[ob_p[lst % 2] + i]
+      chunk = sl[ob_y[ai % 2] + ax] * inner
+      do j = 0 to chunk - 1
+        call np_copyel r, pos, ai, o * chunk + j
+        pos = pos + 1
+      end
+    end
+  end
+  return r
+
+/* a copy of a with at least minnd dimensions (new axes in front) */
+np_atleast: procedure = .int
+  arg a = .int, minnd = .int
+  nd = .int
+  d = .int
+  nd = ob_x[a % 2]
+  if nd >= minnd then return a
+  nprn = minnd
+  do d = 1 to minnd - nd
+    nprs[d] = 1
+  end
+  do d = 1 to nd
+    nprs[minnd - nd + d] = sl[ob_y[a % 2] + d - 1]
+  end
+  return np_with_shape(a)
+
+/* list of arrays from an iterable of array-likes, each at least minnd dimensional */
+np_array_list: procedure = .int
+  arg v = .int, minnd = .int
+  l = .int
+  res = .int
+  i = .int
+  e = .int
+  l = iter_list(v)
+  if l = 0 then return 0
+  res = mklist(ob_n[l % 2])
+  do i = 0 to ob_n[l % 2] - 1
+    e = np_coerce(sl[ob_p[l % 2] + i])
+    if e = 0 then return 0
+    e = np_atleast(e, minnd)
+    call list_append res, e
+  end
+  return res
+
+np_where3: procedure = .int
+  arg c = .int, x = .int, y = .int
+  total = .int
+  i = .int
+  mc = .int
+  mx = .int
+  my = .int
+  jc = .int
+  jx = .int
+  jy = .int
+  r = .int
+  ir = .int
+  dt = .int
+  t = .int
+  call np_bs_init c
+  if np_bs_merge(c, x) = 0 then return 0
+  if np_bs_merge(c, y) = 0 then return 0
+  total = 1
+  do i = 1 to nprn
+    total = total * nprs[i]
+  end
+  dt = np_promote(ob_c[x % 2], ob_c[y % 2])
+  r = np_new(dt, nprn, total)
+  ir = r % 2
+  call np_shape_from_scratch r
+  mc = np_mode(c)
+  mx = np_mode(x)
+  my = np_mode(y)
+  if mc = 2 then call np_btab c, 1
+  if mx = 2 then call np_btab x, 2
+  if my = 2 then call np_btab y, 3
+  do i = 0 to total - 1
+    if mc = 0 then jc = i
+    else if mc = 1 then jc = 0
+    else jc = npta[i + 1]
+    t = 0
+    if ob_c[c % 2] = 2 then do
+      if npf[ob_p[c % 2] + jc] \= 0.0 then t = 1
+    end
+    else do
+      if sl[ob_p[c % 2] + jc] \= 0 then t = 1
+    end
+    if t = 1 then do
+      if mx = 0 then jx = i
+      else if mx = 1 then jx = 0
+      else jx = nptb[i + 1]
+      call np_copyel r, i, x, jx
+    end
+    else do
+      if my = 0 then jy = i
+      else if my = 1 then jy = 0
+      else jy = nptc[i + 1]
+      call np_copyel r, i, y, jy
+    end
+  end
+  return r
+
+/* tuple of index arrays of the non-zero elements */
+np_nonzero: procedure = .int
+  arg c = .int
+  ic = .int
+  nd = .int
+  n = .int
+  i = .int
+  cnt = .int
+  d = .int
+  tmp = .int
+  t = .int
+  res = .int
+  ar = .int
+  ok = .int
+  dims = .int[]
+  ic = c % 2
+  nd = ob_x[ic]
+  n = ob_n[ic]
+  cnt = 0
+  do i = 0 to n - 1
+    ok = 0
+    if ob_c[ic] = 2 then do
+      if npf[ob_p[ic] + i] \= 0.0 then ok = 1
+    end
+    else do
+      if sl[ob_p[ic] + i] \= 0 then ok = 1
+    end
+    if ok = 1 then do
+      cnt = cnt + 1
+      npsel[cnt] = i
+    end
+  end
+  if nd = 0 then nd = 1
+  res = mktuple(nd)
+  do d = 1 to nd
+    if ob_x[ic] = 0 then dims[d] = 1
+    else dims[d] = sl[ob_y[ic] + d - 1]
+    ar = np_new(1, 1, cnt)
+    sl[ob_y[ar % 2]] = cnt
+    sl[ob_p[res % 2] + d - 1] = ar
+  end
+  do t = 1 to cnt
+    tmp = npsel[t]
+    do d = nd to 1 by -1
+      ar = sl[ob_p[res % 2] + d - 1]
+      sl[ob_p[ar % 2] + t - 1] = tmp // dims[d]
+      tmp = tmp % dims[d]
+    end
+  end
+  return res
+
+np_eye: procedure = .int
+  arg n = .int, m = .int
+  r = .int
+  i = .int
+  ntnd = 2
+  nts[1] = n
+  nts[2] = m
+  r = np_make(2, 0, 0.0)
+  if r = 0 then return 0
+  do i = 0 to n - 1
+    if i < m then npf[ob_p[r % 2] + i * m + i] = 1.0
+  end
+  return r
+
+np_diag: procedure = .int
+  arg a = .int
+  ia = .int
+  nd = .int
+  n = .int
+  m = .int
+  r = .int
+  i = .int
+  l = .int
+  ia = a % 2
+  nd = ob_x[ia]
+  if nd = 1 then do
+    n = sl[ob_y[ia]]
+    ntnd = 2
+    nts[1] = n
+    nts[2] = n
+    r = np_make(ob_c[ia], 0, 0.0)
+    do i = 0 to n - 1
+      call np_copyel r, i * n + i, a, i
+    end
+    return r
+  end
+  if nd = 2 then do
+    m = sl[ob_y[ia]]
+    n = sl[ob_y[ia] + 1]
+    l = m
+    if n < l then l = n
+    r = np_new(ob_c[ia], 1, l)
+    sl[ob_y[r % 2]] = l
+    do i = 0 to l - 1
+      call np_copyel r, i, a, i * n + i
+    end
+    return r
+  end
+  return raise_exc(C_VALUEERROR, "Input must be 1- or 2-d.")
+
+/* reshape to the dimensions in nts[1..ntnd] (one of them may be -1) */
+np_reshape: procedure = .int
+  arg a = .int
+  size = .int
+  d = .int
+  neg = .int
+  known = .int
+  s = .string
+  size = ob_n[a % 2]
+  neg = 0
+  known = 1
+  do d = 1 to ntnd
+    if nts[d] = -1 then do
+      if neg > 0 then return raise_exc(C_VALUEERROR, "can only specify one unknown dimension")
+      neg = d
+    end
+    else known = known * nts[d]
+  end
+  s = "("
+  do d = 1 to ntnd
+    if d > 1 then s = s || ","
+    s = s || nts[d]
+  end
+  if ntnd = 1 then s = s || ","
+  s = s || ")"
+  if neg > 0 then do
+    if known = 0 then return raise_exc(C_VALUEERROR, "cannot reshape array of size " || size || " into shape " || s)
+    if size // known \= 0 then return raise_exc(C_VALUEERROR, "cannot reshape array of size " || size || " into shape " || s)
+    nts[neg] = size % known
+  end
+  else if known \= size then return raise_exc(C_VALUEERROR, "cannot reshape array of size " || size || " into shape " || s)
+  nprn = ntnd
+  do d = 1 to ntnd
+    nprs[d] = nts[d]
+  end
+  return np_with_shape(a)
+
+np_tl: procedure = .int
+  arg a = .int, d = .int, off = .int
+  ix = .int
+  nd = .int
+  n = .int
+  stride = .int
+  j = .int
+  l = .int
+  ix = a % 2
+  nd = ob_x[ix]
+  n = sl[ob_y[ix] + d]
+  stride = 1
+  do j = d + 1 to nd - 1
+    stride = stride * sl[ob_y[ix] + j]
+  end
+  l = mklist(n)
+  do j = 0 to n - 1
+    if d = nd - 1 then call list_append l, np_scalar(a, off + j)
+    else call list_append l, np_tl(a, d + 1, off + j * stride)
+  end
+  return l
+
+np_tolist: procedure = .int
+  arg a = .int
+  if ob_x[a % 2] = 0 then return np_scalar(a, 0)
+  return np_tl(a, 0, 0)
+
+np_allclose: procedure = .int
+  arg a = .int, b = .int, rtol = .float, atol = .float
+  total = .int
+  i = .int
+  ma = .int
+  mb = .int
+  ja = .int
+  jb = .int
+  x = .float
+  y = .float
+  df = .float
+  call np_bs_init a
+  if np_bs_merge(a, b) = 0 then return 0
+  total = 1
+  do i = 1 to nprn
+    total = total * nprs[i]
+  end
+  ma = np_mode(a)
+  mb = np_mode(b)
+  if ma = 2 then call np_btab a, 1
+  if mb = 2 then call np_btab b, 2
+  do i = 0 to total - 1
+    if ma = 0 then ja = i
+    else if ma = 1 then ja = 0
+    else ja = npta[i + 1]
+    if mb = 0 then jb = i
+    else if mb = 1 then jb = 0
+    else jb = nptb[i + 1]
+    x = np_getf(a, ja)
+    y = np_getf(b, jb)
+    if x \= x | y \= y then return FALSE_OOP
+    if x \= y then do
+      df = rxfloat..fabs(x - y)
+      if finf(x) \= 0 | finf(y) \= 0 then return FALSE_OOP
+      if df > atol + rtol * rxfloat..fabs(y) then return FALSE_OOP
+    end
+  end
+  return TRUE_OOP
+
+np_array_equal: procedure = .int
+  arg a = .int, b = .int
+  ia = .int
+  ib = .int
+  d = .int
+  i = .int
+  ia = a % 2
+  ib = b % 2
+  if ob_x[ia] \= ob_x[ib] then return FALSE_OOP
+  do d = 0 to ob_x[ia] - 1
+    if sl[ob_y[ia] + d] \= sl[ob_y[ib] + d] then return FALSE_OOP
+  end
+  do i = 0 to ob_n[ia] - 1
+    if ob_c[ia] = 2 | ob_c[ib] = 2 then do
+      if np_getf(a, i) \= np_getf(b, i) then return FALSE_OOP
+    end
+    else do
+      if sl[ob_p[ia] + i] \= sl[ob_p[ib] + i] then return FALSE_OOP
+    end
+  end
+  return TRUE_OOP
+
+np_clip: procedure = .int
+  arg a = .int, lo = .int, hi = .int
+  r = .int
+  r = a
+  if lo \= 0 & lo \= NONE_OOP then do
+    r = np_binop(O_MAXIMUM, r, lo)
+    if r = 0 then return 0
+  end
+  if hi \= 0 & hi \= NONE_OOP then do
+    r = np_binop(O_MINIMUM, r, hi)
+    if r = 0 then return 0
+  end
+  if r = a then return np_cast(a, ob_c[a % 2])
+  return r
+
+/* ---- axis / ddof arguments ---- */
+np_axisarg: procedure = .int
+  arg base = .int, na = .int, nk = .int, pos = .int
+  v = .int
+  w = .int
+  v = 0
+  if na >= pos then v = ast[base + pos]
+  w = kwarg(base, na, nk, "axis")
+  if w \= 0 then v = w
+  np_hasax = 0
+  np_axv = 0
+  np_ddof = 0
+  w = kwarg(base, na, nk, "ddof")
+  if w \= 0 then np_ddof = ival(w)
+  if v \= 0 & v \= NONE_OOP then do
+    if numkind(v) \= 1 then return raise_exc(C_TYPEERROR, "'" || type_name(v) || "' object cannot be interpreted as an integer")
+    np_hasax = 1
+    np_axv = ival(v)
+  end
+  return 1
+
+np_red_call: procedure = .int
+  arg a = .int, kind = .int, base = .int, na = .int, nk = .int, pos = .int
+  if np_axisarg(base, na, nk, pos) = 0 then return 0
+  return np_reduce(a, kind, np_hasax, np_axv)
+
+/* ---------------------------------------------------------------------
+   printing
+   --------------------------------------------------------------------- */
+np_rstrip: procedure = .string
+  arg s = .string
+  l = .int
+  l = length(s)
+  do while l > 0 & substr(s, l, 1) == " "
+    l = l - 1
+  end
+  if l = 0 then return ""
+  return left(s, l)
+
+/* shortest digits of the finite f >= 0: np_ds (no trailing zeros), np_de (decimal exponent of the first digit) */
+np_digits: procedure = .void
+  arg f = .float
+  n = .int
+  d = .string
+  dexp = .int
+  y = .float
+  ok = .int
+  l = .int
+  if f = 0.0 then do
+    np_ds = "0"
+    np_de = 0
+    return
+  end
+  ok = 0
+  dexp = 0
+  d = ""
+  do n = 15 to 17
+    d = float_digits(f, n)
+    dexp = fx_e
+    if n = 17 | dexp < -300 then ok = 1
+    else do
+      y = (left(d, 1) || "." || substr(d, 2) || "e" || dexp) as .float
+      if y = f then ok = 1
+    end
+    if ok = 1 then leave
+  end
+  l = length(d)
+  do while l > 1 & substr(d, l, 1) == "0"
+    l = l - 1
+  end
+  np_ds = left(d, l)
+  np_de = dexp
+  return
+
+/* positional format: np_ip (sign and integer digits), np_fp (fraction digits, at most 8) */
+np_pos: procedure = .void
+  arg f = .float
+  af = .float
+  neg = .int
+  nf = .int
+  s = .string
+  p = .int
+  l = .int
+  neg = 0
+  af = f
+  if f < 0.0 then do
+    neg = 1
+    af = 0.0 - f
+  end
+  else if f = 0.0 then do
+    if fl_negzero(f) = 1 then neg = 1
+  end
+  call np_digits af
+  nf = length(np_ds) - 1 - np_de
+  if nf < 0 then nf = 0
+  if nf > 8 then do
+    s = float_fixed(af, 8)
+    p = pos(".", s)
+    np_ip = left(s, p - 1)
+    np_fp = substr(s, p + 1)
+    l = length(np_fp)
+    do while l > 0 & substr(np_fp, l, 1) == "0"
+      l = l - 1
+    end
+    if l = 0 then np_fp = ""
+    else np_fp = left(np_fp, l)
+  end
+  else if np_de >= 0 then do
+    if length(np_ds) <= np_de + 1 then do
+      np_ip = np_ds || copies("0", np_de + 1 - length(np_ds))
+      np_fp = ""
+    end
+    else do
+      np_ip = left(np_ds, np_de + 1)
+      np_fp = substr(np_ds, np_de + 2)
+    end
+  end
+  else do
+    np_ip = "0"
+    np_fp = copies("0", 0 - np_de - 1) || np_ds
+  end
+  if neg = 1 then np_ip = "-" || np_ip
+  return
+
+/* scientific format: np_ip, np_fp (at most 8 digits), np_es ("e+05") */
+np_expo: procedure = .void
+  arg f = .float
+  af = .float
+  neg = .int
+  ds = .string
+  de = .int
+  d9 = .string
+  l = .int
+  es = .string
+  ee = .string
+  neg = 0
+  af = f
+  if f < 0.0 then do
+    neg = 1
+    af = 0.0 - f
+  end
+  else if f = 0.0 then do
+    if fl_negzero(f) = 1 then neg = 1
+  end
+  call np_digits af
+  ds = np_ds
+  de = np_de
+  if length(ds) > 9 then do
+    d9 = float_digits(af, 9)
+    de = fx_e
+    l = length(d9)
+    do while l > 1 & substr(d9, l, 1) == "0"
+      l = l - 1
+    end
+    ds = left(d9, l)
+  end
+  np_ip = left(ds, 1)
+  np_fp = substr(ds, 2)
+  if neg = 1 then np_ip = "-" || np_ip
+  if de < 0 then es = "-"
+  else es = "+"
+  ee = abs(de) as .string
+  if length(ee) < 2 then ee = "0" || ee
+  np_es = "e" || es || ee
+  return
+
+/* format all elements of c into npes[1..size] with numpy's common padding */
+np_fmt_all: procedure = .void
+  arg c = .int
+  ic = .int
+  n = .int
+  dt = .int
+  p = .int
+  i = .int
+  v = .int
+  w = .int
+  s = .string
+  f = .float
+  af = .float
+  maxv = .float
+  minv = .float
+  hasnz = .int
+  expf = .int
+  padl = .int
+  padr = .int
+  wnf = .int
+  fr = .string
+  ic = c % 2
+  n = ob_n[ic]
+  dt = ob_c[ic]
+  p = ob_p[ic]
+  if dt = 3 then do
+    do i = 1 to n
+      if sl[p + i - 1] \= 0 then npes[i] = " True"
+      else npes[i] = "False"
+    end
+    return
+  end
+  if dt = 1 then do
+    w = 0
+    do i = 1 to n
+      v = sl[p + i - 1]
+      s = v as .string
+      npes[i] = s
+      if length(s) > w then w = length(s)
+    end
+    do i = 1 to n
+      npes[i] = right(npes[i], w)
+    end
+    return
+  end
+  hasnz = 0
+  maxv = 0.0
+  minv = 0.0
+  do i = 1 to n
+    f = npf[p + i - 1]
+    if f \= f then iterate
+    if finf(f) \= 0 then iterate
+    af = rxfloat..fabs(f)
+    if af \= 0.0 then do
+      if hasnz = 0 then do
+        maxv = af
+        minv = af
+        hasnz = 1
+      end
+      else do
+        if af > maxv then maxv = af
+        if af < minv then minv = af
+      end
+    end
+  end
+  expf = 0
+  if hasnz = 1 then do
+    if maxv >= 100000000.0 then expf = 1
+    else if minv < 0.0001 then expf = 1
+    else if maxv / minv > 1000.0 then expf = 1
+  end
+  padl = 0
+  padr = 0
+  do i = 1 to n
+    f = npf[p + i - 1]
+    npnf[i] = 0
+    if f \= f then do
+      npnf[i] = 1
+      npip[i] = "nan"
+      iterate
+    end
+    if finf(f) = 1 then do
+      npnf[i] = 1
+      npip[i] = "inf"
+      iterate
+    end
+    if finf(f) = 2 then do
+      npnf[i] = 1
+      npip[i] = "-inf"
+      iterate
+    end
+    if expf = 1 then call np_expo f
+    else do
+      call np_pos f
+      np_es = ""
+    end
+    npip[i] = np_ip
+    npfp[i] = np_fp
+    npxp[i] = np_es
+    if length(np_ip) > padl then padl = length(np_ip)
+    if length(np_fp) > padr then padr = length(np_fp)
+  end
+  wnf = padl + 1 + padr
+  if expf = 1 then wnf = wnf + 4
+  do i = 1 to n
+    if npnf[i] = 1 then npes[i] = right(npip[i], wnf)
+    else do
+      fr = npfp[i]
+      if padr = 0 then fr = ""
+      else if expf = 1 then fr = left(fr, padr, "0")
+      else fr = left(fr, padr)
+      npes[i] = right(npip[i], padl) || "." || fr || npxp[i]
+    end
+  end
+  return
+
+/* the nested layout of numpy's array2string (axis is 1-based, off the flat offset of the sub-array) */
+np_lay: procedure = .string
+  arg axis = .int, off = .int, hang = .string, curw = .int
+  axl = .int
+  cnt = .int
+  nxt = .string
+  nextw = .int
+  stride = .int
+  s = .string
+  line = .string
+  word = .string
+  elemw = .int
+  j = .int
+  linesep = .string
+  nested = .string
+  axl = npnd - axis + 1
+  cnt = npls[axis]
+  nxt = hang || " "
+  nextw = curw - 1
+  stride = npstr[axis]
+  elemw = curw - 1
+  s = ""
+  if axl = 1 then do
+    line = hang
+    do j = 0 to cnt - 1
+      if npsm[axis] = 1 & j = 3 then do
+        word = "..."
+        if length(line) + length(word) > elemw & length(line) > length(hang) then do
+          s = s || np_rstrip(line) || '0a'x
+          line = hang
+        end
+        line = line || word || np_sep
+      end
+      word = npes[off + j * stride + 1]
+      if length(line) + length(word) > elemw & length(line) > length(hang) then do
+        s = s || np_rstrip(line) || '0a'x
+        line = hang
+      end
+      line = line || word
+      if j < cnt - 1 then line = line || np_sep
+    end
+    s = s || line
+  end
+  else do
+    linesep = np_rstrip(np_sep) || copies('0a'x, axl - 1)
+    do j = 0 to cnt - 1
+      if npsm[axis] = 1 & j = 3 then s = s || hang || "..." || linesep
+      nested = np_lay(axis + 1, off + j * stride, nxt, nextw)
+      s = s || hang || nested
+      if j < cnt - 1 then s = s || linesep
+    end
+  end
+  return "[" || substr(s, length(hang) + 1) || "]"
+
+/* the array with at most 3 leading and trailing items per long axis; marks them in npsm */
+np_condense: procedure = .int
+  arg a = .int
+  ia = .int
+  nd = .int
+  d = .int
+  dimn = .int
+  tq = .int
+  c = .int
+  ia = a % 2
+  nd = ob_x[ia]
+  tq = 0
+  do d = 1 to nd + 1
+    npnb[d] = 0
+  end
+  do d = 1 to nd
+    dimn = sl[ob_y[ia] + d - 1]
+    npco[d] = tq + 1
+    npcd[d] = 0
+    if dimn > 6 then do
+      npsm[d] = 1
+      npcat[tq + 1] = 0
+      npcat[tq + 2] = 1
+      npcat[tq + 3] = 2
+      npcat[tq + 4] = dimn - 3
+      npcat[tq + 5] = dimn - 2
+      npcat[tq + 6] = dimn - 1
+      npcc[d] = 6
+      tq = tq + 6
+    end
+    else do
+      do c = 0 to dimn - 1
+        npcat[tq + 1 + c] = c
+      end
+      npcc[d] = dimn
+      tq = tq + dimn
+    end
+  end
+  call np_sel_build a
+  return np_gather(a)
+
+np_str_core: procedure = .string
+  arg a = .int, sepv = .string, hang = .string, w = .int
+  c = .int
+  ic = .int
+  ia = .int
+  nd = .int
+  d = .int
+  st = .int
+  ia = a % 2
+  nd = ob_x[ia]
+  if ob_n[ia] = 0 then return "[]"
+  np_sep = sepv
+  npnd = nd
+  do d = 1 to nd
+    npsm[d] = 0
+  end
+  c = a
+  if ob_n[ia] > 1000 then c = np_condense(a)
+  call np_fmt_all c
+  ic = c % 2
+  st = 1
+  do d = nd to 1 by -1
+    npls[d] = sl[ob_y[ic] + d - 1]
+    npstr[d] = st
+    st = st * npls[d]
+  end
+  return np_lay(1, 0, hang, w)
+
+np_str: procedure = .string
+  arg a = .int
+  if ob_x[a % 2] = 0 then return repr_of(np_scalar(a, 0))
+  return np_str_core(a, " ", " ", 75)
+
+np_repr: procedure = .string
+  arg a = .int
+  if ob_x[a % 2] = 0 then return "array(" || repr_of(np_scalar(a, 0)) || ")"
+  if ob_n[a % 2] = 0 then return "array([], dtype=" || np_dtname(ob_c[a % 2]) || ")"
+  return "array(" || np_str_core(a, ", ", copies(" ", 7), 74) || ")"
+
+/* ---------------------------------------------------------------------
+   methods of ndarray
+   --------------------------------------------------------------------- */
+np_attr: procedure = .int
+  arg o = .int, nid = .int
+  if nid = M_SHAPE then return np_shape_tuple(o)
+  if nid = M_NDIM then return mkint(ob_x[o % 2])
+  if nid = M_SIZE then return mkint(ob_n[o % 2])
+  if nid = M_DTYPE then return mkstr(np_dtname(ob_c[o % 2]))
+  if nid = np_nidT then return np_transpose(o)
+  if nid = M_REAL then return o
+  return 0
+
+meth_arr: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  dt = .int
+  w = .int
+  r = .int
+  i = .int
+  s = .int
+  v = .int
+  select
+    when nid = M_TOLIST then return np_tolist(o)
+    when nid = M_COPY then return np_cast(o, ob_c[o % 2])
+    when nid = M_RESHAPE then do
+      if na = 0 then return nargs_err("reshape", 0, 1, 1)
+      if np_dims(base, 1, na) = 0 then return 0
+      return np_reshape(o)
+    end
+    when nid = M_FLATTEN | nid = M_RAVEL then return np_flat(o)
+    when nid = M_ASTYPE then do
+      if na < 1 then return nargs_err("astype", na, 1, 1)
+      dt = np_dtype_of(ast[base + 1])
+      if dt = 0 then return 0
+      return np_cast(o, dt)
+    end
+    when nid = M_SUM then return np_red_call(o, 1, base, na, nk, 1)
+    when nid = M_MEAN then return np_red_call(o, 2, base, na, nk, 1)
+    when nid = M_MIN then return np_red_call(o, 3, base, na, nk, 1)
+    when nid = M_MAX then return np_red_call(o, 4, base, na, nk, 1)
+    when nid = M_PROD then return np_red_call(o, 5, base, na, nk, 1)
+    when nid = M_ARGMAX then return np_red_call(o, 6, base, na, nk, 1)
+    when nid = M_ARGMIN then return np_red_call(o, 7, base, na, nk, 1)
+    when nid = M_CUMSUM then return np_red_call(o, 8, base, na, nk, 1)
+    when nid = M_ANY then return np_red_call(o, 9, base, na, nk, 1)
+    when nid = M_ALL then return np_red_call(o, 10, base, na, nk, 1)
+    when nid = M_STD then return np_red_call(o, 11, base, na, nk, 1)
+    when nid = M_VAR then return np_red_call(o, 12, base, na, nk, 1)
+    when nid = M_ROUND then do
+      w = 0
+      if na >= 1 then w = ival(ast[base + 1])
+      v = kwarg(base, na, nk, "decimals")
+      if v \= 0 then w = ival(v)
+      return np_round_arr(o, w)
+    end
+    when nid = M_DOT then do
+      if na < 1 then return nargs_err("dot", na, 1, 1)
+      r = np_coerce(ast[base + 1])
+      if r = 0 then return 0
+      return np_dot(o, r)
+    end
+    when nid = M_CLIP then do
+      if na < 1 then return nargs_err("clip", na, 1, 2)
+      if na >= 2 then return np_clip(o, ast[base + 1], ast[base + 2])
+      return np_clip(o, ast[base + 1], 0)
+    end
+    when nid = M_TRANSPOSE then return np_transpose(o)
+    when nid = M_SORT then do
+      r = np_sort(o, 1, -1)
+      if r = 0 then return 0
+      do i = 0 to ob_n[o % 2] - 1
+        call np_copyel o, i, r, i
+      end
+      return NONE_OOP
+    end
+    when nid = M_FILL then do
+      if na < 1 then return nargs_err("fill", na, 1, 1)
+      r = np_coerce(ast[base + 1])
+      if r = 0 then return 0
+      do i = 0 to ob_n[o % 2] - 1
+        call np_copyel o, i, r, 0
+      end
+      return NONE_OOP
+    end
+    when nid = M_ITEM then do
+      if ob_n[o % 2] \= 1 then return raise_exc(C_VALUEERROR, "can only convert an array of size 1 to a Python scalar")
+      return np_scalar(o, 0)
+    end
+    otherwise nop
+  end
+  return meth_common(o, nid, base, na, nk)
+
+/* ---------------------------------------------------------------------
+   module functions
+   --------------------------------------------------------------------- */
+np_dt_arg: procedure = .int
+  arg base = .int, na = .int, nk = .int, pos = .int, dflt = .int
+  w = .int
+  w = kwarg(base, na, nk, "dtype")
+  if w = 0 & na >= pos then w = ast[base + pos]
+  if w = 0 | w = NONE_OOP then return dflt
+  return np_dtype_of(w)
+
+bcall_np: procedure = .int
+  arg bid = .int, base = .int, na = .int, nk = .int
+  a = .int
+  b = .int
+  r = .int
+  v = .int
+  w = .int
+  i = .int
+  j = .int
+  n = .int
+  dt = .int
+  c = .int
+  fi = .int
+  x = .float
+  y = .float
+  z = .float
+  stp = .float
+  rtl = .float
+  atl = .float
+  l = .int
+  isf = .int
+  select
+    when bid = BI_NUMPY_ARRAY | bid = BI_NUMPY_ASARRAY then do
+      if na < 1 then return nargs_err("array", na, 1, 2)
+      v = ast[base + 1]
+      if bid = BI_NUMPY_ASARRAY & kind_of(v) = K_ARRAY then r = v
+      else if kind_of(v) = K_ARRAY then r = np_cast(v, ob_c[v % 2])
+      else r = np_from_obj(v)
+      if r = 0 then return 0
+      dt = np_dt_arg(base, na, nk, 2, -1)
+      if dt = 0 then return 0
+      if dt > 0 then r = np_cast(r, dt)
+      return r
+    end
+    when bid = BI_NUMPY_ZEROS | bid = BI_NUMPY_ONES | bid = BI_NUMPY_EMPTY then do
+      if na < 1 then return nargs_err("zeros", na, 1, 2)
+      if np_dims(base, 1, 1) = 0 then return 0
+      dt = np_dt_arg(base, na, nk, 2, 2)
+      if dt = 0 then return 0
+      fi = 0
+      z = 0.0
+      if bid = BI_NUMPY_ONES then do
+        fi = 1
+        z = 1.0
+      end
+      return np_make(dt, fi, z)
+    end
+    when bid = BI_NUMPY_FULL then do
+      if na < 2 then return nargs_err("full", na, 2, 3)
+      if np_dims(base, 1, 1) = 0 then return 0
+      v = ast[base + 2]
+      if numkind(v) = 0 then return raise_exc(C_TYPEERROR, "full() fill value must be a number")
+      dt = 1
+      if numkind(v) >= 2 then dt = 2
+      else if kind_of(v) = K_BOOL then dt = 3
+      w = np_dt_arg(base, na, nk, 3, -1)
+      if w = 0 then return 0
+      if w > 0 then dt = w
+      fi = 0
+      z = 0.0
+      if numkind(v) >= 2 then do
+        z = tofloat(v)
+        if dt \= 2 then do
+          fi = np_f2i(z)
+          if dt = 3 & z \= 0.0 then fi = 1
+        end
+      end
+      else do
+        fi = ival(v)
+        z = fi as .float
+      end
+      if dt = 3 & fi \= 0 then fi = 1
+      return np_make(dt, fi, z)
+    end
+    when bid = BI_NUMPY_ZEROS_LIKE | bid = BI_NUMPY_ONES_LIKE | bid = BI_NUMPY_FULL_LIKE then do
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      ntnd = ob_x[a % 2]
+      do i = 1 to ntnd
+        nts[i] = sl[ob_y[a % 2] + i - 1]
+      end
+      dt = ob_c[a % 2]
+      fi = 0
+      z = 0.0
+      if bid = BI_NUMPY_ONES_LIKE then do
+        fi = 1
+        z = 1.0
+      end
+      if bid = BI_NUMPY_FULL_LIKE then do
+        v = ast[base + 2]
+        if numkind(v) >= 2 then do
+          z = tofloat(v)
+          fi = np_f2i(z)
+        end
+        else do
+          fi = ival(v)
+          z = fi as .float
+        end
+      end
+      if dt = 3 & fi \= 0 then fi = 1
+      return np_make(dt, fi, z)
+    end
+    when bid = BI_NUMPY_EYE | bid = BI_NUMPY_IDENTITY then do
+      if numkind(ast[base + 1]) \= 1 then return raise_exc(C_TYPEERROR, "'" || type_name(ast[base + 1]) || "' object cannot be interpreted as an integer")
+      n = ival(ast[base + 1])
+      j = n
+      if na >= 2 & bid = BI_NUMPY_EYE then do
+        if ast[base + 2] \= NONE_OOP then j = ival(ast[base + 2])
+      end
+      return np_eye(n, j)
+    end
+    when bid = BI_NUMPY_ARANGE then do
+      if na < 1 then return nargs_err("arange", na, 1, 3)
+      isf = 0
+      do i = 1 to na
+        if numkind(ast[base + i]) = 0 then return raise_exc(C_TYPEERROR, "unsupported operand type for arange: '" || type_name(ast[base + i]) || "'")
+        if numkind(ast[base + i]) >= 2 then isf = 1
+      end
+      if na = 1 then do
+        x = 0.0
+        y = tofloat(ast[base + 1])
+        stp = 1.0
+      end
+      else do
+        x = tofloat(ast[base + 1])
+        y = tofloat(ast[base + 2])
+        stp = 1.0
+        if na >= 3 then stp = tofloat(ast[base + 3])
+      end
+      if stp = 0.0 then return raise_exc(C_ZERODIVISIONERROR, "division by zero")
+      if isf = 0 then do
+        w = 0
+        if na >= 2 then w = ival(ast[base + 1])
+        if na = 1 then n = ival(ast[base + 1])
+        else n = ival(ast[base + 2])
+        c = 1
+        if na >= 3 then c = ival(ast[base + 3])
+        if c > 0 then do
+          if n > w then j = (n - w + c - 1) % c
+          else j = 0
+        end
+        else do
+          if w > n then j = (w - n - c - 1) % (0 - c)
+          else j = 0
+        end
+        r = np_new(1, 1, j)
+        sl[ob_y[r % 2]] = j
+        do i = 0 to j - 1
+          sl[ob_p[r % 2] + i] = w + i * c
+        end
+      end
+      else do
+        z = rxfloat..ceil((y - x) / stp)
+        if z <= 0.0 then j = 0
+        else j = np_f2i(z)
+        r = np_new(2, 1, j)
+        sl[ob_y[r % 2]] = j
+        rtl = (x + stp) - x
+        do i = 0 to j - 1
+          npf[ob_p[r % 2] + i] = x + (i as .float) * rtl
+        end
+      end
+      dt = np_dt_arg(base, na, nk, 99, -1)
+      if dt = 0 then return 0
+      if dt > 0 then r = np_cast(r, dt)
+      return r
+    end
+    when bid = BI_NUMPY_LINSPACE then do
+      if na < 2 then return nargs_err("linspace", na, 2, 3)
+      x = mf(ast[base + 1])
+      y = mf(ast[base + 2])
+      if unw > 0 then return 0
+      n = 50
+      if na >= 3 then n = ival(ast[base + 3])
+      v = kwarg(base, na, nk, "num")
+      if v \= 0 then n = ival(v)
+      c = 1
+      v = kwarg(base, na, nk, "endpoint")
+      if v \= 0 then c = truthy(v)
+      if n < 0 then return raise_exc(C_VALUEERROR, "Number of samples, " || n || ", must be non-negative.")
+      r = np_new(2, 1, n)
+      sl[ob_y[r % 2]] = n
+      if c = 1 then j = n - 1
+      else j = n
+      if j > 0 then do
+        stp = (y - x) / (j as .float)
+        do i = 0 to n - 1
+          npf[ob_p[r % 2] + i] = (i as .float) * stp + x
+        end
+        if c = 1 then npf[ob_p[r % 2] + n - 1] = y
+      end
+      else if n = 1 then npf[ob_p[r % 2]] = x
+      return r
+    end
+    when bid = BI_NUMPY_SQRT | bid = BI_NUMPY_ABS | bid = BI_NUMPY_EXP | bid = BI_NUMPY_SIN | bid = BI_NUMPY_COS | bid = BI_NUMPY_TAN | bid = BI_NUMPY_LOG | bid = BI_NUMPY_LOG10 | bid = BI_NUMPY_LOG2 | bid = BI_NUMPY_FLOOR | bid = BI_NUMPY_CEIL | bid = BI_NUMPY_SQUARE | bid = BI_NUMPY_ISNAN then do
+      if na < 1 then return nargs_err("ufunc", na, 1, 1)
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      r = np_math1(bid, a)
+      if r = 0 then return 0
+      if ob_x[r % 2] = 0 then return np_scalar(r, 0)
+      return r
+    end
+    when bid = BI_NUMPY_WHERE then do
+      if na = 1 then do
+        a = np_coerce(ast[base + 1])
+        if a = 0 then return 0
+        return np_nonzero(a)
+      end
+      if na \= 3 then return nargs_err("where", na, 3, 3)
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      b = np_coerce(ast[base + 2])
+      if b = 0 then return 0
+      c = np_coerce(ast[base + 3])
+      if c = 0 then return 0
+      return np_where3(a, b, c)
+    end
+    when bid = BI_NUMPY_CONCATENATE then do
+      if na < 1 then return nargs_err("concatenate", na, 1, 2)
+      l = np_array_list(ast[base + 1], 0)
+      if l = 0 then return 0
+      w = 0
+      if na >= 2 then w = ival(ast[base + 2])
+      v = kwarg(base, na, nk, "axis")
+      if v \= 0 then w = ival(v)
+      return np_concat(l, w)
+    end
+    when bid = BI_NUMPY_VSTACK then do
+      l = np_array_list(ast[base + 1], 2)
+      if l = 0 then return 0
+      return np_concat(l, 0)
+    end
+    when bid = BI_NUMPY_HSTACK then do
+      l = np_array_list(ast[base + 1], 1)
+      if l = 0 then return 0
+      if ob_n[l % 2] > 0 then do
+        if ob_x[sl[ob_p[l % 2]] % 2] = 1 then return np_concat(l, 0)
+      end
+      return np_concat(l, 1)
+    end
+    when bid = BI_NUMPY_SORT then do
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      w = -1
+      c = 1
+      v = 0
+      if na >= 2 then v = ast[base + 2]
+      if kwarg(base, na, nk, "axis") \= 0 then v = kwarg(base, na, nk, "axis")
+      if v = NONE_OOP then c = 0
+      else if v \= 0 then w = ival(v)
+      return np_sort(a, c, w)
+    end
+    when bid = BI_NUMPY_UNIQUE then do
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      return np_unique(a)
+    end
+    when bid = BI_NUMPY_DOT | bid = BI_NUMPY_MATMUL then do
+      if na < 2 then return nargs_err("dot", na, 2, 2)
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      b = np_coerce(ast[base + 2])
+      if b = 0 then return 0
+      return np_dot(a, b)
+    end
+    when bid = BI_NUMPY_TRANSPOSE then do
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      return np_transpose(a)
+    end
+    when bid = BI_NUMPY_DIAG then do
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      return np_diag(a)
+    end
+    when bid = BI_NUMPY_TRACE then do
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      if ob_x[a % 2] \= 2 then return raise_exc(C_VALUEERROR, "diag requires an array of at least two dimensions")
+      b = np_diag(a)
+      if b = 0 then return 0
+      return np_reduce(b, 1, 0, 0)
+    end
+    when bid = BI_NUMPY_MAXIMUM | bid = BI_NUMPY_MINIMUM | bid = BI_NUMPY_POWER then do
+      if na < 2 then return nargs_err("ufunc", na, 2, 2)
+      if bid = BI_NUMPY_MAXIMUM then w = O_MAXIMUM
+      else if bid = BI_NUMPY_MINIMUM then w = O_MINIMUM
+      else w = O_POW
+      return np_binop(w, ast[base + 1], ast[base + 2])
+    end
+    when bid = BI_NUMPY_CLIP then do
+      if na < 3 then return nargs_err("clip", na, 3, 3)
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      return np_clip(a, ast[base + 2], ast[base + 3])
+    end
+    when bid = BI_NUMPY_ALLCLOSE then do
+      if na < 2 then return nargs_err("allclose", na, 2, 4)
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      b = np_coerce(ast[base + 2])
+      if b = 0 then return 0
+      rtl = 0.00001
+      atl = 0.00000001
+      if na >= 3 then rtl = mf(ast[base + 3])
+      if na >= 4 then atl = mf(ast[base + 4])
+      v = kwarg(base, na, nk, "rtol")
+      if v \= 0 then rtl = mf(v)
+      v = kwarg(base, na, nk, "atol")
+      if v \= 0 then atl = mf(v)
+      if unw > 0 then return 0
+      return np_allclose(a, b, rtl, atl)
+    end
+    when bid = BI_NUMPY_ARRAY_EQUAL then do
+      if na < 2 then return nargs_err("array_equal", na, 2, 2)
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      b = np_coerce(ast[base + 2])
+      if b = 0 then return 0
+      return np_array_equal(a, b)
+    end
+    when bid = BI_NUMPY_MEDIAN then do
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      return np_median(a)
+    end
+    when bid = BI_NUMPY_ROUND then do
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      w = 0
+      if na >= 2 then w = ival(ast[base + 2])
+      v = kwarg(base, na, nk, "decimals")
+      if v \= 0 then w = ival(v)
+      r = np_round_arr(a, w)
+      if r = 0 then return 0
+      if ob_x[r % 2] = 0 then return np_scalar(r, 0)
+      return r
+    end
+    when bid = BI_NUMPY_RESHAPE then do
+      if na < 2 then return nargs_err("reshape", na, 2, 2)
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      if np_dims(base, 2, na - 1) = 0 then return 0
+      return np_reshape(a)
+    end
+    when bid = BI_NUMPY_RAVEL then do
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      return np_flat(a)
+    end
+    when bid = BI_NUMPY_SUM | bid = BI_NUMPY_MEAN | bid = BI_NUMPY_MIN | bid = BI_NUMPY_MAX | bid = BI_NUMPY_PROD | bid = BI_NUMPY_ARGMAX | bid = BI_NUMPY_ARGMIN | bid = BI_NUMPY_CUMSUM | bid = BI_NUMPY_ANY | bid = BI_NUMPY_ALL | bid = BI_NUMPY_STD | bid = BI_NUMPY_VAR then do
+      if na < 1 then return nargs_err("reduction", na, 1, 2)
+      a = np_coerce(ast[base + 1])
+      if a = 0 then return 0
+      if bid = BI_NUMPY_SUM then w = 1
+      else if bid = BI_NUMPY_MEAN then w = 2
+      else if bid = BI_NUMPY_MIN then w = 3
+      else if bid = BI_NUMPY_MAX then w = 4
+      else if bid = BI_NUMPY_PROD then w = 5
+      else if bid = BI_NUMPY_ARGMAX then w = 6
+      else if bid = BI_NUMPY_ARGMIN then w = 7
+      else if bid = BI_NUMPY_CUMSUM then w = 8
+      else if bid = BI_NUMPY_ANY then w = 9
+      else if bid = BI_NUMPY_ALL then w = 10
+      else if bid = BI_NUMPY_STD then w = 11
+      else w = 12
+      return np_red_call(a, w, base, na, nk, 2)
+    end
+    otherwise nop
+  end
+  return raise_exc(C_TYPEERROR, "unsupported numpy function")

@@ -15,6 +15,7 @@ static Module *new_module(const char *name)
 static Value find_module(Str *nm)
 {
     int i;
+    if (nm->len == 5 && memcmp(nm->s, "numpy", 5) == 0) np_float_methods();
     for (i = 0; i < nmodules; i++)
         if (modules[i]->name == nm) return mkobj(modules[i], T_MODULE);
     return UNSET_V;
@@ -620,6 +621,7 @@ static void init_runtime(int argc, char **argv)
     mod_val(m, "tau", mkfloat(6.28318530717958647692));
     mod_val(m, "inf", mkfloat(HUGE_VAL));
     mod_val(m, "nan", mkfloat(HUGE_VAL - HUGE_VAL));
+    np_init();
     m = new_module("random");
     mod_def(m, "seed", r_seed); mod_def(m, "random", r_random); mod_def(m, "randint", r_randint);
     mod_def(m, "randrange", r_randrange); mod_def(m, "uniform", r_uniform);

@@ -26,9 +26,10 @@ Uncaught exceptions print a traceback and exit with status 1.
     src/p5_eval.c   evaluator, calls, generators, classes, exceptions
     src/p7_fmt.c    format mini-language, % formatting, str.format, f-strings
     src/p7_bi.c     builtins and methods of str/list/dict/set/tuple/int/float
+    src/p7_np.c     numpy subset: native ndarray, ufuncs, reductions, indexing, printing
     src/p7_mod.c    math, random, sys, time; exception hierarchy
     src/p8_main.c   REPL and command line
-    bench/          fib, loop, collections, strings + run.sh
+    bench/          fib, loop, collections, strings, numpy_bench + run.sh
 
 ## Portability rules
 
@@ -53,5 +54,20 @@ Strings are bytes (len/index count UTF-8 bytes, case ops ASCII only); single
 inheritance; `x = yield`, send/throw unsupported (yield is statement-level);
 no generator finalization; dict views are list snapshots; sets iterate in
 insertion order; `& | ^` on huge ints unsupported; no bytes, walrus, match,
-async or file imports; modules limited to math/random/sys/time; random does
+async or file imports; modules limited to math/random/sys/time/numpy; random does
 not reproduce CPython's sequence.
+
+## numpy subset (src/p7_np.c)
+
+`import numpy as np` gives a native `ndarray` (bool/int64/float64, up to 8 dims, row-major,
+heap type `T_ND`) with broadcasting arithmetic and comparisons, `@`, indexing (ints, slices,
+tuples, boolean masks, integer lists) and element/slice assignment, reductions with `axis`,
+sort/unique/where/concatenate/stack, `dot`/`matmul` (1-d and 2-d), ufuncs, and numpy's
+`print`/`repr` layout (line wrapping at 75 columns, `...` summaries above 1000 elements,
+scientific notation rules). Float sums use numpy's pairwise summation, so they match bit
+for bit. Gaps: slices, `reshape`, `T` and `b[0]` are copies, not views (`b[0][1] = x` does not
+modify `b`); no `dtype` objects (`a.dtype` is a string, `np.float64` is the builtin `float`),
+no float32/int32, no `np.random`/`np.linalg`, N-d `matmul` and multi-array fancy indexing
+are unsupported, `a.round()` on reduction results works through a `float.round` method that
+is installed on `import numpy`; float matmul does not use BLAS so it can differ in the last
+digits from numpy.

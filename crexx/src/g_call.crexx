@@ -433,6 +433,10 @@ getattr_obj: procedure = .int
     if nid = M_NAME then return mkstr(ob_s[o % 2])
     if nid = M_CLOSED then return mkbool(ob_c[o % 2])
   end
+  if k = K_ARRAY then do
+    v = np_attr(o, nid)
+    if v \= 0 then return v
+  end
   return mkbmethb(o, nid)
 
 inst_dict: procedure = .int
@@ -505,7 +509,7 @@ getattr_call: procedure = .int
     end
     return getattr_obj(o, nid, 0)
   end
-  if k = K_STR | k = K_LIST | k = K_DICT | k = K_TUPLE | k = K_SET | k = K_FLOAT | k = K_INT | k = K_BIG | k = K_BOOL | k = K_GEN | k = K_FILE | k = K_RANGE then do
+  if k = K_STR | k = K_LIST | k = K_DICT | k = K_TUPLE | k = K_SET | k = K_FLOAT | k = K_INT | k = K_BIG | k = K_BOOL | k = K_GEN | k = K_FILE | k = K_RANGE | k = K_ARRAY then do
     if nid = M___CLASS__ | nid = M___NAME__ then return getattr_obj(o, nid, 0)
     if (k = K_INT | k = K_BIG | k = K_BOOL | k = K_FLOAT) & (nid = M_REAL | nid = M_IMAG) then return getattr_obj(o, nid, 0)
     ev_bm = 1
