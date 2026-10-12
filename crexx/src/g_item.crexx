@@ -323,9 +323,13 @@ setslice: procedure = .void
     do i = sl_a + sl_n to n - 1
       call list_append newl, sl[ob_p[o % 2] + i]
     end
+    call orphan_block ob_p[o % 2], ob_x[o % 2]
     ob_p[o % 2] = ob_p[newl % 2]
     ob_n[o % 2] = ob_n[newl % 2]
     ob_x[o % 2] = ob_x[newl % 2]
+    ob_p[newl % 2] = 0
+    ob_n[newl % 2] = 0
+    ob_x[newl % 2] = 0
     return
   end
   if ob_n[src % 2] \= sl_n then do
@@ -379,9 +383,13 @@ delitem: procedure = .void
         end
         if j = 0 then call list_append newl, sl[ob_p[o % 2] + i]
       end
+      call orphan_block ob_p[o % 2], ob_x[o % 2]
       ob_p[o % 2] = ob_p[newl % 2]
       ob_n[o % 2] = ob_n[newl % 2]
       ob_x[o % 2] = ob_x[newl % 2]
+      ob_p[newl % 2] = 0
+      ob_n[newl % 2] = 0
+      ob_x[newl % 2] = 0
       return
     end
     i = idx_int(ix)

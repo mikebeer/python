@@ -18,6 +18,7 @@ alloc_frame: procedure = .int
 
 free_frame: procedure = .void
   arg fb = .int, size = .int
+  if size > maxfs then maxfs = size
   vp[fb] = fl_head[size]
   fl_head[size] = fb
   return
@@ -225,6 +226,7 @@ callfunc: procedure = .int
   fx = .int
   mi = .int
   sv_g = .int
+  pm = .int
   fd = ob_x[f % 2]
   size = fd_ns[fd]
   np = fd_np[fd]
@@ -258,6 +260,8 @@ callfunc: procedure = .int
     cdepth = cdepth - 1
     return raise_exc(C_RECURSIONERROR, "maximum recursion depth exceeded")
   end
+  wd = wd + 1
+  pm = ny
   mi = fd_mod[fd]
   if mi \= cur_mi then do
     sv_g = cur_mi
@@ -276,6 +280,15 @@ callfunc: procedure = .int
   else if unw = 0 then r = NONE_OOP
   else r = 0
   if (fd_fl[fd] // 4) < 2 then call free_frame nf, size
+  else do
+    ncf = ncf + 1
+    cfl[ncf] = nf
+    fcm[nf] = 1
+    fcs[nf] = size
+  end
+  if ny - pm + npw >= gcthr then call gc_run pm, r
+  wd = wd - 1
+  if wd = 0 then ny = 0
   return r
 
 /* instantiate a class */
@@ -757,6 +770,7 @@ setattr_obj: procedure = .void
     return
   end
   if k = K_FUNC then do
+    ob_c[o % 2] = 1
     fnattr[o || "." || nid] = v as .string
     return
   end

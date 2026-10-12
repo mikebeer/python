@@ -1,0 +1,492 @@
+/* ---------------------------------------------------------------------
+   Garbage collector for the object table.
+
+   Objects that are allocated while a "window" is open (a loop or a function call in progress) are
+   recorded in the young list yl[1 .. ny].  A loop calls gc_run at the end of an iteration, a function
+   call calls it just before it returns, with pm = ny as it was when the loop / call started.  The
+   objects yl[pm+1 .. ny] were created by code that has finished (the iteration, the call): no
+   CREXX register of an enclosing evaluation can hold them, except the return value rv.  They are
+   live only if they are reachable from an object that is not young (an "old" mutable container),
+   from the frames / argument stack / tables below, or from rv.  Everything else is freed to the
+   object free list; the slot blocks, dictionary entries and dictionary numbers they own are
+   recycled.  Classes, modules, generators, files and builtins are never freed.
+   --------------------------------------------------------------------- */
+gc_mark: procedure = .void
+  arg v = .int
+  i = .int
+  k = .int
+  if v < 2 then return
+  if v // 2 \= 0 then return
+  i = v % 2
+  if i > nob then return
+  k = ob_k[i]
+  if k < 200 | k >= 400 then return
+  ob_k[i] = k + 200
+  k = k - 200
+  if (k >= 7 & k <= 10) | k = 12 | k = 14 | k = 15 | k = 17 | (k >= 20 & k <= 25) | k = 29 | k = 30 then do
+    gsp = gsp + 1
+    gstk[gsp] = i
+  end
+  return
+
+/* mark the children of object i (real kind k) */
+/* mark a finished function frame that a closure can still reach, and what it holds */
+fr_mark: procedure = .void
+  arg fb = .int
+  j = .int
+  w = .int
+  ix = .int
+  kk = .int
+  fcm[fb] = 2
+  do j = 1 to fcs[fb] - 1
+    w = vp[fb + j]
+    if w > 1 then do
+      if w // 2 = 0 then do
+        ix = w % 2
+        if ix <= nob then do
+          kk = ob_k[ix]
+          if kk >= 200 & kk < 400 then call gc_mark w
+        end
+      end
+      if w <= nvp then do
+        if fcm[w] = 1 then call fr_mark w
+      end
+    end
+  end
+  return
+
+gc_scan: procedure = .void
+  arg i = .int, k = .int
+  j = .int
+  n = .int
+  st = .int
+  v = .int
+  e = .int
+  d = .int
+  ix = .int
+  kk = .int
+  hv = .string
+  if k = K_LIST | k = K_TUPLE | k = K_INST then do
+    n = ob_n[i]
+    st = ob_p[i]
+    do j = 0 to n - 1
+      v = sl[st + j]
+      if v > 1 then do
+        if v // 2 = 0 then do
+          ix = v % 2
+          kk = ob_k[ix]
+          if kk >= 200 & kk < 400 then call gc_mark v
+        end
+      end
+    end
+    if k \= K_INST & ob_c[i] > 0 then do
+      hv = nat_at["h" || (i * 2)]
+      if hv \== "" then call gc_mark hv as .int
+    end
+    return
+  end
+  if k = K_DICT | k = K_SET then do
+    d = ob_x[i]
+    e = dd_head[d]
+    do while e > 0
+      if de_live[e] = 1 then do
+        call gc_mark de_key[e]
+        call gc_mark de_val[e]
+      end
+      e = de_next[e]
+    end
+    if dd_own[d] > 0 then call gc_mark dd_own[d]
+    if ob_c[i] > 0 then do
+      hv = nat_at["h" || (i * 2)]
+      if hv \== "" then call gc_mark hv as .int
+    end
+    return
+  end
+  if k = K_FUNC then do
+    n = ob_y[i]
+    if n > 1 & n <= nvp then do
+      if fcm[n] = 1 then call fr_mark n
+    end
+    n = fd_nr[ob_x[i]]
+    st = ob_p[i]
+    do j = 0 to n - 1
+      call gc_mark sl[st + j]
+    end
+    return
+  end
+  if k = K_BMETH then do
+    call gc_mark ob_x[i]
+    call gc_mark ob_y[i]
+    return
+  end
+  if k = K_ARRAY then do
+    hv = ob_s[i]
+    if hv \== "" then call gc_mark hv as .int
+    return
+  end
+  if k = K_BMETHB then do
+    call gc_mark ob_y[i]
+    return
+  end
+  if k = K_DVIEW then do
+    call gc_mark ob_x[i]
+    return
+  end
+  if k = K_ITER then do
+    if ob_n[i] = IT_ZIP | ob_n[i] = IT_MAP then do
+      n = ob_c[i]
+      st = ob_p[i]
+      do j = 0 to n - 1
+        call gc_mark sl[st + j]
+      end
+    end
+  end
+  /* iterators, slices, property / static / class methods, super: any field may hold an object */
+  call gc_mark ob_c[i]
+  call gc_mark ob_n[i]
+  call gc_mark ob_x[i]
+  call gc_mark ob_y[i]
+  return
+
+/* release the storage owned by the unreachable object i (kind k) and put it on the free list */
+gc_free: procedure = .void
+  arg i = .int, k = .int
+  d = .int
+  e = .int
+  nx = .int
+  g = .int
+  fd = .int
+  cap = .int
+  rb = .int
+  j = .int
+  if k = K_FLOAT & gcpoison = 0 then do
+    if ob_c[i] \= 0 then ob_c[i] = 0
+    ob_k[i] = 0
+    ob_n[i] = fo_head
+    fo_head = i
+    return
+  end
+  if k = K_LIST | k = K_TUPLE then do
+    if ob_c[i] > 0 then nat_at["h" || (i * 2)] = ""
+    call free_block ob_p[i], ob_x[i]
+  end
+  else if k = K_INST then call free_block ob_p[i], ob_n[i]
+  else if k = K_ITER then do
+    if ob_n[i] = IT_ZIP | ob_n[i] = IT_MAP then call free_block ob_p[i], ob_c[i]
+    else if ob_n[i] = IT_ISLICE then call free_block ob_p[i], 3
+  end
+  else if k = K_FUNC then call free_block ob_p[i], fd_nr[ob_x[i]] + 1
+  else if k = K_ARRAY then do
+    if ob_y[i] > 0 & ob_x[i] > 0 then call free_block ob_y[i], ob_x[i]
+    if ob_s[i] == "" then do
+      if ob_c[i] = 2 then call np_ffree ob_p[i], ob_n[i]
+      else call free_block ob_p[i], ob_n[i]
+    end
+  end
+  else if k = K_GEN then do
+    g = ob_x[i]
+    fd = gn_fd[g]
+    if gn_st[g] \= 2 & fd > 0 then do
+      if (fd_fl[fd] // 4) < 2 then call free_frame gn_fb[g], fd_ns[fd]
+      cap = fd_gd[fd]
+      rb = gn_rb[g]
+      do j = 1 to cap + 1
+        gs_n[rb + j] = 0
+        gs_s[rb + j] = 0
+        gs_a[rb + j] = 0
+        gs_b[rb + j] = 0
+      end
+      if gcpoison = 0 then do
+        gs_s[rb + 1] = gsf[cap]
+        gsf[cap] = rb
+        gn_fd[g] = 0
+        gn_val[g] = 0
+        gn_ret[g] = 0
+        gn_st[g] = 3
+        gn_nx[g] = gn_fh
+        gn_fh = g
+      end
+    end
+  end
+  else if k = K_DICT | k = K_SET then do
+    if ob_c[i] > 0 then nat_at["h" || (i * 2)] = ""
+    d = ob_x[i]
+    if d > 0 then do
+      e = dd_head[d]
+      do while e > 0
+        nx = de_next[e]
+        if de_live[e] = 1 then dmap[d || "|" || de_hk[e]] = ""
+        de_key[e] = 0
+        de_val[e] = 0
+        de_live[e] = 0
+        de_hk[e] = ""
+        de_next[e] = de_fh
+        de_fh = e
+        e = nx
+      end
+      dd_head[d] = 0
+      dd_n[d] = 0
+      dd_own[d] = 0
+      dd_tail[d] = dd_fh
+      dd_fh = d
+    end
+  end
+  if gcpoison = 1 then do
+    /* stress mode: the slot is never reused, every field is poisoned so that a dangling reference fails loudly */
+    ob_c[i] = 0 - 4
+    ob_x[i] = 0 - 4
+    ob_y[i] = 0 - 4
+    ob_p[i] = 0 - 4
+    ob_n[i] = 0 - 4
+    ob_s[i] = "@@freed@@"
+    ob_k[i] = 0
+    return
+  end
+  ob_c[i] = 0
+  ob_x[i] = 0
+  ob_y[i] = 0
+  ob_p[i] = 0
+  ob_s[i] = ""
+  ob_f[i] = 0.0
+  ob_g[i] = 0.0
+  ob_k[i] = 0
+  ob_n[i] = fo_head
+  fo_head = i
+  return
+
+gc_run: procedure = .void
+  arg pm = .int, rv = .int
+  i = .int
+  j = .int
+  k = .int
+  n = .int
+  st = .int
+  sz = .int
+  fb = .int
+  nx = .int
+  nk = .int
+  cnt = .int
+  v = .int
+  sv = .string
+  imm = .int
+  ix = .int
+  kk = .int
+  cnt = 0
+  gc_count = gc_count + 1
+  /* blocks that were replaced by list growth */
+  do while orph_h > 0
+    st = orph_h
+    orph_h = sl[st]
+    n = sl[st + 1]
+    call free_block st, n
+  end
+  /* free frames hold stale values */
+  do sz = 1 to maxfs
+    fb = fl_head[sz]
+    do while fb > 0
+      nx = vp[fb]
+      do j = 1 to sz - 1
+        vp[fb + j] = 0
+      end
+      fb = nx
+    end
+  end
+  /* compact the list of containers */
+  n = 0
+  do j = 1 to nct
+    i = ctl[j]
+    k = ob_k[i]
+    if k = K_LIST | k = K_DICT | k = K_SET | k = K_INST | k = K_ITER | k = K_FUNC then do
+      ob_k[i] = k + 1000
+      n = n + 1
+      ctl[n] = i
+    end
+  end
+  do j = 1 to n
+    i = ctl[j]
+    ob_k[i] = ob_k[i] - 1000
+  end
+  nct = n
+  /* phase 0: flag the window as young */
+  do j = pm + 1 to ny
+    i = yl[j]
+    k = ob_k[i]
+    if k = K_FLOAT | k = K_STR then ob_k[i] = k + 200
+    else do
+      imm = 0
+      if k = K_CLASS | k = K_MODULE | k = K_FILE | k = K_BUILTIN | k = K_NONE | k = K_BOOL | k = K_ELLIPSIS | k = K_NOTIMPL then imm = 1
+      else if k = K_FUNC & ob_c[i] = 1 then imm = 1
+      if imm = 0 then ob_k[i] = k + 200
+    end
+  end
+  gsp = 0
+  /* phase 1: roots */
+  call gc_mark rv
+  call gc_mark unw_v
+  call gc_mark exc_cur
+  call gc_mark ev_self
+  call gc_mark gen_throw
+  j = 1
+  do while j <= nvp
+    if fcm[j] > 0 then j = j + fcs[j]
+    else do
+      v = vp[j]
+      if v > 1 then do
+        if v // 2 = 0 then do
+          ix = v % 2
+          if ix <= nob then do
+            kk = ob_k[ix]
+            if kk >= 200 & kk < 400 then call gc_mark v
+          end
+        end
+        if v <= nvp then do
+          if fcm[v] = 1 then call fr_mark v
+        end
+      end
+      j = j + 1
+    end
+  end
+  n = ast.0
+  if n > asp + 256 then n = asp + 256
+  do j = 1 to n
+    v = ast[j]
+    if v > 1 then do
+      if v // 2 = 0 then do
+        ix = v % 2
+        if ix <= nob then do
+          kk = ob_k[ix]
+          if kk >= 200 & kk < 400 then call gc_mark v
+        end
+      end
+    end
+  end
+  n = chr_oop.0
+  do j = 1 to n
+    call gc_mark chr_oop[j]
+  end
+  n = bi_oop.0
+  do j = 1 to n
+    call gc_mark bi_oop[j]
+  end
+  n = cl_obj.0
+  do j = 1 to n
+    call gc_mark cl_obj[j]
+  end
+  n = cl_dflt.0
+  do j = 1 to n
+    call gc_mark cl_dflt[j]
+  end
+  n = mod_obj.0
+  do j = 1 to n
+    call gc_mark mod_obj[j]
+  end
+  n = dyn_val.0
+  do j = 1 to n
+    call gc_mark dyn_val[j]
+  end
+  n = cd_obj.0
+  do j = 1 to n
+    call gc_mark cd_obj[j]
+  end
+  n = gn_val.0
+  do j = 1 to n
+    call gc_mark gn_val[j]
+  end
+  n = gn_ret.0
+  do j = 1 to n
+    call gc_mark gn_ret[j]
+  end
+  n = gs_a.0
+  do j = 1 to n
+    call gc_mark gs_a[j]
+  end
+  n = gs_b.0
+  do j = 1 to n
+    call gc_mark gs_b[j]
+  end
+  n = ca.size()
+  do j = 1 to n
+    sv = ca.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = fnattr.size()
+  do j = 1 to n
+    sv = fnattr.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = modo.size()
+  do j = 1 to n
+    sv = modo.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = modattr.size()
+  do j = 1 to n
+    sv = modattr.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = modx.size()
+  do j = 1 to n
+    sv = modx.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = nat_at.size()
+  do j = 1 to n
+    sv = nat_at.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = bimap.size()
+  do j = 1 to n
+    sv = bimap.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  /* old mutable containers may point to young objects */
+  do j = 1 to nct
+    i = ctl[j]
+    k = ob_k[i]
+    if k < 100 then call gc_scan i, k
+  end
+  /* transitive closure */
+  do while gsp > 0
+    i = gstk[gsp]
+    gsp = gsp - 1
+    call gc_scan i, ob_k[i] - 400
+  end
+  /* finished closure frames that nothing reaches any more */
+  n = 0
+  do j = 1 to ncf
+    fb = cfl[j]
+    if fcm[fb] = 2 then do
+      fcm[fb] = 1
+      n = n + 1
+      cfl[n] = fb
+    end
+    else do
+      fcm[fb] = 0
+      call free_frame fb, fcs[fb]
+    end
+  end
+  ncf = n
+  npw = 0
+  /* phase 2: sweep the window */
+  nk = pm
+  do j = pm + 1 to ny
+    i = yl[j]
+    k = ob_k[i]
+    if k >= 400 then do
+      ob_k[i] = k - 400
+      nk = nk + 1
+      yl[nk] = i
+    end
+    else if k >= 200 then do
+      call gc_free i, k - 200
+      cnt = cnt + 1
+    end
+  end
+  ny = nk
+  gc_freed = gc_freed + cnt
+  /* next collection after as many allocations as there are survivors, and live objects / 2 */
+  gcthr = nk - pm
+  if gcthr < nct then gcthr = nct
+  if gcthr < gcmin then gcthr = gcmin
+  if gcfix > 0 then gcthr = gcfix
+  return

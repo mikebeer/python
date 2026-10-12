@@ -240,202 +240,720 @@ def _sgn(x):
     return -1.0 if math.copysign(1.0, x) < 0 else 1.0
 
 
-def _eig2(a, b, c, d):
-    """eigenvalues of [[a, b], [c, d]] as LAPACK dlanv2 orders them (floats or complex)"""
+def _lanv2(a, b, c, d):
+    """LAPACK dlanv2: Schur factorisation of a real 2x2 block -> (a, b, c, d, rt1r, rt1i, rt2r, rt2i, cs, sn)"""
     eps = 2.220446049250313e-16
     if c == 0.0:
-        return (a, d)
-    if b == 0.0:
-        return (d, a)
-    if (a - d) == 0.0 and _sgn(b) != _sgn(c):
-        w = math.sqrt(abs(b)) * math.sqrt(abs(c))
-        return (complex(a, w), complex(d, -w))
-    temp = a - d
-    p = 0.5 * temp
-    bcmax = max(abs(b), abs(c))
-    bcmis = min(abs(b), abs(c)) * _sgn(b) * _sgn(c)
-    scale = max(abs(p), bcmax)
-    z = p / scale * p + bcmax / scale * bcmis
-    if z >= 4.0 * eps:
-        z = p + math.copysign(math.sqrt(scale) * math.sqrt(z), p)
-        return (d + z, d - bcmax / z * bcmis)
-    sigma = b + c
-    tau = math.hypot(sigma, temp)
-    cs = math.sqrt(0.5 * (1.0 + abs(sigma) / tau))
-    sn = -(p / (tau * cs)) * _sgn(sigma)
-    aa = a * cs + b * sn
-    bb = -a * sn + b * cs
-    cc = c * cs + d * sn
-    dd = -c * sn + d * cs
-    a2 = aa * cs + cc * sn
-    b2 = bb * cs + dd * sn
-    c2 = -aa * sn + cc * cs
-    d2 = -bb * sn + dd * cs
-    temp = 0.5 * (a2 + d2)
-    if c2 != 0.0:
-        if b2 != 0.0:
-            if _sgn(b2) == _sgn(c2):
-                sab = math.sqrt(abs(b2))
-                sac = math.sqrt(abs(c2))
-                pp = math.copysign(sab * sac, c2)
-                return (temp + pp, temp - pp)
-            w = math.sqrt(abs(b2)) * math.sqrt(abs(c2))
-            return (complex(temp, w), complex(temp, -w))
-        return (temp, temp)
-    return (temp, temp)
+        cs = 1.0
+        sn = 0.0
+    elif b == 0.0:
+        cs = 0.0
+        sn = 1.0
+        temp = d
+        d = a
+        a = temp
+        b = -c
+        c = 0.0
+    elif (a - d) == 0.0 and _sgn(b) != _sgn(c):
+        cs = 1.0
+        sn = 0.0
+    else:
+        temp = a - d
+        p = 0.5 * temp
+        bcmax = max(abs(b), abs(c))
+        bcmis = min(abs(b), abs(c)) * _sgn(b) * _sgn(c)
+        scale = max(abs(p), bcmax)
+        z = p / scale * p + bcmax / scale * bcmis
+        if z >= 4.0 * eps:
+            z = p + math.copysign(math.sqrt(scale) * math.sqrt(z), p)
+            a = d + z
+            d = d - bcmax / z * bcmis
+            tau = math.hypot(c, z)
+            cs = z / tau
+            sn = c / tau
+            b = b - c
+            c = 0.0
+        else:
+            sigma = b + c
+            tau = math.hypot(sigma, temp)
+            cs = math.sqrt(0.5 * (1.0 + abs(sigma) / tau))
+            sn = -(p / (tau * cs)) * _sgn(sigma)
+            aa = a * cs + b * sn
+            bb = -a * sn + b * cs
+            cc = c * cs + d * sn
+            dd = -c * sn + d * cs
+            a = aa * cs + cc * sn
+            b = bb * cs + dd * sn
+            c = -aa * sn + cc * cs
+            d = -bb * sn + dd * cs
+            temp = 0.5 * (a + d)
+            a = temp
+            d = temp
+            if c != 0.0:
+                if b != 0.0:
+                    if _sgn(b) == _sgn(c):
+                        sab = math.sqrt(abs(b))
+                        sac = math.sqrt(abs(c))
+                        p = math.copysign(sab * sac, c)
+                        tau = 1.0 / math.sqrt(abs(b + c))
+                        a = temp + p
+                        d = temp - p
+                        b = b - c
+                        c = 0.0
+                        cs1 = sab * tau
+                        sn1 = sac * tau
+                        temp = cs * cs1 - sn * sn1
+                        sn = cs * sn1 + sn * cs1
+                        cs = temp
+                else:
+                    b = -c
+                    c = 0.0
+                    temp = cs
+                    cs = -sn
+                    sn = temp
+    rt1r = a
+    rt2r = d
+    if c == 0.0:
+        rt1i = 0.0
+        rt2i = 0.0
+    else:
+        rt1i = math.sqrt(abs(b)) * math.sqrt(abs(c))
+        rt2i = -rt1i
+    return a, b, c, d, rt1r, rt1i, rt2r, rt2i, cs, sn
 
 
-def _qr_eigs(m):
-    """eigenvalues of a general real matrix by shifted QR iteration (floats, complex for conjugate pairs)"""
+def _larfg(alpha, x):
+    """LAPACK dlarfg: returns (beta, tau, v) with H = I - tau [1 v][1 v]^T"""
+    xn = 0.0
+    for t in x:
+        xn = math.hypot(xn, t)
+    if xn == 0.0:
+        return alpha, 0.0, x
+    beta = -math.copysign(math.hypot(alpha, xn), alpha)
+    tau = (beta - alpha) / beta
+    sc = 1.0 / (alpha - beta)
+    return beta, tau, [t * sc for t in x]
+
+
+def _gebal(a, n):
+    """LAPACK dgebal('B') on the list-of-rows a (in place) -> (ilo, ihi, scale), 0-based inclusive"""
+    scale = [1.0] * n
+    k = 0
+    l = n - 1
+    # rows that isolate an eigenvalue are pushed down
+    noconv = True
+    while noconv:
+        noconv = False
+        for j in _range(l, -1, -1):
+            iso = True
+            for i in _range(l + 1):
+                if i != j and a[j][i] != 0.0:
+                    iso = False
+                    break
+            if iso:
+                scale[l] = float(j)
+                if j != l:
+                    for r in _range(l + 1):
+                        a[r][j], a[r][l] = a[r][l], a[r][j]
+                    for c in _range(k, n):
+                        a[j][c], a[l][c] = a[l][c], a[j][c]
+                noconv = True
+                if l == 0:
+                    return 0, 0, scale
+                l -= 1
+    noconv = True
+    while noconv:
+        noconv = False
+        for j in _range(k, l + 1):
+            iso = True
+            for i in _range(k, l + 1):
+                if i != j and a[i][j] != 0.0:
+                    iso = False
+                    break
+            if iso:
+                scale[k] = float(j)
+                if j != k:
+                    for r in _range(l + 1):
+                        a[r][j], a[r][k] = a[r][k], a[r][j]
+                    for c in _range(k, n):
+                        a[j][c], a[k][c] = a[k][c], a[j][c]
+                noconv = True
+                k += 1
+    for i in _range(k, l + 1):
+        scale[i] = 1.0
+    radix = 2.0
+    sfmin1 = 2.2250738585072014e-308 / 2.220446049250313e-16
+    sfmax1 = 1.0 / sfmin1
+    sfmin2 = sfmin1 * radix
+    sfmax2 = 1.0 / sfmin2
+    noconv = True
+    while noconv:
+        noconv = False
+        for i in _range(k, l + 1):
+            c = 0.0
+            r = 0.0
+            for t in _range(k, l + 1):
+                c = math.hypot(c, a[t][i])
+                r = math.hypot(r, a[i][t])
+            ca = 0.0
+            for t in _range(l + 1):
+                ca = max(ca, abs(a[t][i]))
+            ra = 0.0
+            for t in _range(k, n):
+                ra = max(ra, abs(a[i][t]))
+            if c == 0.0 or r == 0.0:
+                continue
+            g = r / radix
+            f = 1.0
+            s = c + r
+            while c < g and max(f, c, ca) < sfmax2 and min(r, g, ra) > sfmin2:
+                f *= radix
+                c *= radix
+                ca *= radix
+                r /= radix
+                g /= radix
+                ra /= radix
+            g = c / radix
+            while g >= r and max(r, ra) < sfmax2 and min(f, c, g, ca) > sfmin2:
+                f /= radix
+                c /= radix
+                g /= radix
+                ca /= radix
+                r *= radix
+                ra *= radix
+            if c + r >= 0.95 * s:
+                continue
+            if f < 1.0 and scale[i] < 1.0 and f * scale[i] <= sfmin1:
+                continue
+            if f > 1.0 and scale[i] > 1.0 and scale[i] >= sfmax1 / f:
+                continue
+            g = 1.0 / f
+            scale[i] *= f
+            noconv = True
+            for t in _range(k, n):
+                a[i][t] *= g
+            for t in _range(l + 1):
+                a[t][i] *= f
+    return k, l, scale
+
+
+def _gehrd(a, n, ilo, ihi):
+    """Householder reduction to Hessenberg form (dgehd2); returns the reflectors [(i, tau, v)]"""
+    refl = []
+    for i in _range(ilo, ihi):
+        alpha = a[i + 1][i]
+        x = [a[r][i] for r in _range(i + 2, ihi + 1)]
+        beta, tau, xs = _larfg(alpha, x)
+        v = [1.0] + xs
+        refl.append((i, tau, v))
+        if tau != 0.0:
+            m = len(v)
+            for r in _range(ihi + 1):
+                row = a[r]
+                s = 0.0
+                for c in _range(m):
+                    s += row[i + 1 + c] * v[c]
+                s *= tau
+                for c in _range(m):
+                    row[i + 1 + c] -= s * v[c]
+            for c in _range(i + 1, n):
+                s = 0.0
+                for r in _range(m):
+                    s += v[r] * a[i + 1 + r][c]
+                s *= tau
+                for r in _range(m):
+                    a[i + 1 + r][c] -= s * v[r]
+        a[i + 1][i] = beta
+        for r in _range(i + 2, n):
+            a[r][i] = 0.0
+    return refl
+
+
+def _orghr(n, refl):
+    q = _eye(n)
+    for t in _range(len(refl) - 1, -1, -1):
+        i, tau, v = refl[t]
+        if tau == 0.0:
+            continue
+        m = len(v)
+        for c in _range(i + 1, n):
+            s = 0.0
+            for r in _range(m):
+                s += v[r] * q[i + 1 + r][c]
+            s *= tau
+            for r in _range(m):
+                q[i + 1 + r][c] -= s * v[r]
+    return q
+
+
+def _lahqr(h, z, n, ilo, ihi, wantt, wantz, wr, wi):
+    """LAPACK dlahqr (double-shift QR on a Hessenberg matrix), 0-based. Returns True on convergence."""
+    if ilo == ihi:
+        wr[ilo] = h[ilo][ilo]
+        wi[ilo] = 0.0
+        return True
+    for j in _range(ilo, ihi - 2):
+        h[j + 2][j] = 0.0
+        h[j + 3][j] = 0.0
+    if ilo <= ihi - 2:
+        h[ihi][ihi - 2] = 0.0
+    nh = ihi - ilo + 1
+    ulp = 2.220446049250313e-16
+    smlnum = 2.2250738585072014e-308 * (nh / ulp)
+    i1 = 0
+    i2 = n - 1
+    itmax = 30 * max(10, nh)
+    kdefl = 0
+    i = ihi
+    while i >= ilo:
+        l = ilo
+        conv = False
+        for its in _range(itmax + 1):
+            k = i
+            while k > l:
+                hk = abs(h[k][k - 1])
+                if hk <= smlnum:
+                    break
+                tst = abs(h[k - 1][k - 1]) + abs(h[k][k])
+                if tst == 0.0:
+                    if k - 2 >= ilo:
+                        tst += abs(h[k - 1][k - 2])
+                    if k + 1 <= ihi:
+                        tst += abs(h[k + 1][k])
+                if hk <= ulp * tst:
+                    ab = max(hk, abs(h[k - 1][k]))
+                    ba = min(hk, abs(h[k - 1][k]))
+                    dd = abs(h[k - 1][k - 1] - h[k][k])
+                    aa = max(abs(h[k][k]), dd)
+                    bb = min(abs(h[k][k]), dd)
+                    s = aa + ab
+                    if ba * (ab / s) <= max(smlnum, ulp * (bb * (aa / s))):
+                        break
+                k -= 1
+            l = k
+            if l > ilo:
+                h[l][l - 1] = 0.0
+            if l >= i - 1:
+                conv = True
+                break
+            kdefl += 1
+            if not wantt:
+                i1 = l
+                i2 = i
+            if kdefl % 20 == 0:
+                s = abs(h[i][i - 1]) + abs(h[i - 1][i - 2])
+                h11 = 0.75 * s + h[i][i]
+                h12 = -0.4375 * s
+                h21 = s
+                h22 = h11
+            elif kdefl % 10 == 0:
+                s = abs(h[l + 1][l]) + abs(h[l + 2][l + 1])
+                h11 = 0.75 * s + h[l][l]
+                h12 = -0.4375 * s
+                h21 = s
+                h22 = h11
+            else:
+                h11 = h[i - 1][i - 1]
+                h21 = h[i][i - 1]
+                h12 = h[i - 1][i]
+                h22 = h[i][i]
+            s = abs(h11) + abs(h12) + abs(h21) + abs(h22)
+            if s == 0.0:
+                rt1r = rt1i = rt2r = rt2i = 0.0
+            else:
+                h11 /= s
+                h21 /= s
+                h12 /= s
+                h22 /= s
+                tr = (h11 + h22) / 2.0
+                det = (h11 - tr) * (h22 - tr) - h12 * h21
+                rtdisc = math.sqrt(abs(det))
+                if det >= 0.0:
+                    rt1r = tr * s
+                    rt2r = rt1r
+                    rt1i = rtdisc * s
+                    rt2i = -rt1i
+                else:
+                    rt1r = tr + rtdisc
+                    rt2r = tr - rtdisc
+                    if abs(rt1r - h22) <= abs(rt2r - h22):
+                        rt1r = rt1r * s
+                        rt2r = rt1r
+                    else:
+                        rt2r = rt2r * s
+                        rt1r = rt2r
+                    rt1i = 0.0
+                    rt2i = 0.0
+            m = i - 2
+            while True:
+                h21s = h[m + 1][m]
+                s = abs(h[m][m] - rt2r) + abs(rt2i) + abs(h21s)
+                h21s = h[m + 1][m] / s
+                v1 = h21s * h[m][m + 1] + (h[m][m] - rt1r) * ((h[m][m] - rt2r) / s) - rt1i * (rt2i / s)
+                v2 = h21s * (h[m][m] + h[m + 1][m + 1] - rt1r - rt2r)
+                v3 = h21s * h[m + 2][m + 1]
+                s = abs(v1) + abs(v2) + abs(v3)
+                v1 /= s
+                v2 /= s
+                v3 /= s
+                if m == l:
+                    break
+                h00 = h[m - 1][m - 1]
+                h10 = h[m][m - 1]
+                h11 = h[m][m]
+                h22 = h[m + 1][m + 1]
+                if abs(h10) * (abs(v2) + abs(v3)) <= ulp * abs(v1) * (abs(h00) + abs(h11) + abs(h22)):
+                    break
+                m -= 1
+            v = [v1, v2, v3]
+            for k in _range(m, i):
+                nr = min(3, i - k + 1)
+                if k > m:
+                    v = [h[k + t][k - 1] for t in _range(nr)]
+                beta, t1, xs = _larfg(v[0], v[1:nr])
+                v = [beta] + xs
+                if k > m:
+                    h[k][k - 1] = beta
+                    h[k + 1][k - 1] = 0.0
+                    if k < i - 1:
+                        h[k + 2][k - 1] = 0.0
+                elif m > l:
+                    h[k][k - 1] = h[k][k - 1] * (1.0 - t1)
+                vv2 = v[1]
+                t2 = t1 * vv2
+                if nr == 3:
+                    vv3 = v[2]
+                    t3 = t1 * vv3
+                    rk = h[k]
+                    rk1 = h[k + 1]
+                    rk2 = h[k + 2]
+                    for j in _range(k, i2 + 1):
+                        sm = rk[j] + vv2 * rk1[j] + vv3 * rk2[j]
+                        rk[j] -= sm * t1
+                        rk1[j] -= sm * t2
+                        rk2[j] -= sm * t3
+                    for j in _range(i1, min(k + 3, i) + 1):
+                        rj = h[j]
+                        sm = rj[k] + vv2 * rj[k + 1] + vv3 * rj[k + 2]
+                        rj[k] -= sm * t1
+                        rj[k + 1] -= sm * t2
+                        rj[k + 2] -= sm * t3
+                    if wantz:
+                        for j in _range(ilo, ihi + 1):
+                            rj = z[j]
+                            sm = rj[k] + vv2 * rj[k + 1] + vv3 * rj[k + 2]
+                            rj[k] -= sm * t1
+                            rj[k + 1] -= sm * t2
+                            rj[k + 2] -= sm * t3
+                elif nr == 2:
+                    rk = h[k]
+                    rk1 = h[k + 1]
+                    for j in _range(k, i2 + 1):
+                        sm = rk[j] + vv2 * rk1[j]
+                        rk[j] -= sm * t1
+                        rk1[j] -= sm * t2
+                    for j in _range(i1, i + 1):
+                        rj = h[j]
+                        sm = rj[k] + vv2 * rj[k + 1]
+                        rj[k] -= sm * t1
+                        rj[k + 1] -= sm * t2
+                    if wantz:
+                        for j in _range(ilo, ihi + 1):
+                            rj = z[j]
+                            sm = rj[k] + vv2 * rj[k + 1]
+                            rj[k] -= sm * t1
+                            rj[k + 1] -= sm * t2
+        if not conv:
+            return False
+        if l == i:
+            wr[i] = h[i][i]
+            wi[i] = 0.0
+        else:
+            a, b, c, d, r1r, r1i, r2r, r2i, cs, sn = _lanv2(h[i - 1][i - 1], h[i - 1][i], h[i][i - 1], h[i][i])
+            h[i - 1][i - 1] = a
+            h[i - 1][i] = b
+            h[i][i - 1] = c
+            h[i][i] = d
+            wr[i - 1] = r1r
+            wi[i - 1] = r1i
+            wr[i] = r2r
+            wi[i] = r2i
+            if wantt:
+                for j in _range(i + 1, i2 + 1):
+                    x = h[i - 1][j]
+                    y = h[i][j]
+                    h[i - 1][j] = cs * x + sn * y
+                    h[i][j] = cs * y - sn * x
+                for j in _range(i1, i - 1):
+                    x = h[j][i - 1]
+                    y = h[j][i]
+                    h[j][i - 1] = cs * x + sn * y
+                    h[j][i] = cs * y - sn * x
+            if wantz:
+                for j in _range(ilo, ihi + 1):
+                    x = z[j][i - 1]
+                    y = z[j][i]
+                    z[j][i - 1] = cs * x + sn * y
+                    z[j][i] = cs * y - sn * x
+        kdefl = 0
+        i = l - 1
+    return True
+
+
+def _solve2(a11, a12, a21, a22, b1, b2, smin):
+    """2x2 solve with pivoting (floats or complex)"""
+    if abs(a21) > abs(a11):
+        a11, a12, a21, a22, b1, b2 = a21, a22, a11, a12, b2, b1
+    if abs(a11) < smin:
+        a11 = smin
+    f = a21 / a11
+    d = a22 - f * a12
+    if abs(d) < smin:
+        d = smin
+    x2 = (b2 - f * b1) / d
+    x1 = (b1 - a12 * x2) / a11
+    return x1, x2
+
+
+def _trevc(t, vr, n):
+    """right eigenvectors of the quasi-triangular t, back-transformed with the columns of vr (in place)"""
+    ulp = 2.220446049250313e-16
+    smlnum = 2.2250738585072014e-308 * (n / ulp)
+    ki = n - 1
+    while ki >= 0:
+        pair = ki > 0 and t[ki][ki - 1] != 0.0
+        if not pair:
+            wr = t[ki][ki]
+            smin = max(ulp * abs(wr), smlnum)
+            w = [0.0] * n
+            w[ki] = 1.0
+            for k in _range(ki):
+                w[k] = -t[k][ki]
+            j = ki - 1
+            while j >= 0:
+                if j > 0 and t[j][j - 1] != 0.0:
+                    x1, x2 = _solve2(t[j - 1][j - 1] - wr, t[j - 1][j], t[j][j - 1], t[j][j] - wr, w[j - 1], w[j], smin)
+                    big = max(abs(x1), abs(x2))
+                    if big > 1e100:
+                        for k in _range(ki + 1):
+                            w[k] /= big
+                        x1 /= big
+                        x2 /= big
+                    w[j - 1] = x1
+                    w[j] = x2
+                    for k in _range(j - 1):
+                        w[k] -= x1 * t[k][j - 1] + x2 * t[k][j]
+                    j -= 2
+                else:
+                    den = t[j][j] - wr
+                    if abs(den) < smin:
+                        den = smin
+                    x = w[j] / den
+                    if abs(x) > 1e100:
+                        big = abs(x)
+                        for k in _range(ki + 1):
+                            w[k] /= big
+                        x /= big
+                    w[j] = x
+                    for k in _range(j):
+                        w[k] -= x * t[k][j]
+                    j -= 1
+            for r in _range(n):
+                row = vr[r]
+                s = w[ki] * row[ki]
+                for k in _range(ki):
+                    s += row[k] * w[k]
+                row[ki] = s
+            emax = 0.0
+            for r in _range(n):
+                emax = max(emax, abs(vr[r][ki]))
+            rm = 1.0 / emax
+            for r in _range(n):
+                vr[r][ki] *= rm
+            ki -= 1
+        else:
+            wr = t[ki][ki]
+            wi = math.sqrt(abs(t[ki][ki - 1])) * math.sqrt(abs(t[ki - 1][ki]))
+            smin = max(ulp * (abs(wr) + abs(wi)), smlnum)
+            w = [0j] * n
+            if abs(t[ki - 1][ki]) >= abs(t[ki][ki - 1]):
+                w[ki - 1] = complex(1.0, 0.0)
+                w[ki] = complex(0.0, wi / t[ki - 1][ki])
+            else:
+                w[ki - 1] = complex(-wi / t[ki][ki - 1], 0.0)
+                w[ki] = complex(0.0, 1.0)
+            for k in _range(ki - 1):
+                w[k] = complex(-w[ki - 1].real * t[k][ki - 1], -w[ki].imag * t[k][ki])
+            lam = complex(wr, wi)
+            j = ki - 2
+            while j >= 0:
+                if j > 0 and t[j][j - 1] != 0.0:
+                    x1, x2 = _solve2(t[j - 1][j - 1] - lam, t[j - 1][j], t[j][j - 1], t[j][j] - lam, w[j - 1], w[j], smin)
+                    big = max(abs(x1), abs(x2))
+                    if big > 1e100:
+                        for k in _range(ki + 1):
+                            w[k] = w[k] / big
+                        x1 = x1 / big
+                        x2 = x2 / big
+                    w[j - 1] = x1
+                    w[j] = x2
+                    for k in _range(j - 1):
+                        w[k] = w[k] - x1 * t[k][j - 1] - x2 * t[k][j]
+                    j -= 2
+                else:
+                    den = t[j][j] - lam
+                    if abs(den) < smin:
+                        den = complex(smin, 0.0)
+                    x = w[j] / den
+                    if abs(x) > 1e100:
+                        big = abs(x)
+                        for k in _range(ki + 1):
+                            w[k] = w[k] / big
+                        x = x / big
+                    w[j] = x
+                    for k in _range(j):
+                        w[k] = w[k] - x * t[k][j]
+                    j -= 1
+            emax = 0.0
+            for r in _range(n):
+                row = vr[r]
+                sre = w[ki - 1].real * row[ki - 1]
+                sim = w[ki].imag * row[ki]
+                for k in _range(ki - 1):
+                    sre += row[k] * w[k].real
+                    sim += row[k] * w[k].imag
+                row[ki - 1] = sre
+                row[ki] = sim
+                emax = max(emax, abs(sre) + abs(sim))
+            rm = 1.0 / emax
+            for r in _range(n):
+                vr[r][ki - 1] *= rm
+                vr[r][ki] *= rm
+            ki -= 2
+
+
+def _geev(m, vectors):
+    """LAPACK dgeev for a real square matrix (list of rows): (wr, wi, vr or None)"""
     n = len(m)
     a = [row[:] for row in m]
-    ev = [0.0] * n
-    hi = n
-    it = 0
-    while hi > 0:
-        if hi == 1:
-            ev[0] = a[0][0]
-            break
-        # look for a negligible sub-diagonal element
-        l = hi - 1
-        while l > 0:
-            if abs(a[l][l - 1]) < 1e-14 * (abs(a[l][l]) + abs(a[l - 1][l - 1]) + 1e-300):
-                break
-            l -= 1
-        if l == hi - 1:
-            ev[hi - 1] = a[hi - 1][hi - 1]
-            hi -= 1
-            a = [row[:hi] for row in a[:hi]]
-            it = 0
-            continue
-        if l == hi - 2:
-            e1, e2 = _eig2(a[hi - 2][hi - 2], a[hi - 2][hi - 1], a[hi - 1][hi - 2], a[hi - 1][hi - 1])
-            ev[hi - 2] = e1
-            ev[hi - 1] = e2
-            hi -= 2
-            a = [row[:hi] for row in a[:hi]]
-            it = 0
-            continue
-        it += 1
-        if it > 500:
-            for i in _range(hi):
-                ev[i] = a[i][i]
-            break
-        mu = a[hi - 1][hi - 1]
-        if it % 11 == 10:
-            mu += abs(a[hi - 1][hi - 2])
-        for i in _range(hi):
-            a[i][i] -= mu
-        q, r = _qr_house(a, hi, hi)
-        a = _matmul(r, q)
-        for i in _range(hi):
-            a[i][i] += mu
-    return ev
-
-
-def _any_complex(w):
-    for v in w:
-        if isinstance(v, complex):
-            return True
-    return False
-
-
-def _csolve(m, lam, x):
-    """solve (m - lam I) y = x for complex y (Gaussian elimination, partial pivoting)"""
-    n = len(m)
-    a = [[complex(m[i][j]) - (lam if i == j else 0.0) for j in _range(n)] + [x[i]] for i in _range(n)]
-    for k in _range(n):
-        piv = k
-        for i in _range(k + 1, n):
-            if abs(a[i][k]) > abs(a[piv][k]):
-                piv = i
-        a[k], a[piv] = a[piv], a[k]
-        if abs(a[k][k]) < 1e-300:
-            a[k][k] = complex(1e-300)
-        for i in _range(k + 1, n):
-            f = a[i][k] / a[k][k]
-            if f != 0:
-                for j in _range(k, n + 1):
-                    a[i][j] = a[i][j] - f * a[k][j]
-    y = [complex(0)] * n
-    for i in _range(n - 1, -1, -1):
-        s = a[i][n]
-        for j in _range(i + 1, n):
-            s = s - a[i][j] * y[j]
-        y[i] = s / a[i][i]
-    return y
-
-
-def _cvec(m, lam):
-    n = len(m)
-    lam2 = lam + complex(1e-10 * (1.0 + abs(lam)), 0.0)
-    x = [complex(1.0)] * n
-    for _ in _range(4):
-        x = _csolve(m, lam2, x)
-        nr = math.sqrt(sum(abs(v) * abs(v) for v in x))
-        x = [v / nr for v in x]
-    big = 0
+    wr = [0.0] * n
+    wi = [0.0] * n
+    if n == 0:
+        return wr, wi, [] if vectors else None
+    ilo, ihi, scale = _gebal(a, n)
+    refl = _gehrd(a, n, ilo, ihi)
+    z = None
+    if vectors:
+        z = _orghr(n, refl)
     for i in _range(n):
-        if abs(x[i]) > abs(x[big]):
-            big = i
-    ph = x[big] / abs(x[big])
-    x = [v / ph for v in x]
-    x = [complex(v.real, 0.0) if i == big else v for i, v in enumerate(x)]
-    return x
+        if i < ilo or i > ihi:
+            wr[i] = a[i][i]
+            wi[i] = 0.0
+    if not _lahqr(a, z, n, ilo, ihi, vectors, vectors, wr, wi):
+        raise LinAlgError("Eigenvalues did not converge")
+    if not vectors:
+        return wr, wi, None
+    for i in _range(n):
+        for j in _range(i + 2, n):
+            a[j][i] = 0.0
+    vr = z
+    _trevc(a, vr, n)
+    for i in _range(ilo, ihi + 1):
+        s = scale[i]
+        if ilo != ihi and s != 1.0:
+            vr[i] = [v * s for v in vr[i]]
+    for ii in _range(n):
+        i = ii
+        if i >= ilo and i <= ihi:
+            continue
+        if i < ilo:
+            i = ilo - 1 - ii
+        k = int(scale[i])
+        if k != i:
+            vr[i], vr[k] = vr[k], vr[i]
+    i = 0
+    while i < n:
+        if wi[i] == 0.0:
+            nr = 0.0
+            for r in _range(n):
+                nr = math.hypot(nr, vr[r][i])
+            sc = 1.0 / nr
+            for r in _range(n):
+                vr[r][i] *= sc
+            i += 1
+        else:
+            n1 = 0.0
+            n2 = 0.0
+            for r in _range(n):
+                n1 = math.hypot(n1, vr[r][i])
+                n2 = math.hypot(n2, vr[r][i + 1])
+            sc = 1.0 / math.hypot(n1, n2)
+            big = 0
+            bv = -1.0
+            for r in _range(n):
+                vr[r][i] *= sc
+                vr[r][i + 1] *= sc
+                q = vr[r][i] * vr[r][i] + vr[r][i + 1] * vr[r][i + 1]
+                if q > bv:
+                    bv = q
+                    big = r
+            f = vr[big][i]
+            g = vr[big][i + 1]
+            if g == 0.0:
+                cs = 1.0
+                sn = 0.0
+            elif f == 0.0:
+                cs = 0.0
+                sn = _sgn(g)
+            else:
+                d = math.sqrt(f * f + g * g)
+                cs = abs(f) / d
+                sn = g / math.copysign(d, f)
+            for r in _range(n):
+                x = vr[r][i]
+                y = vr[r][i + 1]
+                vr[r][i] = cs * x + sn * y
+                vr[r][i + 1] = cs * y - sn * x
+            vr[big][i + 1] = 0.0
+            i += 2
+    return wr, wi, vr
 
 
 def eigvals(a):
     m = _square(a)
-    n = len(m)
-    sym = True
-    for i in _range(n):
-        for j in _range(i):
-            if abs(m[i][j] - m[j][i]) > 1e-12 * (abs(m[i][j]) + abs(m[j][i]) + 1e-300):
-                sym = False
-    if sym:
-        return eigh(a)[0]
-    w = _qr_eigs(m)
-    if _any_complex(w):
-        return np.array(w)
-    if n == 2:
-        return np.array(w)
-    return np.array(sorted(w))
+    wr, wi, _v = _geev(m, False)
+    if _any_nonreal(wi):
+        return np.array([complex(wr[i], wi[i]) for i in _range(len(wr))])
+    return np.array(wr)
+
+
+def _any_nonreal(wi):
+    for v in wi:
+        if v != 0.0:
+            return True
+    return False
 
 
 def eig(a):
     m = _square(a)
     n = len(m)
-    sym = True
-    for i in _range(n):
-        for j in _range(i):
-            if abs(m[i][j] - m[j][i]) > 1e-12 * (abs(m[i][j]) + abs(m[j][i]) + 1e-300):
-                sym = False
-    if sym:
-        return eigh(a)
-    w = _qr_eigs(m)
-    if _any_complex(w):
-        ccols = []
-        for lam in w:
-            ccols.append(_cvec(m, complex(lam)))
-        return np.array(w), np.array(_transpose(ccols))
-    w = sorted(w)
-    cols = []
-    for lam in w:
-        shifted = [row[:] for row in m]
-        for i in _range(n):
-            shifted[i][i] -= lam + 1e-10 * (1.0 + abs(lam))
-        lu, perm, sign = _lu(shifted)
-        if lu is None:
-            vec = [1.0] + [0.0] * (n - 1)
+    wr, wi, vr = _geev(m, True)
+    if not _any_nonreal(wi):
+        return np.array(wr), np.array(vr)
+    w = [complex(wr[i], wi[i]) for i in _range(n)]
+    cols = [[0j] * n for _ in _range(n)]
+    j = 0
+    while j < n:
+        if wi[j] == 0.0:
+            for r in _range(n):
+                cols[r][j] = complex(vr[r][j], 0.0)
+            j += 1
         else:
-            x = [[1.0] for _ in _range(n)]
-            for _ in _range(3):
-                x = _lu_solve(lu, perm, x)
-                nr = math.sqrt(sum(r[0] * r[0] for r in x))
-                x = [[r[0] / nr] for r in x]
-            vec = [r[0] for r in x]
-        cols.append(vec)
-    return np.array(w), np.array(_transpose(cols))
+            for r in _range(n):
+                cols[r][j] = complex(vr[r][j], vr[r][j + 1])
+                cols[r][j + 1] = complex(vr[r][j], -vr[r][j + 1])
+            j += 2
+    return np.array(w), np.array(cols)
 
 
 def _qr_house(a, m, n):

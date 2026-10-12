@@ -83,19 +83,34 @@ gen_new: procedure = .int
   g = .int
   o = .int
   cap = .int
+  rb = .int
   if fd_gd[fd] = 0 then fd_gd[fd] = ydepth(fd_body[fd]) + 2
   cap = fd_gd[fd]
-  ngn = ngn + 1
-  g = ngn
+  if gn_fh > 0 then do
+    g = gn_fh
+    gn_fh = gn_nx[g]
+  end
+  else do
+    ngn = ngn + 1
+    g = ngn
+  end
   gn_fd[g] = fd
   gn_fb[g] = nf
   gn_st[g] = 0
   gn_sp[g] = 0
-  gn_rb[g] = ngs
+  rb = gsf[cap]
+  if rb > 0 then do
+    gsf[cap] = gs_s[rb + 1]
+    gs_s[rb + 1] = 0
+  end
+  else do
+    rb = ngs
+    ngs = ngs + cap + 1
+    gs_n[ngs] = 0
+  end
+  gn_rb[g] = rb
   gn_val[g] = NONE_OOP
   gn_ret[g] = NONE_OOP
-  ngs = ngs + cap + 1
-  gs_n[ngs] = 0
   o = newobj(K_GEN)
   ob_x[o % 2] = g
   return o

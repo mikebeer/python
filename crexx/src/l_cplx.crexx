@@ -4,11 +4,11 @@
    --------------------------------------------------------------------- */
 mkcplx: procedure = .int
   arg re = .float, im = .float
-  nob = nob + 1
-  ob_k[nob] = K_COMPLEX
-  ob_f[nob] = re
-  ob_g[nob] = im
-  return nob * 2
+  o = .int
+  o = newobj(K_COMPLEX)
+  ob_f[o % 2] = re
+  ob_g[o % 2] = im
+  return o
 
 /* real and imaginary part of a number into cx_re / cx_im (first) or cx_re2 / cx_im2 (second) */
 cplx_get: procedure = .void

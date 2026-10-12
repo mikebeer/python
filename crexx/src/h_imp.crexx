@@ -75,6 +75,9 @@ parse_module: procedure = .int
   body = .int
   sc = .int
   dmy = .int
+  wd_save = .int
+  wd_save = wd
+  wd = 0
   ntk = 0
   tpp = 1
   psp = 0
@@ -94,6 +97,7 @@ parse_module: procedure = .int
   body = p_file()
   call scope_end sc
   mod_dyn[mi] = parse_dyn
+  wd = wd_save
   if pe = 1 then return 0
   return body
 

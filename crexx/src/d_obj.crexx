@@ -3,9 +3,26 @@
    --------------------------------------------------------------------- */
 newobj: procedure = .int
   arg kind = .int
-  nob = nob + 1
-  ob_k[nob] = kind
-  return nob * 2
+  i = .int
+  i = fo_head
+  if i > 0 then do
+    fo_head = ob_n[i]
+    ob_n[i] = 0
+  end
+  else do
+    nob = nob + 1
+    i = nob
+  end
+  if wd > 0 then do
+    ny = ny + 1
+    yl[ny] = i
+  end
+  ob_k[i] = kind
+  if kind = K_LIST | kind = K_DICT | kind = K_SET | kind = K_INST | kind = K_ITER | kind = K_FUNC then do
+    nct = nct + 1
+    ctl[nct] = i
+  end
+  return i * 2
 
 mkint: procedure = .int
   arg n = .int
@@ -25,18 +42,43 @@ ival: procedure = .int
 
 mkstr: procedure = .int
   arg s = .string
-  o = .int
-  nob = nob + 1
-  ob_k[nob] = K_STR
-  ob_s[nob] = s
-  return nob * 2
+  i = .int
+  i = fo_head
+  if i > 0 then do
+    fo_head = ob_n[i]
+    ob_n[i] = 0
+  end
+  else do
+    nob = nob + 1
+    i = nob
+  end
+  if wd > 0 then do
+    ny = ny + 1
+    yl[ny] = i
+  end
+  ob_k[i] = K_STR
+  ob_s[i] = s
+  return i * 2
 
 mkfloat: procedure = .int
   arg f = .float
-  nob = nob + 1
-  ob_k[nob] = K_FLOAT
-  ob_f[nob] = f
-  return nob * 2
+  i = .int
+  i = fo_head
+  if i > 0 then do
+    fo_head = ob_n[i]
+    ob_n[i] = 0
+  end
+  else do
+    nob = nob + 1
+    i = nob
+  end
+  if wd > 0 then do
+    ny = ny + 1
+    yl[ny] = i
+  end
+  ob_k[i] = K_FLOAT
+  ob_f[i] = f
+  return i * 2
 
 mkbool: procedure = .int
   arg b = .int
@@ -46,18 +88,76 @@ mkbool: procedure = .int
 /* big integer from a decimal string (may need normalising) */
 mkbig: procedure = .int
   arg s = .string
-  nob = nob + 1
-  ob_k[nob] = K_BIG
-  ob_s[nob] = s
-  return nob * 2
+  o = .int
+  o = newobj(K_BIG)
+  ob_s[o % 2] = s
+  return o
 
 alloc_slots: procedure = .int
   arg n = .int
   st = .int
+  v = .string
+  if n > 0 then do
+    if n <= 64 then do
+      st = sfl[n]
+      if st > 0 then do
+        sfl[n] = sl[st]
+        sl[st] = 0
+        return st
+      end
+    end
+    else if nbfl > 0 then do
+      v = bfl[n]
+      if v \== "" then do
+        st = v as .int
+        if st > 0 then do
+          bfl[n] = sl[st] as .string
+          sl[st] = 0
+          nbfl = nbfl - 1
+          return st
+        end
+      end
+    end
+  end
   st = nsl + 1
   nsl = nsl + n
   if n > 0 then sl[nsl] = 0
   return st
+
+/* give the (zeroed) block st of n slots back to the allocator */
+free_block: procedure = .void
+  arg st = .int, n = .int
+  i = .int
+  if st <= 0 | n <= 0 then return
+  if gcpoison = 1 then do
+    do i = 0 to n - 1
+      sl[st + i] = 0 - 4
+    end
+    return
+  end
+  do i = 0 to n - 1
+    sl[st + i] = 0
+  end
+  if n <= 64 then do
+    sl[st] = sfl[n]
+    sfl[n] = st
+  end
+  else do
+    if bfl[n] == "" then sl[st] = 0
+    else sl[st] = bfl[n] as .int
+    bfl[n] = st as .string
+    nbfl = nbfl + 1
+  end
+  return
+
+/* a block that was replaced while a primitive may still hold its address: freed at the next collection */
+orphan_block: procedure = .void
+  arg st = .int, n = .int
+  if st <= 0 | n < 2 | wd = 0 then return
+  sl[st] = orph_h
+  sl[st + 1] = n
+  orph_h = st
+  return
 
 mklist: procedure = .int
   arg cap = .int
@@ -97,6 +197,7 @@ list_append: procedure = .void
       sl[nst + i] = sl[st + i]
     end
     ob_p[ix] = nst
+    call orphan_block st, ob_x[ix]
     ob_x[ix] = cap
   end
   sl[ob_p[ix] + n] = v
@@ -120,6 +221,7 @@ list_reserve: procedure = .void
     sl[nst + i] = sl[st + i]
   end
   ob_p[ix] = nst
+  call orphan_block st, ob_x[ix]
   ob_x[ix] = need
   return
 
@@ -435,6 +537,7 @@ inst_set: procedure = .void
       sl[nst + i] = sl[st + i]
     end
     ob_p[ix] = nst
+    call orphan_block st, ob_n[ix]
     ob_n[ix] = nn
   end
   sl[ob_p[ix] + slot - 1] = val
@@ -576,13 +679,21 @@ truthy: procedure = .int
 dict_new: procedure = .int
   arg kind = .int
   o = .int
+  d = .int
   o = newobj(kind)
-  ndd = ndd + 1
-  dd_head[ndd] = 0
-  dd_tail[ndd] = 0
-  dd_n[ndd] = 0
-  dd_own[ndd] = 0
-  ob_x[o % 2] = ndd
+  if dd_fh > 0 then do
+    d = dd_fh
+    dd_fh = dd_tail[d]
+  end
+  else do
+    ndd = ndd + 1
+    d = ndd
+  end
+  dd_head[d] = 0
+  dd_tail[d] = 0
+  dd_n[d] = 0
+  dd_own[d] = 0
+  ob_x[o % 2] = d
   return o
 
 dict_find: procedure = .int
@@ -603,8 +714,14 @@ dict_put: procedure = .void
     de_val[e] = v
     return
   end
-  nde = nde + 1
-  e = nde
+  if de_fh > 0 then do
+    e = de_fh
+    de_fh = de_next[e]
+  end
+  else do
+    nde = nde + 1
+    e = nde
+  end
   de_key[e] = k
   de_val[e] = v
   de_next[e] = 0

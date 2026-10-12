@@ -614,14 +614,19 @@ aug_op_apply: procedure = .int
   end
   if k = K_LIST & op = O_MUL & numkind(v) = 1 then do
     l = seq_repeat(cur, ival(v))
+    call orphan_block ob_p[cur % 2], ob_x[cur % 2]
     ob_p[cur % 2] = ob_p[l % 2]
     ob_n[cur % 2] = ob_n[l % 2]
     ob_x[cur % 2] = ob_x[l % 2]
+    ob_p[l % 2] = 0
+    ob_n[l % 2] = 0
+    ob_x[l % 2] = 0
     return cur
   end
   if k = K_SET & kind_of(v) = K_SET & (op = O_BITOR | op = O_BITAND | op = O_SUB | op = O_BITXOR) then do
     l = set_op(op, cur, v)
     ob_x[cur % 2] = ob_x[l % 2]
+    ob_x[l % 2] = 0
     return cur
   end
   if k = K_DICT & op = O_BITOR & kind_of(v) = K_DICT then do
@@ -654,6 +659,224 @@ aug_op_apply: procedure = .int
     if m > 0 then return call2(m, cur, v)
   end
   return arith(op, cur, v)
+
+ex_for: procedure = .void
+  arg n = .int, fb = .int
+  t = .int
+  v = .int
+  i = .int
+  c = .int
+  tv = .int
+  r = .int
+  o = .int
+  ix = .int
+  brk = .int
+  st = .int
+  cnt = .int
+  it = .int
+  a = .int
+  b = .int
+  stp = .int
+  tg = .int
+  itn = .int
+  d = .int
+  f = .int
+  hs = .int
+  h = .int
+  ty = .int
+  sv = .int
+  sv2 = .int
+  svc = .int
+  m = .int
+  ex1 = .int
+  ex2 = .int
+  base = .int
+  tt = .int
+  op = .int
+  nm = .string
+  s2 = .string
+  ok_range = .int
+  pm = .int
+  ln = .int
+  t = n_t[n]
+  pm = 0
+  ln = 0
+  tg = n_a[n]
+  itn = n_b[n]
+  brk = 0
+  /* fast path: for x in range(...) */
+  if n_t[itn] = N_CALL then do
+    if n_t[n_a[itn]] = N_CONST & n_a[n_a[itn]] = range_oop & n_d[itn] = 0 & n_c[itn] >= 1 & n_c[itn] <= 3 then do
+      cnt = n_c[itn]
+      st = n_b[itn]
+      a = 0
+      b = 0
+      stp = 1
+      ok_range = 1
+      v = ev(al[st], fb)
+      if v = 0 then return
+      if v // 2 = 0 then ok_range = 0
+      if cnt = 1 then b = (v - 1) % 2
+      else do
+        a = (v - 1) % 2
+        v = ev(al[st + 1], fb)
+        if v = 0 then return
+        if v // 2 = 0 then ok_range = 0
+        b = (v - 1) % 2
+        if cnt = 3 then do
+          v = ev(al[st + 2], fb)
+          if v = 0 then return
+          if v // 2 = 0 then ok_range = 0
+          stp = (v - 1) % 2
+          if stp = 0 then do
+            r = raise_exc(C_VALUEERROR, "range() arg 3 must not be zero")
+            return
+          end
+        end
+      end
+      if ok_range = 1 then do
+        i = a
+        pm = ny
+        ln = pm
+        do forever
+          if stp > 0 then do
+            if i >= b then leave
+          end
+          else do
+            if i <= b then leave
+          end
+          if n_t[tg] = N_LOCAL then vp[fb + n_a[tg]] = i * 2 + 1
+          else do
+            call store tg, i * 2 + 1, fb
+            if unw > 0 then return
+          end
+          call ex n_c[n], fb
+          if unw > 0 then do
+            if unw = U_BRK then do
+              unw = 0
+              brk = 1
+              leave
+            end
+            else if unw = U_CNT then unw = 0
+            else return
+          end
+          if ny - ln + npw >= gcthr then do
+            call gc_run pm, 0
+            ln = ny
+          end
+          i = i + stp
+        end
+        if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
+        return
+      end
+    end
+  end
+  v = ev(itn, fb)
+  if v = 0 then return
+  it = iter_new(v)
+  if it = 0 then return
+  pm = ny
+  ln = pm
+  do forever
+    v = iter_next(it)
+    if v = 0 then do
+      if unw > 0 then return
+      leave
+    end
+    if n_t[tg] = N_LOCAL then vp[fb + n_a[tg]] = v
+    else do
+      call store tg, v, fb
+      if unw > 0 then return
+    end
+    call ex n_c[n], fb
+    if unw > 0 then do
+      if unw = U_BRK then do
+        unw = 0
+        brk = 1
+        leave
+      end
+      else if unw = U_CNT then unw = 0
+      else return
+    end
+    if ny - ln + npw >= gcthr then do
+      call gc_run pm, 0
+      ln = ny
+    end
+  end
+  if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
+  return
+  return
+
+ex_while: procedure = .void
+  arg n = .int, fb = .int
+  t = .int
+  v = .int
+  i = .int
+  c = .int
+  tv = .int
+  r = .int
+  o = .int
+  ix = .int
+  brk = .int
+  st = .int
+  cnt = .int
+  it = .int
+  a = .int
+  b = .int
+  stp = .int
+  tg = .int
+  itn = .int
+  d = .int
+  f = .int
+  hs = .int
+  h = .int
+  ty = .int
+  sv = .int
+  sv2 = .int
+  svc = .int
+  m = .int
+  ex1 = .int
+  ex2 = .int
+  base = .int
+  tt = .int
+  op = .int
+  nm = .string
+  s2 = .string
+  ok_range = .int
+  pm = .int
+  ln = .int
+  t = n_t[n]
+  pm = ny
+  ln = pm
+  brk = 0
+  do forever
+    c = ev(n_a[n], fb)
+    if c = 0 then return
+    if c = TRUE_OOP then tv = 1
+    else if c = FALSE_OOP | c = NONE_OOP then tv = 0
+    else do
+      tv = truthy(c)
+      if unw > 0 then return
+    end
+    if tv = 0 then leave
+    call ex n_b[n], fb
+    if unw > 0 then do
+      if unw = U_BRK then do
+        unw = 0
+        brk = 1
+        leave
+      end
+      else if unw = U_CNT then unw = 0
+      else return
+    end
+    if ny - ln + npw >= gcthr then do
+      call gc_run pm, 0
+      ln = ny
+    end
+  end
+  if brk = 0 & n_c[n] > 0 then call ex n_c[n], fb
+  return
+  return
 
 ex: procedure = .void
   arg n = .int, fb = .int
@@ -743,123 +966,17 @@ ex: procedure = .void
     return
   end
   if t = N_FOR then do
-    tg = n_a[n]
-    itn = n_b[n]
-    brk = 0
-    /* fast path: for x in range(...) */
-    if n_t[itn] = N_CALL then do
-      if n_t[n_a[itn]] = N_CONST & n_a[n_a[itn]] = range_oop & n_d[itn] = 0 & n_c[itn] >= 1 & n_c[itn] <= 3 then do
-        cnt = n_c[itn]
-        st = n_b[itn]
-        a = 0
-        b = 0
-        stp = 1
-        ok_range = 1
-        v = ev(al[st], fb)
-        if v = 0 then return
-        if v // 2 = 0 then ok_range = 0
-        if cnt = 1 then b = (v - 1) % 2
-        else do
-          a = (v - 1) % 2
-          v = ev(al[st + 1], fb)
-          if v = 0 then return
-          if v // 2 = 0 then ok_range = 0
-          b = (v - 1) % 2
-          if cnt = 3 then do
-            v = ev(al[st + 2], fb)
-            if v = 0 then return
-            if v // 2 = 0 then ok_range = 0
-            stp = (v - 1) % 2
-            if stp = 0 then do
-              r = raise_exc(C_VALUEERROR, "range() arg 3 must not be zero")
-              return
-            end
-          end
-        end
-        if ok_range = 1 then do
-          i = a
-          do forever
-            if stp > 0 then do
-              if i >= b then leave
-            end
-            else do
-              if i <= b then leave
-            end
-            if n_t[tg] = N_LOCAL then vp[fb + n_a[tg]] = i * 2 + 1
-            else do
-              call store tg, i * 2 + 1, fb
-              if unw > 0 then return
-            end
-            call ex n_c[n], fb
-            if unw > 0 then do
-              if unw = U_BRK then do
-                unw = 0
-                brk = 1
-                leave
-              end
-              else if unw = U_CNT then unw = 0
-              else return
-            end
-            i = i + stp
-          end
-          if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
-          return
-        end
-      end
-    end
-    v = ev(itn, fb)
-    if v = 0 then return
-    it = iter_new(v)
-    if it = 0 then return
-    do forever
-      v = iter_next(it)
-      if v = 0 then do
-        if unw > 0 then return
-        leave
-      end
-      if n_t[tg] = N_LOCAL then vp[fb + n_a[tg]] = v
-      else do
-        call store tg, v, fb
-        if unw > 0 then return
-      end
-      call ex n_c[n], fb
-      if unw > 0 then do
-        if unw = U_BRK then do
-          unw = 0
-          brk = 1
-          leave
-        end
-        else if unw = U_CNT then unw = 0
-        else return
-      end
-    end
-    if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
+    wd = wd + 1
+    call ex_for n, fb
+    wd = wd - 1
+    if wd = 0 then ny = 0
     return
   end
   if t = N_WHILE then do
-    brk = 0
-    do forever
-      c = ev(n_a[n], fb)
-      if c = 0 then return
-      if c = TRUE_OOP then tv = 1
-      else if c = FALSE_OOP | c = NONE_OOP then tv = 0
-      else do
-        tv = truthy(c)
-        if unw > 0 then return
-      end
-      if tv = 0 then leave
-      call ex n_b[n], fb
-      if unw > 0 then do
-        if unw = U_BRK then do
-          unw = 0
-          brk = 1
-          leave
-        end
-        else if unw = U_CNT then unw = 0
-        else return
-      end
-    end
-    if brk = 0 & n_c[n] > 0 then call ex n_c[n], fb
+    wd = wd + 1
+    call ex_while n, fb
+    wd = wd - 1
+    if wd = 0 then ny = 0
     return
   end
   if t = N_AUG then do

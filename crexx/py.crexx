@@ -19,13 +19,15 @@ namespace py expose rc_exit obuf h_out h_err h_in stdin_eof rnd_s nsargs,
    rf_sc rf_dep ncv cv_name cv_slot cv_scope comp_result npq pq_name pq_def,
    pq_kind nfd fd_np fd_nk fd_ps fd_vs fd_ks fd_nr fd_ns fd_fl fd_cd,
    fd_body fd_cx fd_gd fd_name fd_mod npr pr_name pr_def pr_kind pr_slot,
-   ncd cd_name cd_body cd_ns cd_cv0 cd_cv1 cd_obj cd_sc nob ob_k ob_c ob_n,
-   ob_p ob_x ob_y ob_s ob_f ob_g nat_skip bm_names npcx_f npcx_d cx_re,
-   cx_im cx_re2 cx_im2 cr_r cr_i nat_at nsl sl sl_a sl_b sl_n chr_oop nnid,
-   nid_name nidm ncls cl_name cl_base cl_ns cl_flags cl_obj cl_dflt ca sm,
-   cgen kcls opd ropd iopd cmpd cmpr bimap modattr modo bi_name bi_oop,
-   range_oop identity_oop ndd nde dd_head dd_tail dd_n de_key de_val,
-   de_next de_live de_hk dmap nvp vp fl_head gfb asp ast asn cdepth unw,
+   ncd cd_name cd_body cd_ns cd_cv0 cd_cv1 cd_obj cd_sc nob wd nct ctl ny,
+   yl gcthr gcmin gcfix gcpoison gsp gstk fo_head sfl bfl nbfl orph_h dd_fh,
+   de_fh maxfs gc_count gn_fh gn_nx gsf gc_freed ob_k ob_c ob_n ob_p ob_x,
+   ob_y ob_s ob_f ob_g nat_skip bm_names npcx_f npcx_d cx_re cx_im cx_re2,
+   cx_im2 cr_r cr_i nat_at nsl sl sl_a sl_b sl_n chr_oop nnid nid_name nidm,
+   ncls cl_name cl_base cl_ns cl_flags cl_obj cl_dflt ca sm cgen kcls opd,
+   ropd iopd cmpd cmpr bimap modattr modo bi_name bi_oop range_oop,
+   identity_oop ndd nde dd_head dd_tail dd_n de_key de_val de_next de_live,
+   de_hk dmap nvp vp fcm fcs cfl ncf npw fl_head gfb asp ast asn cdepth unw,
    unw_v exc_cur ev_self ev_bm ea_np ea_nk depth_guard ngn ngs gn_fd gn_fb,
    gn_st gn_sp gn_rb gn_val gs_n gs_s gs_a gs_b nfl fl_h fl_mode fl_txt,
    fl_pos bq brm sg mg sq sr fx_d fx_q fx_e fneg_max nmod pypath script_dir,
@@ -35,17 +37,18 @@ namespace py expose rc_exit obuf h_out h_err h_in stdin_eof rnd_s nsargs,
    imp_ispkg imp_pdir imp_quiet natives shadow cl_mod cl_bt cl_ms cl_mn,
    cl_bs cl_bn mro_a bs_a nmro nbs nca ca_c ca_n nis is_c is_n is_s gn_ret,
    gen_throw mod_fsz parse_dyn_init fmt_nested fmt_auto_in fmt_auto_out,
-   fnattr dd_own bl_a bl_n sq_a sq_s sq_e sq_p sup_c npn npf npta nptb nptc,
-   npsel np_sc nprs nprn npcat npco npcc npcd npcs npit npax npnb npes npip,
-   npfp npxp npnf npls npstr npsm npnd np_sep np_ip np_fp np_es np_ds np_de,
-   nti ntf nts ntn ntnd ntfb ntfi ntff npfl npil np_outer np_n np_inner,
-   np_axn np_hasax np_axv np_ddof np_nidT
+   fnattr dd_own bl_a bl_n sq_a sq_s sq_e sq_p sup_c npn nfh npf npta nptb,
+   nptc npsel np_sc nprs nprn npcat npco npcc npcd npcs npit npax npnb npes,
+   npip npfp npxp npnf npls npstr npsm npnd np_sep np_ip np_fp np_es np_ds,
+   np_de nti ntf nts ntn ntnd ntfb ntfi ntff npfl npil np_outer np_n,
+   np_inner np_axn np_hasax np_axv np_ddof np_nidT
 
 arg av = .string[]
 if av.0 >= 1 then do
   if av[1] == "--noinit" then exit 0
 end
 call init
+memstat = 0
 if av.0 >= 1 then do
   if av[1] == "--noboot" then exit 0
 end
@@ -57,6 +60,22 @@ ia = 1
 do while ia <= av.0
   oa = av[ia]
   if left(oa, 9) == "--pypath=" & nfiles = 0 & have_code = 0 then pypath = substr(oa, 10)
+  else if oa == "--memstat" & nfiles = 0 & have_code = 0 then memstat = 1
+  else if left(oa, 10) == "--gcstress" & nfiles = 0 & have_code = 0 then do
+    gcfix = substr(oa, 12) as .int
+    gcpoison = 1
+    gcmin = gcfix
+    gcthr = gcfix
+  end
+  else if left(oa, 8) == "--gcfix=" & nfiles = 0 & have_code = 0 then do
+    gcfix = substr(oa, 9) as .int
+    gcmin = gcfix
+    gcthr = gcfix
+  end
+  else if oa == "--nogc" & nfiles = 0 & have_code = 0 then do
+    gcmin = 2000000000
+    gcthr = 2000000000
+  end
   else if oa == "-c" & ia < av.0 & nfiles = 0 & have_code = 0 then do
     ia = ia + 1
     code = av[ia]
@@ -107,6 +126,7 @@ else do
   rc_exit = run_source(utxt, "<stdin>")
 end
 call flush_out
+if memstat = 1 then call errs "memstat nob=" || nob || " nsl=" || nsl || " nvp=" || nvp || " npn=" || npn || " nde=" || nde || " ndd=" || ndd || " ngn=" || ngn || " ngs=" || ngs || " gcs=" || gc_count || " freed=" || gc_freed || " nid=" || nnid || " nmro=" || nmro || '0a'x
 exit rc_exit
 
 /* ---------------------------------------------------------------------
@@ -371,6 +391,30 @@ init: procedure = .void
   cd_sc = .int[]
   /* ---- objects ---- */
   nob = 0
+  wd = 0
+  nct = 0
+  ctl = .int[]
+  ny = 0
+  yl = .int[]
+  gcthr = 20000
+  gcmin = 20000
+  gcfix = 0
+  gcpoison = 0
+  gsp = 0
+  gstk = .int[]
+  fo_head = 0
+  sfl = .int[]
+  bfl = .stem()
+  nbfl = 0
+  orph_h = 0
+  dd_fh = 0
+  de_fh = 0
+  maxfs = 0
+  gc_count = 0
+  gn_fh = 0
+  gn_nx = .int[]
+  gsf = .int[]
+  gc_freed = 0
   ob_k = .int[]
   ob_c = .int[]
   ob_n = .int[]
@@ -439,6 +483,11 @@ init: procedure = .void
   /* ---- frames, calls, unwinding ---- */
   nvp = 0
   vp = .int[]
+  fcm = .int[]
+  fcs = .int[]
+  cfl = .int[]
+  ncf = 0
+  npw = 0
   fl_head = .int[]
   gfb = 0
   asp = 0
@@ -558,6 +607,7 @@ init: procedure = .void
   sup_c = 0
   /* ---- numpy ---- */
   npn = 0
+  nfh = .stem()
   npf = .float[]
   npta = .int[]
   nptb = .int[]
@@ -3359,9 +3409,26 @@ p_from: procedure = .int
    --------------------------------------------------------------------- */
 newobj: procedure = .int
   arg kind = .int
-  nob = nob + 1
-  ob_k[nob] = kind
-  return nob * 2
+  i = .int
+  i = fo_head
+  if i > 0 then do
+    fo_head = ob_n[i]
+    ob_n[i] = 0
+  end
+  else do
+    nob = nob + 1
+    i = nob
+  end
+  if wd > 0 then do
+    ny = ny + 1
+    yl[ny] = i
+  end
+  ob_k[i] = kind
+  if kind = 7 | kind = 9 | kind = 10 | kind = 17 | kind = 20 | kind = 12 then do
+    nct = nct + 1
+    ctl[nct] = i
+  end
+  return i * 2
 
 mkint: procedure = .int
   arg n = .int
@@ -3381,18 +3448,43 @@ ival: procedure = .int
 
 mkstr: procedure = .int
   arg s = .string
-  o = .int
-  nob = nob + 1
-  ob_k[nob] = 6
-  ob_s[nob] = s
-  return nob * 2
+  i = .int
+  i = fo_head
+  if i > 0 then do
+    fo_head = ob_n[i]
+    ob_n[i] = 0
+  end
+  else do
+    nob = nob + 1
+    i = nob
+  end
+  if wd > 0 then do
+    ny = ny + 1
+    yl[ny] = i
+  end
+  ob_k[i] = 6
+  ob_s[i] = s
+  return i * 2
 
 mkfloat: procedure = .int
   arg f = .float
-  nob = nob + 1
-  ob_k[nob] = 5
-  ob_f[nob] = f
-  return nob * 2
+  i = .int
+  i = fo_head
+  if i > 0 then do
+    fo_head = ob_n[i]
+    ob_n[i] = 0
+  end
+  else do
+    nob = nob + 1
+    i = nob
+  end
+  if wd > 0 then do
+    ny = ny + 1
+    yl[ny] = i
+  end
+  ob_k[i] = 5
+  ob_f[i] = f
+  return i * 2
 
 mkbool: procedure = .int
   arg b = .int
@@ -3402,18 +3494,76 @@ mkbool: procedure = .int
 /* big integer from a decimal string (may need normalising) */
 mkbig: procedure = .int
   arg s = .string
-  nob = nob + 1
-  ob_k[nob] = 4
-  ob_s[nob] = s
-  return nob * 2
+  o = .int
+  o = newobj(4)
+  ob_s[o % 2] = s
+  return o
 
 alloc_slots: procedure = .int
   arg n = .int
   st = .int
+  v = .string
+  if n > 0 then do
+    if n <= 64 then do
+      st = sfl[n]
+      if st > 0 then do
+        sfl[n] = sl[st]
+        sl[st] = 0
+        return st
+      end
+    end
+    else if nbfl > 0 then do
+      v = bfl[n]
+      if v \== "" then do
+        st = v as .int
+        if st > 0 then do
+          bfl[n] = sl[st] as .string
+          sl[st] = 0
+          nbfl = nbfl - 1
+          return st
+        end
+      end
+    end
+  end
   st = nsl + 1
   nsl = nsl + n
   if n > 0 then sl[nsl] = 0
   return st
+
+/* give the (zeroed) block st of n slots back to the allocator */
+free_block: procedure = .void
+  arg st = .int, n = .int
+  i = .int
+  if st <= 0 | n <= 0 then return
+  if gcpoison = 1 then do
+    do i = 0 to n - 1
+      sl[st + i] = 0 - 4
+    end
+    return
+  end
+  do i = 0 to n - 1
+    sl[st + i] = 0
+  end
+  if n <= 64 then do
+    sl[st] = sfl[n]
+    sfl[n] = st
+  end
+  else do
+    if bfl[n] == "" then sl[st] = 0
+    else sl[st] = bfl[n] as .int
+    bfl[n] = st as .string
+    nbfl = nbfl + 1
+  end
+  return
+
+/* a block that was replaced while a primitive may still hold its address: freed at the next collection */
+orphan_block: procedure = .void
+  arg st = .int, n = .int
+  if st <= 0 | n < 2 | wd = 0 then return
+  sl[st] = orph_h
+  sl[st + 1] = n
+  orph_h = st
+  return
 
 mklist: procedure = .int
   arg cap = .int
@@ -3453,6 +3603,7 @@ list_append: procedure = .void
       sl[nst + i] = sl[st + i]
     end
     ob_p[ix] = nst
+    call orphan_block st, ob_x[ix]
     ob_x[ix] = cap
   end
   sl[ob_p[ix] + n] = v
@@ -3476,6 +3627,7 @@ list_reserve: procedure = .void
     sl[nst + i] = sl[st + i]
   end
   ob_p[ix] = nst
+  call orphan_block st, ob_x[ix]
   ob_x[ix] = need
   return
 
@@ -3791,6 +3943,7 @@ inst_set: procedure = .void
       sl[nst + i] = sl[st + i]
     end
     ob_p[ix] = nst
+    call orphan_block st, ob_n[ix]
     ob_n[ix] = nn
   end
   sl[ob_p[ix] + slot - 1] = val
@@ -3932,13 +4085,21 @@ truthy: procedure = .int
 dict_new: procedure = .int
   arg kind = .int
   o = .int
+  d = .int
   o = newobj(kind)
-  ndd = ndd + 1
-  dd_head[ndd] = 0
-  dd_tail[ndd] = 0
-  dd_n[ndd] = 0
-  dd_own[ndd] = 0
-  ob_x[o % 2] = ndd
+  if dd_fh > 0 then do
+    d = dd_fh
+    dd_fh = dd_tail[d]
+  end
+  else do
+    ndd = ndd + 1
+    d = ndd
+  end
+  dd_head[d] = 0
+  dd_tail[d] = 0
+  dd_n[d] = 0
+  dd_own[d] = 0
+  ob_x[o % 2] = d
   return o
 
 dict_find: procedure = .int
@@ -3959,8 +4120,14 @@ dict_put: procedure = .void
     de_val[e] = v
     return
   end
-  nde = nde + 1
-  e = nde
+  if de_fh > 0 then do
+    e = de_fh
+    de_fh = de_next[e]
+  end
+  else do
+    nde = nde + 1
+    e = nde
+  end
   de_key[e] = k
   de_val[e] = v
   de_next[e] = 0
@@ -6027,6 +6194,7 @@ alloc_frame: procedure = .int
 
 free_frame: procedure = .void
   arg fb = .int, size = .int
+  if size > maxfs then maxfs = size
   vp[fb] = fl_head[size]
   fl_head[size] = fb
   return
@@ -6234,6 +6402,7 @@ callfunc: procedure = .int
   fx = .int
   mi = .int
   sv_g = .int
+  pm = .int
   fd = ob_x[f % 2]
   size = fd_ns[fd]
   np = fd_np[fd]
@@ -6267,6 +6436,8 @@ callfunc: procedure = .int
     cdepth = cdepth - 1
     return raise_exc(43, "maximum recursion depth exceeded")
   end
+  wd = wd + 1
+  pm = ny
   mi = fd_mod[fd]
   if mi \= cur_mi then do
     sv_g = cur_mi
@@ -6285,6 +6456,15 @@ callfunc: procedure = .int
   else if unw = 0 then r = 2
   else r = 0
   if (fd_fl[fd] // 4) < 2 then call free_frame nf, size
+  else do
+    ncf = ncf + 1
+    cfl[ncf] = nf
+    fcm[nf] = 1
+    fcs[nf] = size
+  end
+  if ny - pm + npw >= gcthr then call gc_run pm, r
+  wd = wd - 1
+  if wd = 0 then ny = 0
   return r
 
 /* instantiate a class */
@@ -6766,6 +6946,7 @@ setattr_obj: procedure = .void
     return
   end
   if k = 12 then do
+    ob_c[o % 2] = 1
     fnattr[o || "." || nid] = v as .string
     return
   end
@@ -7101,9 +7282,13 @@ setslice: procedure = .void
     do i = sl_a + sl_n to n - 1
       call list_append newl, sl[ob_p[o % 2] + i]
     end
+    call orphan_block ob_p[o % 2], ob_x[o % 2]
     ob_p[o % 2] = ob_p[newl % 2]
     ob_n[o % 2] = ob_n[newl % 2]
     ob_x[o % 2] = ob_x[newl % 2]
+    ob_p[newl % 2] = 0
+    ob_n[newl % 2] = 0
+    ob_x[newl % 2] = 0
     return
   end
   if ob_n[src % 2] \= sl_n then do
@@ -7157,9 +7342,13 @@ delitem: procedure = .void
         end
         if j = 0 then call list_append newl, sl[ob_p[o % 2] + i]
       end
+      call orphan_block ob_p[o % 2], ob_x[o % 2]
       ob_p[o % 2] = ob_p[newl % 2]
       ob_n[o % 2] = ob_n[newl % 2]
       ob_x[o % 2] = ob_x[newl % 2]
+      ob_p[newl % 2] = 0
+      ob_n[newl % 2] = 0
+      ob_x[newl % 2] = 0
       return
     end
     i = idx_int(ix)
@@ -8263,14 +8452,19 @@ aug_op_apply: procedure = .int
   end
   if k = 7 & op = 3 & numkind(v) = 1 then do
     l = seq_repeat(cur, ival(v))
+    call orphan_block ob_p[cur % 2], ob_x[cur % 2]
     ob_p[cur % 2] = ob_p[l % 2]
     ob_n[cur % 2] = ob_n[l % 2]
     ob_x[cur % 2] = ob_x[l % 2]
+    ob_p[l % 2] = 0
+    ob_n[l % 2] = 0
+    ob_x[l % 2] = 0
     return cur
   end
   if k = 10 & kind_of(v) = 10 & (op = 11 | op = 10 | op = 2 | op = 12) then do
     l = set_op(op, cur, v)
     ob_x[cur % 2] = ob_x[l % 2]
+    ob_x[l % 2] = 0
     return cur
   end
   if k = 9 & op = 11 & kind_of(v) = 9 then do
@@ -8303,6 +8497,224 @@ aug_op_apply: procedure = .int
     if m > 0 then return call2(m, cur, v)
   end
   return arith(op, cur, v)
+
+ex_for: procedure = .void
+  arg n = .int, fb = .int
+  t = .int
+  v = .int
+  i = .int
+  c = .int
+  tv = .int
+  r = .int
+  o = .int
+  ix = .int
+  brk = .int
+  st = .int
+  cnt = .int
+  it = .int
+  a = .int
+  b = .int
+  stp = .int
+  tg = .int
+  itn = .int
+  d = .int
+  f = .int
+  hs = .int
+  h = .int
+  ty = .int
+  sv = .int
+  sv2 = .int
+  svc = .int
+  m = .int
+  ex1 = .int
+  ex2 = .int
+  base = .int
+  tt = .int
+  op = .int
+  nm = .string
+  s2 = .string
+  ok_range = .int
+  pm = .int
+  ln = .int
+  t = n_t[n]
+  pm = 0
+  ln = 0
+  tg = n_a[n]
+  itn = n_b[n]
+  brk = 0
+  /* fast path: for x in range(...) */
+  if n_t[itn] = 8 then do
+    if n_t[n_a[itn]] = 14 & n_a[n_a[itn]] = range_oop & n_d[itn] = 0 & n_c[itn] >= 1 & n_c[itn] <= 3 then do
+      cnt = n_c[itn]
+      st = n_b[itn]
+      a = 0
+      b = 0
+      stp = 1
+      ok_range = 1
+      v = ev(al[st], fb)
+      if v = 0 then return
+      if v // 2 = 0 then ok_range = 0
+      if cnt = 1 then b = (v - 1) % 2
+      else do
+        a = (v - 1) % 2
+        v = ev(al[st + 1], fb)
+        if v = 0 then return
+        if v // 2 = 0 then ok_range = 0
+        b = (v - 1) % 2
+        if cnt = 3 then do
+          v = ev(al[st + 2], fb)
+          if v = 0 then return
+          if v // 2 = 0 then ok_range = 0
+          stp = (v - 1) % 2
+          if stp = 0 then do
+            r = raise_exc(36, "range() arg 3 must not be zero")
+            return
+          end
+        end
+      end
+      if ok_range = 1 then do
+        i = a
+        pm = ny
+        ln = pm
+        do forever
+          if stp > 0 then do
+            if i >= b then leave
+          end
+          else do
+            if i <= b then leave
+          end
+          if n_t[tg] = 34 then vp[fb + n_a[tg]] = i * 2 + 1
+          else do
+            call store tg, i * 2 + 1, fb
+            if unw > 0 then return
+          end
+          call ex n_c[n], fb
+          if unw > 0 then do
+            if unw = 2 then do
+              unw = 0
+              brk = 1
+              leave
+            end
+            else if unw = 3 then unw = 0
+            else return
+          end
+          if ny - ln + npw >= gcthr then do
+            call gc_run pm, 0
+            ln = ny
+          end
+          i = i + stp
+        end
+        if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
+        return
+      end
+    end
+  end
+  v = ev(itn, fb)
+  if v = 0 then return
+  it = iter_new(v)
+  if it = 0 then return
+  pm = ny
+  ln = pm
+  do forever
+    v = iter_next(it)
+    if v = 0 then do
+      if unw > 0 then return
+      leave
+    end
+    if n_t[tg] = 34 then vp[fb + n_a[tg]] = v
+    else do
+      call store tg, v, fb
+      if unw > 0 then return
+    end
+    call ex n_c[n], fb
+    if unw > 0 then do
+      if unw = 2 then do
+        unw = 0
+        brk = 1
+        leave
+      end
+      else if unw = 3 then unw = 0
+      else return
+    end
+    if ny - ln + npw >= gcthr then do
+      call gc_run pm, 0
+      ln = ny
+    end
+  end
+  if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
+  return
+  return
+
+ex_while: procedure = .void
+  arg n = .int, fb = .int
+  t = .int
+  v = .int
+  i = .int
+  c = .int
+  tv = .int
+  r = .int
+  o = .int
+  ix = .int
+  brk = .int
+  st = .int
+  cnt = .int
+  it = .int
+  a = .int
+  b = .int
+  stp = .int
+  tg = .int
+  itn = .int
+  d = .int
+  f = .int
+  hs = .int
+  h = .int
+  ty = .int
+  sv = .int
+  sv2 = .int
+  svc = .int
+  m = .int
+  ex1 = .int
+  ex2 = .int
+  base = .int
+  tt = .int
+  op = .int
+  nm = .string
+  s2 = .string
+  ok_range = .int
+  pm = .int
+  ln = .int
+  t = n_t[n]
+  pm = ny
+  ln = pm
+  brk = 0
+  do forever
+    c = ev(n_a[n], fb)
+    if c = 0 then return
+    if c = 4 then tv = 1
+    else if c = 6 | c = 2 then tv = 0
+    else do
+      tv = truthy(c)
+      if unw > 0 then return
+    end
+    if tv = 0 then leave
+    call ex n_b[n], fb
+    if unw > 0 then do
+      if unw = 2 then do
+        unw = 0
+        brk = 1
+        leave
+      end
+      else if unw = 3 then unw = 0
+      else return
+    end
+    if ny - ln + npw >= gcthr then do
+      call gc_run pm, 0
+      ln = ny
+    end
+  end
+  if brk = 0 & n_c[n] > 0 then call ex n_c[n], fb
+  return
+  return
 
 ex: procedure = .void
   arg n = .int, fb = .int
@@ -8392,123 +8804,17 @@ ex: procedure = .void
     return
   end
   if t = 22 then do
-    tg = n_a[n]
-    itn = n_b[n]
-    brk = 0
-    /* fast path: for x in range(...) */
-    if n_t[itn] = 8 then do
-      if n_t[n_a[itn]] = 14 & n_a[n_a[itn]] = range_oop & n_d[itn] = 0 & n_c[itn] >= 1 & n_c[itn] <= 3 then do
-        cnt = n_c[itn]
-        st = n_b[itn]
-        a = 0
-        b = 0
-        stp = 1
-        ok_range = 1
-        v = ev(al[st], fb)
-        if v = 0 then return
-        if v // 2 = 0 then ok_range = 0
-        if cnt = 1 then b = (v - 1) % 2
-        else do
-          a = (v - 1) % 2
-          v = ev(al[st + 1], fb)
-          if v = 0 then return
-          if v // 2 = 0 then ok_range = 0
-          b = (v - 1) % 2
-          if cnt = 3 then do
-            v = ev(al[st + 2], fb)
-            if v = 0 then return
-            if v // 2 = 0 then ok_range = 0
-            stp = (v - 1) % 2
-            if stp = 0 then do
-              r = raise_exc(36, "range() arg 3 must not be zero")
-              return
-            end
-          end
-        end
-        if ok_range = 1 then do
-          i = a
-          do forever
-            if stp > 0 then do
-              if i >= b then leave
-            end
-            else do
-              if i <= b then leave
-            end
-            if n_t[tg] = 34 then vp[fb + n_a[tg]] = i * 2 + 1
-            else do
-              call store tg, i * 2 + 1, fb
-              if unw > 0 then return
-            end
-            call ex n_c[n], fb
-            if unw > 0 then do
-              if unw = 2 then do
-                unw = 0
-                brk = 1
-                leave
-              end
-              else if unw = 3 then unw = 0
-              else return
-            end
-            i = i + stp
-          end
-          if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
-          return
-        end
-      end
-    end
-    v = ev(itn, fb)
-    if v = 0 then return
-    it = iter_new(v)
-    if it = 0 then return
-    do forever
-      v = iter_next(it)
-      if v = 0 then do
-        if unw > 0 then return
-        leave
-      end
-      if n_t[tg] = 34 then vp[fb + n_a[tg]] = v
-      else do
-        call store tg, v, fb
-        if unw > 0 then return
-      end
-      call ex n_c[n], fb
-      if unw > 0 then do
-        if unw = 2 then do
-          unw = 0
-          brk = 1
-          leave
-        end
-        else if unw = 3 then unw = 0
-        else return
-      end
-    end
-    if brk = 0 & n_d[n] > 0 then call ex n_d[n], fb
+    wd = wd + 1
+    call ex_for n, fb
+    wd = wd - 1
+    if wd = 0 then ny = 0
     return
   end
   if t = 53 then do
-    brk = 0
-    do forever
-      c = ev(n_a[n], fb)
-      if c = 0 then return
-      if c = 4 then tv = 1
-      else if c = 6 | c = 2 then tv = 0
-      else do
-        tv = truthy(c)
-        if unw > 0 then return
-      end
-      if tv = 0 then leave
-      call ex n_b[n], fb
-      if unw > 0 then do
-        if unw = 2 then do
-          unw = 0
-          brk = 1
-          leave
-        end
-        else if unw = 3 then unw = 0
-        else return
-      end
-    end
-    if brk = 0 & n_c[n] > 0 then call ex n_c[n], fb
+    wd = wd + 1
+    call ex_while n, fb
+    wd = wd - 1
+    if wd = 0 then ny = 0
     return
   end
   if t = 5 then do
@@ -9013,19 +9319,34 @@ gen_new: procedure = .int
   g = .int
   o = .int
   cap = .int
+  rb = .int
   if fd_gd[fd] = 0 then fd_gd[fd] = ydepth(fd_body[fd]) + 2
   cap = fd_gd[fd]
-  ngn = ngn + 1
-  g = ngn
+  if gn_fh > 0 then do
+    g = gn_fh
+    gn_fh = gn_nx[g]
+  end
+  else do
+    ngn = ngn + 1
+    g = ngn
+  end
   gn_fd[g] = fd
   gn_fb[g] = nf
   gn_st[g] = 0
   gn_sp[g] = 0
-  gn_rb[g] = ngs
+  rb = gsf[cap]
+  if rb > 0 then do
+    gsf[cap] = gs_s[rb + 1]
+    gs_s[rb + 1] = 0
+  end
+  else do
+    rb = ngs
+    ngs = ngs + cap + 1
+    gs_n[ngs] = 0
+  end
+  gn_rb[g] = rb
   gn_val[g] = 2
   gn_ret[g] = 2
-  ngs = ngs + cap + 1
-  gs_n[ngs] = 0
   o = newobj(19)
   ob_x[o % 2] = g
   return o
@@ -12262,6 +12583,7 @@ meth_set: procedure = .int
         else if nid = 48 then t = set_op(10, o, x)
         else t = set_op(2, o, x)
         ob_x[o % 2] = ob_x[t % 2]
+        ob_x[t % 2] = 0
       end
       return 2
     end
@@ -13390,6 +13712,9 @@ parse_module: procedure = .int
   body = .int
   sc = .int
   dmy = .int
+  wd_save = .int
+  wd_save = wd
+  wd = 0
   ntk = 0
   tpp = 1
   psp = 0
@@ -13409,6 +13734,7 @@ parse_module: procedure = .int
   body = p_file()
   call scope_end sc
   mod_dyn[mi] = parse_dyn
+  wd = wd_save
   if pe = 1 then return 0
   return body
 
@@ -15082,13 +15408,55 @@ np_new: procedure = .int
   ob_n[ix] = sz
   ob_y[ix] = 0
   if nd > 0 then ob_y[ix] = alloc_slots(nd)
-  if dt = 2 then do
-    ob_p[ix] = npn + 1
-    npn = npn + sz
-    if sz > 0 then npf[npn] = 0.0
-  end
+  npw = npw + sz % 8
+  if dt = 2 then ob_p[ix] = np_falloc(sz)
   else ob_p[ix] = alloc_slots(sz)
   return o
+
+/* float data: a block of sz slots of the float store npf (recycled through size lists) */
+np_falloc: procedure = .int
+  arg sz = .int
+  st = .int
+  v = .string
+  nx = .int
+  if sz > 0 then do
+    v = nfh[sz]
+    if v \== "" then do
+      st = v as .int
+      if st > 0 then do
+        nx = rxfloat..trunc(npf[st]) as .int
+        nfh[sz] = nx as .string
+        npf[st] = 0.0
+        return st
+      end
+    end
+  end
+  st = npn + 1
+  npn = npn + sz
+  if sz > 0 then npf[npn] = 0.0
+  return st
+
+np_ffree: procedure = .void
+  arg st = .int, sz = .int
+  i = .int
+  v = .string
+  nx = .int
+  if st <= 0 | sz <= 0 then return
+  if gcpoison = 1 then do
+    do i = 0 to sz - 1
+      npf[st + i] = 7.7e77
+    end
+    return
+  end
+  do i = 0 to sz - 1
+    npf[st + i] = 0.0
+  end
+  v = nfh[sz]
+  nx = 0
+  if v \== "" then nx = v as .int
+  npf[st] = nx as .float
+  nfh[sz] = st as .string
+  return
 
 /* copy the scratch shape nprs[1..nprn] into array r */
 np_shape_from_scratch: procedure = .void
@@ -15247,6 +15615,8 @@ np_mkview: procedure = .int
   r = newobj(29)
   ir = r % 2
   ob_c[ir] = ob_c[ia]
+  if ob_s[ia] \== "" then ob_s[ir] = ob_s[ia]
+  else ob_s[ir] = a as .string
   ob_p[ir] = ob_p[ia] + start * sub
   if drop = 1 then do
     ob_x[ir] = nd - 1
@@ -18484,18 +18854,18 @@ bcall_np: procedure = .int
    --------------------------------------------------------------------- */
 mkbytes: procedure = .int
   arg s = .string
-  nob = nob + 1
-  ob_k[nob] = 31
-  ob_s[nob] = s
-  return nob * 2
+  o = .int
+  o = newobj(31)
+  ob_s[o % 2] = s
+  return o
 
 mkbytearr: procedure = .int
   arg s = .string
-  nob = nob + 1
-  ob_k[nob] = 31
-  ob_s[nob] = s
-  ob_y[nob] = 1
-  return nob * 2
+  o = .int
+  o = newobj(31)
+  ob_s[o % 2] = s
+  ob_y[o % 2] = 1
+  return o
 
 /* a bytes-like object of the same type as o */
 bytes_like: procedure = .int
@@ -19478,11 +19848,11 @@ int_from_bytes: procedure = .int
    --------------------------------------------------------------------- */
 mkcplx: procedure = .int
   arg re = .float, im = .float
-  nob = nob + 1
-  ob_k[nob] = 32
-  ob_f[nob] = re
-  ob_g[nob] = im
-  return nob * 2
+  o = .int
+  o = newobj(32)
+  ob_f[o % 2] = re
+  ob_g[o % 2] = im
+  return o
 
 /* real and imaginary part of a number into cx_re / cx_im (first) or cx_re2 / cx_im2 (second) */
 cplx_get: procedure = .void
@@ -20162,10 +20532,10 @@ nat_wrap: procedure = .int
   o = .int
   i = .int
   if bt = 8 then do
-    o = newobj(8)
-    ob_p[o % 2] = ob_p[v % 2]
-    ob_n[o % 2] = ob_n[v % 2]
-    ob_x[o % 2] = ob_x[v % 2]
+    o = mktuple(ob_n[v % 2])
+    do i = 0 to ob_n[v % 2] - 1
+      sl[ob_p[o % 2] + i] = sl[ob_p[v % 2] + i]
+    end
   end
   else if bt = 6 then o = mkstr(ob_s[v % 2])
   else if bt = 3 then o = mkbig(num_str(v))
@@ -20382,4 +20752,497 @@ sock_call: procedure = .int
     otherwise nop
   end
   return 2
+
+/* ---------------------------------------------------------------------
+   Garbage collector for the object table.
+
+   Objects that are allocated while a "window" is open (a loop or a function call in progress) are
+   recorded in the young list yl[1 .. ny].  A loop calls gc_run at the end of an iteration, a function
+   call calls it just before it returns, with pm = ny as it was when the loop / call started.  The
+   objects yl[pm+1 .. ny] were created by code that has finished (the iteration, the call): no
+   CREXX register of an enclosing evaluation can hold them, except the return value rv.  They are
+   live only if they are reachable from an object that is not young (an "old" mutable container),
+   from the frames / argument stack / tables below, or from rv.  Everything else is freed to the
+   object free list; the slot blocks, dictionary entries and dictionary numbers they own are
+   recycled.  Classes, modules, generators, files and builtins are never freed.
+   --------------------------------------------------------------------- */
+gc_mark: procedure = .void
+  arg v = .int
+  i = .int
+  k = .int
+  if v < 2 then return
+  if v // 2 \= 0 then return
+  i = v % 2
+  if i > nob then return
+  k = ob_k[i]
+  if k < 200 | k >= 400 then return
+  ob_k[i] = k + 200
+  k = k - 200
+  if (k >= 7 & k <= 10) | k = 12 | k = 14 | k = 15 | k = 17 | (k >= 20 & k <= 25) | k = 29 | k = 30 then do
+    gsp = gsp + 1
+    gstk[gsp] = i
+  end
+  return
+
+/* mark the children of object i (real kind k) */
+/* mark a finished function frame that a closure can still reach, and what it holds */
+fr_mark: procedure = .void
+  arg fb = .int
+  j = .int
+  w = .int
+  ix = .int
+  kk = .int
+  fcm[fb] = 2
+  do j = 1 to fcs[fb] - 1
+    w = vp[fb + j]
+    if w > 1 then do
+      if w // 2 = 0 then do
+        ix = w % 2
+        if ix <= nob then do
+          kk = ob_k[ix]
+          if kk >= 200 & kk < 400 then call gc_mark w
+        end
+      end
+      if w <= nvp then do
+        if fcm[w] = 1 then call fr_mark w
+      end
+    end
+  end
+  return
+
+gc_scan: procedure = .void
+  arg i = .int, k = .int
+  j = .int
+  n = .int
+  st = .int
+  v = .int
+  e = .int
+  d = .int
+  ix = .int
+  kk = .int
+  hv = .string
+  if k = 7 | k = 8 | k = 17 then do
+    n = ob_n[i]
+    st = ob_p[i]
+    do j = 0 to n - 1
+      v = sl[st + j]
+      if v > 1 then do
+        if v // 2 = 0 then do
+          ix = v % 2
+          kk = ob_k[ix]
+          if kk >= 200 & kk < 400 then call gc_mark v
+        end
+      end
+    end
+    if k \= 17 & ob_c[i] > 0 then do
+      hv = nat_at["h" || (i * 2)]
+      if hv \== "" then call gc_mark hv as .int
+    end
+    return
+  end
+  if k = 9 | k = 10 then do
+    d = ob_x[i]
+    e = dd_head[d]
+    do while e > 0
+      if de_live[e] = 1 then do
+        call gc_mark de_key[e]
+        call gc_mark de_val[e]
+      end
+      e = de_next[e]
+    end
+    if dd_own[d] > 0 then call gc_mark dd_own[d]
+    if ob_c[i] > 0 then do
+      hv = nat_at["h" || (i * 2)]
+      if hv \== "" then call gc_mark hv as .int
+    end
+    return
+  end
+  if k = 12 then do
+    n = ob_y[i]
+    if n > 1 & n <= nvp then do
+      if fcm[n] = 1 then call fr_mark n
+    end
+    n = fd_nr[ob_x[i]]
+    st = ob_p[i]
+    do j = 0 to n - 1
+      call gc_mark sl[st + j]
+    end
+    return
+  end
+  if k = 14 then do
+    call gc_mark ob_x[i]
+    call gc_mark ob_y[i]
+    return
+  end
+  if k = 29 then do
+    hv = ob_s[i]
+    if hv \== "" then call gc_mark hv as .int
+    return
+  end
+  if k = 15 then do
+    call gc_mark ob_y[i]
+    return
+  end
+  if k = 30 then do
+    call gc_mark ob_x[i]
+    return
+  end
+  if k = 20 then do
+    if ob_n[i] = 9 | ob_n[i] = 10 then do
+      n = ob_c[i]
+      st = ob_p[i]
+      do j = 0 to n - 1
+        call gc_mark sl[st + j]
+      end
+    end
+  end
+  /* iterators, slices, property / static / class methods, super: any field may hold an object */
+  call gc_mark ob_c[i]
+  call gc_mark ob_n[i]
+  call gc_mark ob_x[i]
+  call gc_mark ob_y[i]
+  return
+
+/* release the storage owned by the unreachable object i (kind k) and put it on the free list */
+gc_free: procedure = .void
+  arg i = .int, k = .int
+  d = .int
+  e = .int
+  nx = .int
+  g = .int
+  fd = .int
+  cap = .int
+  rb = .int
+  j = .int
+  if k = 5 & gcpoison = 0 then do
+    if ob_c[i] \= 0 then ob_c[i] = 0
+    ob_k[i] = 0
+    ob_n[i] = fo_head
+    fo_head = i
+    return
+  end
+  if k = 7 | k = 8 then do
+    if ob_c[i] > 0 then nat_at["h" || (i * 2)] = ""
+    call free_block ob_p[i], ob_x[i]
+  end
+  else if k = 17 then call free_block ob_p[i], ob_n[i]
+  else if k = 20 then do
+    if ob_n[i] = 9 | ob_n[i] = 10 then call free_block ob_p[i], ob_c[i]
+    else if ob_n[i] = 18 then call free_block ob_p[i], 3
+  end
+  else if k = 12 then call free_block ob_p[i], fd_nr[ob_x[i]] + 1
+  else if k = 29 then do
+    if ob_y[i] > 0 & ob_x[i] > 0 then call free_block ob_y[i], ob_x[i]
+    if ob_s[i] == "" then do
+      if ob_c[i] = 2 then call np_ffree ob_p[i], ob_n[i]
+      else call free_block ob_p[i], ob_n[i]
+    end
+  end
+  else if k = 19 then do
+    g = ob_x[i]
+    fd = gn_fd[g]
+    if gn_st[g] \= 2 & fd > 0 then do
+      if (fd_fl[fd] // 4) < 2 then call free_frame gn_fb[g], fd_ns[fd]
+      cap = fd_gd[fd]
+      rb = gn_rb[g]
+      do j = 1 to cap + 1
+        gs_n[rb + j] = 0
+        gs_s[rb + j] = 0
+        gs_a[rb + j] = 0
+        gs_b[rb + j] = 0
+      end
+      if gcpoison = 0 then do
+        gs_s[rb + 1] = gsf[cap]
+        gsf[cap] = rb
+        gn_fd[g] = 0
+        gn_val[g] = 0
+        gn_ret[g] = 0
+        gn_st[g] = 3
+        gn_nx[g] = gn_fh
+        gn_fh = g
+      end
+    end
+  end
+  else if k = 9 | k = 10 then do
+    if ob_c[i] > 0 then nat_at["h" || (i * 2)] = ""
+    d = ob_x[i]
+    if d > 0 then do
+      e = dd_head[d]
+      do while e > 0
+        nx = de_next[e]
+        if de_live[e] = 1 then dmap[d || "|" || de_hk[e]] = ""
+        de_key[e] = 0
+        de_val[e] = 0
+        de_live[e] = 0
+        de_hk[e] = ""
+        de_next[e] = de_fh
+        de_fh = e
+        e = nx
+      end
+      dd_head[d] = 0
+      dd_n[d] = 0
+      dd_own[d] = 0
+      dd_tail[d] = dd_fh
+      dd_fh = d
+    end
+  end
+  if gcpoison = 1 then do
+    /* stress mode: the slot is never reused, every field is poisoned so that a dangling reference fails loudly */
+    ob_c[i] = 0 - 4
+    ob_x[i] = 0 - 4
+    ob_y[i] = 0 - 4
+    ob_p[i] = 0 - 4
+    ob_n[i] = 0 - 4
+    ob_s[i] = "@@freed@@"
+    ob_k[i] = 0
+    return
+  end
+  ob_c[i] = 0
+  ob_x[i] = 0
+  ob_y[i] = 0
+  ob_p[i] = 0
+  ob_s[i] = ""
+  ob_f[i] = 0.0
+  ob_g[i] = 0.0
+  ob_k[i] = 0
+  ob_n[i] = fo_head
+  fo_head = i
+  return
+
+gc_run: procedure = .void
+  arg pm = .int, rv = .int
+  i = .int
+  j = .int
+  k = .int
+  n = .int
+  st = .int
+  sz = .int
+  fb = .int
+  nx = .int
+  nk = .int
+  cnt = .int
+  v = .int
+  sv = .string
+  imm = .int
+  ix = .int
+  kk = .int
+  cnt = 0
+  gc_count = gc_count + 1
+  /* blocks that were replaced by list growth */
+  do while orph_h > 0
+    st = orph_h
+    orph_h = sl[st]
+    n = sl[st + 1]
+    call free_block st, n
+  end
+  /* free frames hold stale values */
+  do sz = 1 to maxfs
+    fb = fl_head[sz]
+    do while fb > 0
+      nx = vp[fb]
+      do j = 1 to sz - 1
+        vp[fb + j] = 0
+      end
+      fb = nx
+    end
+  end
+  /* compact the list of containers */
+  n = 0
+  do j = 1 to nct
+    i = ctl[j]
+    k = ob_k[i]
+    if k = 7 | k = 9 | k = 10 | k = 17 | k = 20 | k = 12 then do
+      ob_k[i] = k + 1000
+      n = n + 1
+      ctl[n] = i
+    end
+  end
+  do j = 1 to n
+    i = ctl[j]
+    ob_k[i] = ob_k[i] - 1000
+  end
+  nct = n
+  /* phase 0: flag the window as young */
+  do j = pm + 1 to ny
+    i = yl[j]
+    k = ob_k[i]
+    if k = 5 | k = 6 then ob_k[i] = k + 200
+    else do
+      imm = 0
+      if k = 16 | k = 18 | k = 26 | k = 13 | k = 1 | k = 2 | k = 27 | k = 28 then imm = 1
+      else if k = 12 & ob_c[i] = 1 then imm = 1
+      if imm = 0 then ob_k[i] = k + 200
+    end
+  end
+  gsp = 0
+  /* phase 1: roots */
+  call gc_mark rv
+  call gc_mark unw_v
+  call gc_mark exc_cur
+  call gc_mark ev_self
+  call gc_mark gen_throw
+  j = 1
+  do while j <= nvp
+    if fcm[j] > 0 then j = j + fcs[j]
+    else do
+      v = vp[j]
+      if v > 1 then do
+        if v // 2 = 0 then do
+          ix = v % 2
+          if ix <= nob then do
+            kk = ob_k[ix]
+            if kk >= 200 & kk < 400 then call gc_mark v
+          end
+        end
+        if v <= nvp then do
+          if fcm[v] = 1 then call fr_mark v
+        end
+      end
+      j = j + 1
+    end
+  end
+  n = ast.0
+  if n > asp + 256 then n = asp + 256
+  do j = 1 to n
+    v = ast[j]
+    if v > 1 then do
+      if v // 2 = 0 then do
+        ix = v % 2
+        if ix <= nob then do
+          kk = ob_k[ix]
+          if kk >= 200 & kk < 400 then call gc_mark v
+        end
+      end
+    end
+  end
+  n = chr_oop.0
+  do j = 1 to n
+    call gc_mark chr_oop[j]
+  end
+  n = bi_oop.0
+  do j = 1 to n
+    call gc_mark bi_oop[j]
+  end
+  n = cl_obj.0
+  do j = 1 to n
+    call gc_mark cl_obj[j]
+  end
+  n = cl_dflt.0
+  do j = 1 to n
+    call gc_mark cl_dflt[j]
+  end
+  n = mod_obj.0
+  do j = 1 to n
+    call gc_mark mod_obj[j]
+  end
+  n = dyn_val.0
+  do j = 1 to n
+    call gc_mark dyn_val[j]
+  end
+  n = cd_obj.0
+  do j = 1 to n
+    call gc_mark cd_obj[j]
+  end
+  n = gn_val.0
+  do j = 1 to n
+    call gc_mark gn_val[j]
+  end
+  n = gn_ret.0
+  do j = 1 to n
+    call gc_mark gn_ret[j]
+  end
+  n = gs_a.0
+  do j = 1 to n
+    call gc_mark gs_a[j]
+  end
+  n = gs_b.0
+  do j = 1 to n
+    call gc_mark gs_b[j]
+  end
+  n = ca.size()
+  do j = 1 to n
+    sv = ca.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = fnattr.size()
+  do j = 1 to n
+    sv = fnattr.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = modo.size()
+  do j = 1 to n
+    sv = modo.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = modattr.size()
+  do j = 1 to n
+    sv = modattr.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = modx.size()
+  do j = 1 to n
+    sv = modx.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = nat_at.size()
+  do j = 1 to n
+    sv = nat_at.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  n = bimap.size()
+  do j = 1 to n
+    sv = bimap.value(j)
+    if sv \== "" then call gc_mark sv as .int
+  end
+  /* old mutable containers may point to young objects */
+  do j = 1 to nct
+    i = ctl[j]
+    k = ob_k[i]
+    if k < 100 then call gc_scan i, k
+  end
+  /* transitive closure */
+  do while gsp > 0
+    i = gstk[gsp]
+    gsp = gsp - 1
+    call gc_scan i, ob_k[i] - 400
+  end
+  /* finished closure frames that nothing reaches any more */
+  n = 0
+  do j = 1 to ncf
+    fb = cfl[j]
+    if fcm[fb] = 2 then do
+      fcm[fb] = 1
+      n = n + 1
+      cfl[n] = fb
+    end
+    else do
+      fcm[fb] = 0
+      call free_frame fb, fcs[fb]
+    end
+  end
+  ncf = n
+  npw = 0
+  /* phase 2: sweep the window */
+  nk = pm
+  do j = pm + 1 to ny
+    i = yl[j]
+    k = ob_k[i]
+    if k >= 400 then do
+      ob_k[i] = k - 400
+      nk = nk + 1
+      yl[nk] = i
+    end
+    else if k >= 200 then do
+      call gc_free i, k - 200
+      cnt = cnt + 1
+    end
+  end
+  ny = nk
+  gc_freed = gc_freed + cnt
+  /* next collection after as many allocations as there are survivors, and live objects / 2 */
+  gcthr = nk - pm
+  if gcthr < nct then gcthr = nct
+  if gcthr < gcmin then gcthr = gcmin
+  if gcfix > 0 then gcthr = gcfix
+  return
 

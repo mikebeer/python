@@ -1214,6 +1214,7 @@ meth_set: procedure = .int
         else if nid = M_INTERSECTION_UPDATE then t = set_op(O_BITAND, o, x)
         else t = set_op(O_SUB, o, x)
         ob_x[o % 2] = ob_x[t % 2]
+        ob_x[t % 2] = 0
       end
       return NONE_OOP
     end

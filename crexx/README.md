@@ -104,6 +104,22 @@ results of any type, `__abs__ __round__ __format__ __call__ __enter__ __exit__`,
 `eval`/`exec` run the text in a temporary module whose names are copied from and back to the given namespace dict
 (`globals()` and `locals()` return snapshots; `exec` at module level writes new names back to the module).
 
+## Memory management (src/m_gc.crexx)
+
+Generational-style mark and sweep over the object table. Objects born while a "window" (a loop
+or a function call) is open are recorded in the young list `yl`. At the end of a loop iteration or
+just before a function returns, if enough objects (or numpy float storage, `npw`) were allocated,
+`gc_run` marks from the roots (frame stack `vp`, argument stack, interned tables, class/module
+tables, generator stacks, exception state, the return value) plus every old mutable container
+(`ctl`), and frees the unmarked young objects. Collection only happens at those safe points, never
+inside a primitive. Freed slots, slot blocks (size classes), dict entries, dict ids, generator
+regions and numpy float blocks are reused. Frames of finished functions that define closures are
+kept in `cfl` and freed when no live function object or frame reaches them.
+Classes, modules, files, builtins and functions with attributes are never freed. Survivors become part of the
+enclosing window, there is no tenuring. Options: `--memstat` (stats on stderr), `--nogc`,
+`--gcfix=N` (threshold N, reuse), `--gcstress=N` (like gcfix but never reuses slots, so stale
+references show up as errors).
+
 ## Known gaps
 
 - numpy: no structured/string/object dtypes (complex128 lives in `pylib/numpy/_cplx.py`, see above); `reshape`, `T`, strided slices and fancy indexing return

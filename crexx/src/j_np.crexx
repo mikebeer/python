@@ -21,13 +21,55 @@ np_new: procedure = .int
   ob_n[ix] = sz
   ob_y[ix] = 0
   if nd > 0 then ob_y[ix] = alloc_slots(nd)
-  if dt = 2 then do
-    ob_p[ix] = npn + 1
-    npn = npn + sz
-    if sz > 0 then npf[npn] = 0.0
-  end
+  npw = npw + sz % 8
+  if dt = 2 then ob_p[ix] = np_falloc(sz)
   else ob_p[ix] = alloc_slots(sz)
   return o
+
+/* float data: a block of sz slots of the float store npf (recycled through size lists) */
+np_falloc: procedure = .int
+  arg sz = .int
+  st = .int
+  v = .string
+  nx = .int
+  if sz > 0 then do
+    v = nfh[sz]
+    if v \== "" then do
+      st = v as .int
+      if st > 0 then do
+        nx = rxfloat..trunc(npf[st]) as .int
+        nfh[sz] = nx as .string
+        npf[st] = 0.0
+        return st
+      end
+    end
+  end
+  st = npn + 1
+  npn = npn + sz
+  if sz > 0 then npf[npn] = 0.0
+  return st
+
+np_ffree: procedure = .void
+  arg st = .int, sz = .int
+  i = .int
+  v = .string
+  nx = .int
+  if st <= 0 | sz <= 0 then return
+  if gcpoison = 1 then do
+    do i = 0 to sz - 1
+      npf[st + i] = 7.7e77
+    end
+    return
+  end
+  do i = 0 to sz - 1
+    npf[st + i] = 0.0
+  end
+  v = nfh[sz]
+  nx = 0
+  if v \== "" then nx = v as .int
+  npf[st] = nx as .float
+  nfh[sz] = st as .string
+  return
 
 /* copy the scratch shape nprs[1..nprn] into array r */
 np_shape_from_scratch: procedure = .void
@@ -186,6 +228,8 @@ np_mkview: procedure = .int
   r = newobj(K_ARRAY)
   ir = r % 2
   ob_c[ir] = ob_c[ia]
+  if ob_s[ia] \== "" then ob_s[ir] = ob_s[ia]
+  else ob_s[ir] = a as .string
   ob_p[ir] = ob_p[ia] + start * sub
   if drop = 1 then do
     ob_x[ir] = nd - 1

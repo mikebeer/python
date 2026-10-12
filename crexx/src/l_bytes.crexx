@@ -4,18 +4,18 @@
    --------------------------------------------------------------------- */
 mkbytes: procedure = .int
   arg s = .string
-  nob = nob + 1
-  ob_k[nob] = K_BYTES
-  ob_s[nob] = s
-  return nob * 2
+  o = .int
+  o = newobj(K_BYTES)
+  ob_s[o % 2] = s
+  return o
 
 mkbytearr: procedure = .int
   arg s = .string
-  nob = nob + 1
-  ob_k[nob] = K_BYTES
-  ob_s[nob] = s
-  ob_y[nob] = 1
-  return nob * 2
+  o = .int
+  o = newobj(K_BYTES)
+  ob_s[o % 2] = s
+  ob_y[o % 2] = 1
+  return o
 
 /* a bytes-like object of the same type as o */
 bytes_like: procedure = .int

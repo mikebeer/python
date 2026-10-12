@@ -123,10 +123,10 @@ nat_wrap: procedure = .int
   o = .int
   i = .int
   if bt = C_TUPLE then do
-    o = newobj(K_TUPLE)
-    ob_p[o % 2] = ob_p[v % 2]
-    ob_n[o % 2] = ob_n[v % 2]
-    ob_x[o % 2] = ob_x[v % 2]
+    o = mktuple(ob_n[v % 2])
+    do i = 0 to ob_n[v % 2] - 1
+      sl[ob_p[o % 2] + i] = sl[ob_p[v % 2] + i]
+    end
   end
   else if bt = C_STR then o = mkstr(ob_s[v % 2])
   else if bt = C_INT then o = mkbig(num_str(v))
