@@ -41,6 +41,8 @@ static const char *CS_DIGIT = "0123456789";
 static const char *CS_UP = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 static const char *CS_LOW = "abcdefghijklmnopqrstuvwxyz";
 static const char *CS_HEX = "0123456789abcdefABCDEF";
+/* the printable ASCII characters (space to tilde), as host characters */
+static const char *CS_PRINT = " !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 
 static void init_chars(void)
 {
@@ -48,7 +50,7 @@ static void init_chars(void)
     int i;
     for (i = 0; i < 256; i++) {
         ch_digit[i] = ch_alpha[i] = ch_alnum[i] = ch_space[i] = ch_upper[i] = ch_lower[i] = 0;
-        ch_hex[i] = 0;
+        ch_hex[i] = ch_print[i] = 0;
         to_up[i] = to_low[i] = (unsigned char)i;
     }
     for (p = CS_DIGIT; *p; p++) { ch_digit[(unsigned char)*p] = 1;
@@ -67,6 +69,8 @@ static void init_chars(void)
         to_low[(unsigned char)CS_UP[i]] = (unsigned char)CS_LOW[i];
     }
     for (p = CS_HEX; *p; p++) ch_hex[(unsigned char)*p] = 1;
+    for (p = CS_PRINT; *p; p++) ch_print[(unsigned char)*p] = 1;
+    for (i = 0; i < 256; i++) if (ch_alnum[i]) ch_print[i] = 1;
     ch_alpha[(unsigned char)'_'] = 1;
     ch_alnum[(unsigned char)'_'] = 1;
     for (p = " \t\n\r\f\v"; *p; p++) ch_space[(unsigned char)*p] = 1;

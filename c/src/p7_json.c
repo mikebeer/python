@@ -116,8 +116,8 @@ static void j_str(Buf *b, const char *s, long n, int ascii)
         else if (c == '\n') buf_add(b, "\\n");
         else if (c == '\r') buf_add(b, "\\r");
         else if (c == '\t') buf_add(b, "\\t");
-        else if (c == 8) buf_add(b, "\\b");
-        else if (c == 12) buf_add(b, "\\f");
+        else if (c == (unsigned)'\b') buf_add(b, "\\b");
+        else if (c == (unsigned)'\f') buf_add(b, "\\f");
         else if (c < 128) {
             j_u4(b, (long)c);
         } else {
@@ -546,10 +546,8 @@ static int jd_hex4(const unsigned char *s, long *out)
     int k;
     for (k = 0; k < 4; k++) {
         int c = s[k], d;
-        if (c >= '0' && c <= '9') d = c - '0';
-        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-        else return 0;
+        if (!ch_hex[c]) return 0;
+        d = digit_val(c);
         v = v * 16 + d;
     }
     *out = v;
@@ -725,7 +723,7 @@ static Value jd_object(JDec *D, long i, long *end)
 }
 static int jd_isdig(int c)
 {
-    return c >= '0' && c <= '9';
+    return c >= 0 && c < 256 && ch_digit[c];
 }
 static Value jd_number(JDec *D, long i, long *end, int *ok)
 {
@@ -736,7 +734,7 @@ static Value jd_number(JDec *D, long i, long *end, int *ok)
     *ok = 0;
     if (j < n && s[j] == '-') j++;
     if (j >= n) return NONE_V;
-    if (s[j] >= '1' && s[j] <= '9') { while (j < n && jd_isdig(s[j])) j++; }
+    if (jd_isdig(s[j]) && s[j] != '0') { while (j < n && jd_isdig(s[j])) j++; }
     else if (s[j] == '0') j++;
     else return NONE_V;
     if (j + 1 < n && s[j] == '.' && jd_isdig(s[j + 1])) {

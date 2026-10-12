@@ -862,7 +862,9 @@ typedef struct Module {
     /* global name prefix ("pkg.mod.") for modules written in Python */
     struct Dict *gmap;   /* attribute name -> global slot cache */
 } Module;
-typedef struct Range { Hdr h; long start, stop, step; } Range;
+/* start, stop, step as integers; big = 0 when all three are small ints
+   (then .u.i is used) */
+typedef struct Range { Hdr h; Value a, b, c; int big; } Range;
 #define ND_MAXD 8
 enum { ND_BOOL = 0, ND_INT = 1, ND_FLOAT = 2, ND_COMPLEX = 3 };
 /* complex arrays keep 2 * size doubles (re, im interleaved) in dv */
@@ -917,7 +919,7 @@ enum {
     IK_SET,
        IK_ENUM, IK_ZIP, IK_MAP, IK_FILTER, IK_REV, IK_FILE, IK_CALL,
            IK_LISTREV, IK_ND, IK_BYTES,
-       IK_CALLSENT };
+       IK_CALLSENT, IK_BRANGE };
 typedef struct Iter {
     Hdr h;
     int kind;
@@ -1052,6 +1054,7 @@ static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float,
     *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice,
         *cls_dview[3], *cls_notimpl,
         *cls_bytes, *cls_bytearray, *cls_complex, *cls_frozenset;
+static Class *cls_MemoryError;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError,
     *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError,
@@ -1087,7 +1090,7 @@ static Str *S_init, *S_str, *S_repr, *S_eq, *S_ne, *S_lt, *S_le, *S_gt,
 
 static unsigned char ch_digit[256], ch_alpha[256], ch_alnum[256],
     ch_space[256],
-    ch_upper[256], ch_lower[256], ch_hex[256];
+    ch_upper[256], ch_lower[256], ch_hex[256], ch_print[256];
 static unsigned char to_up[256], to_low[256];
 
 #define V_ISINT(v) ((v).t == T_INT)
@@ -1142,9 +1145,15 @@ static Value cplx_unop(int op, Value a);
 static double n_hypot(double a, double b);
 
 /* ---- value constructors ----------------------------------------- */
+static Value big_from_long(long n);
+/* a long beyond +-SI_MAX (possible with a 64-bit long under -DPY_SI32
+   and for every host value that is not an index or a count) becomes a
+   big integer, so that a T_INT always satisfies |n| <= SI_MAX and
+   equal integers have equal representations */
 static Value mkint(long n)
 {
     Value v;
+    if (n > SI_MAX || n < -SI_MAX) return big_from_long(n);
     v.t = T_INT; v.u.i = n;
     return v;
 }
@@ -1276,6 +1285,8 @@ static unsigned long str_hash(Str *s)
     unsigned long h;
     long i;
     if (s->hash) return s->hash;
+    if (s->len == 0) return 0;
+    /* hash('') == 0 as in CPython (not cached) */
     h = 5381UL;
     for (i = 0; i < s->len; i++) h = ((h << 5) + h) ^ (unsigned char)
         s->s[i];
@@ -1680,6 +1691,11 @@ static void gc_scan(Hdr *h)
         gc_push(b->self); gc_push(b->fn);
         break; }
     case T_CELL: gc_push(((Cell *)h)->v); break;
+    case T_RANGE:
+        gc_push(((Range *)h)->a);
+        gc_push(((Range *)h)->b);
+        gc_push(((Range *)h)->c);
+        break;
     case T_MODULE:
         gc_pushp(((Module *)h)->name, T_STR);
         gc_mark_amap(&((Module *)h)->ns);
@@ -1840,14 +1856,22 @@ static void bn_from_long(BN *b, long v)
 {
     unsigned long u;
     int i = 0;
-    bn_alloc(b, 6);
-    if (v < 0) { b->sign = -1; u = (unsigned long)(-v); }
+    bn_alloc(b, 8);
+    if (v < 0) { b->sign = -1; u = 0UL - (unsigned long)v; }
     else { b->sign = 1; u = (unsigned long)v; }
     while (u > 0) { b->d[i++] = (long)(u % (unsigned long)BASE);
         u /= (unsigned long)BASE;
     }
     b->n = i;
     bn_trim(b);
+}
+static Value bn_to_value(BN *b);
+/* a long outside +-SI_MAX as a big integer (see mkint) */
+static Value big_from_long(long n)
+{
+    BN b;
+    bn_from_long(&b, n);
+    return bn_to_value(&b);
 }
 static void bn_from_value(BN *b, Value v)
 {
@@ -2199,21 +2223,48 @@ static Value int_mod(Value a, Value b)
     return r;
 }
 static void int_str(Value v, Buf *b);
+static int int_to_bin(Value v, unsigned long **out);
 static double int_todouble(Value a)
 {
+    unsigned long *d;
+    int n, i, bit, round_bit, sticky = 0;
+    long bits, k;
+    double m = 0.0;
+    unsigned long top;
     if (a.t != T_BIG) return (double)a.u.i;
-    {
-        Buf b;
-        double d;
-        buf_init(&b);
-        int_str(a, &b);
-        d = strtod(b.s, NULL);
-        buf_free(&b);
-        if (d > DBL_MAX || d < -DBL_MAX)
-            throw_new(cls_OverflowError,
-                "int too large to convert to float");
-        return d;
+    /* correctly rounded (half to even) from the binary digits; no
+       strtod involved */
+    n = int_to_bin(a, &d);
+    top = d[n - 1];
+    bits = 16L * (n - 1);
+    while (top) { bits++; top >>= 1; }
+    if (bits > 1024) { free(d);
+        throw_new(cls_OverflowError,
+            "int too large to convert to float");
     }
+    /* the top 53 bits (or all of them) as an exact double, bit
+       'bits-1' downward */
+    for (k = bits - 1; k >= 0 && k > bits - 54; k--) {
+        bit = (int)((d[k / 16] >> (k % 16)) & 1UL);
+        m = m * 2.0 + (double)bit;
+    }
+    k = bits - 54;
+    /* highest bit not used: the round bit */
+    if (k >= 0) {
+        round_bit = (int)((d[k / 16] >> (k % 16)) & 1UL);
+        for (i = 0; i < k / 16; i++) if (d[i]) sticky = 1;
+        if (k / 16 < n && (d[k / 16] & ((1UL << (k % 16)) - 1UL)))
+            sticky = 1;
+        if (round_bit && (sticky || fmod(m, 2.0) == 1.0)) m += 1.0;
+        free(d);
+        m = ldexp(m, (int)(bits - 53));
+    } else {
+        free(d);
+    }
+    if (m > DBL_MAX)
+        throw_new(cls_OverflowError,
+        "int too large to convert to float");
+    return AS_BIG(a)->sign < 0 ? -m : m;
 }
 static Value int_pow(Value a, long e)
 {
@@ -2243,28 +2294,36 @@ static void int_str(Value v, Buf *b)
         }
     }
 }
-/* digits in base 2, 8, 16 (no prefix) */
+/* digits of |v| in the given base (2..36), no prefix; '-' in front
+   when negative */
 static void int_str_base(Value v, int base, Buf *b)
 {
     static const char dg[] = "0123456789abcdefghijklmnopqrstuvwxyz";
-    char tmp[400];
-    int n = 0, neg = 0, i;
+    char *tmp;
+    long n = 0, i, cap;
+    int neg = 0;
     if (int_sign(v) < 0) { neg = 1; v = int_neg(v); }
     if (int_sign(v) == 0) { buf_addc(b, '0'); return; }
     if (v.t != T_BIG) {
         long x = v.u.i;
-        while (x > 0 && n < 399) { tmp[n++] = dg[x % base];
-            x /= base;
-        }
+        char t2[72];
+        while (x > 0) { t2[n++] = dg[x % base]; x /= base; }
+        if (neg) buf_addc(b, '-');
+        for (i = n - 1; i >= 0; i--) buf_addc(b, t2[i]);
+        return;
     } else {
         BN x;
         bn_from_value(&x, v);
-        while (x.n > 0 && n < 399)
+        cap = 14L * x.n + 8;
+        /* one limb has at most 14 binary digits */
+        tmp = (char *)xmalloc((size_t)cap);
+        while (x.n > 0 && n < cap)
             tmp[n++] = dg[mag_divsmall(&x, base)];
         free(x.d);
     }
     if (neg) buf_addc(b, '-');
     for (i = n - 1; i >= 0; i--) buf_addc(b, tmp[i]);
+    free(tmp);
 }
 static int digit_val(int c)
 {
@@ -2321,40 +2380,316 @@ static int parse_int(const char *s, long n, int base, Value *out)
     *out = neg ? int_neg(acc) : acc;
     return 1;
 }
+/* 1 and *out set when the integer fits a long (a big integer between
+   SI_MAX and LONG_MAX does) */
+static int int_fits_long(Value v, long *out)
+{
+    Big *g;
+    unsigned long u = 0, lim = (unsigned long)LONG_MAX;
+    int i;
+    if (v.t != T_BIG) { *out = v.u.i; return 1; }
+    g = AS_BIG(v);
+    for (i = g->n - 1; i >= 0; i--) {
+        if (u > (lim - (unsigned long)g->d[i]) / 10000UL) return 0;
+        u = u * 10000UL + (unsigned long)g->d[i];
+    }
+    *out = g->sign < 0 ? -(long)u : (long)u;
+    return 1;
+}
+/* ---- binary view of integers: bit operations, bit_length, exact
+   float conversions ---- */
+/* |v| as base 65536 digits, least significant first, in a fresh array
+   (free() it); returns the digit count, 0 for zero. The array always
+   has room for one more digit. */
+static int int_to_bin(Value v, unsigned long **out)
+{
+    BN x;
+    unsigned long *d;
+    int n = 0;
+    bn_from_value(&x, v);
+    d
+        = (unsigned long *)xmalloc(sizeof(unsigned long)
+        * (size_t)(x.n + 3));
+    while (x.n > 0) d[n++] = (unsigned long)mag_divsmall(&x, 65536L);
+    free(x.d);
+    *out = d;
+    return n;
+}
+/* the integer with magnitude d[0..n) (base 65536) and the given sign
+   */
+static Value int_from_bin(const unsigned long *d, int n, int neg)
+{
+    BN r;
+    int i, j;
+    long c, t;
+    bn_alloc(&r, 2 * n + 3);
+    r.n = 0;
+    for (i = n - 1; i >= 0; i--) {
+        c = (long)d[i];
+        for (j = 0; j < r.n; j++) {
+            t = r.d[j] * 65536L + c;
+            c = t / BASE;
+            r.d[j] = t % BASE;
+        }
+        while (c) { r.d[r.n++] = c % BASE; c /= BASE; }
+    }
+    r.sign = neg ? -1 : 1;
+    return bn_to_value(&r);
+}
+static long int_bitlen(Value v)
+{
+    unsigned long *d, top;
+    long bits;
+    int n;
+    if (v.t != T_BIG) {
+        unsigned long u = v.u.i < 0 ? 0UL - (unsigned long)v.u.i
+            : (unsigned long)v.u.i;
+        bits = 0;
+        while (u) { bits++; u >>= 1; }
+        return bits;
+    }
+    n = int_to_bin(v, &d);
+    top = d[n - 1];
+    bits = 16L * (n - 1);
+    while (top) { bits++; top >>= 1; }
+    free(d);
+    return bits;
+}
+static long int_bitcount(Value v)
+{
+    unsigned long *d, w;
+    long c = 0;
+    int n, i;
+    n = int_to_bin(v, &d);
+    for (i = 0; i < n; i++)
+        for (w = d[i]; w; w >>= 1) c += (long)(w & 1UL);
+    free(d);
+    return c;
+}
+/* two's complement digits (n of them, base 65536) of the number with
+   magnitude d[0..have) */
+static unsigned long *bin_twos(unsigned long *d, int have, int n,
+    int neg)
+{
+    int i;
+    d = (unsigned long *)xrealloc(d,
+        sizeof(unsigned long) * (size_t)(n + 1));
+    for (i = have; i < n; i++) d[i] = 0;
+    if (neg) {
+        for (i = 0; i < n; i++) {
+            if (d[i]) { d[i]--; break; }
+            d[i] = 0xFFFFUL;
+        }
+        for (i = 0; i < n; i++) d[i] = (~d[i]) & 0xFFFFUL;
+    }
+    return d;
+}
+/* a & b, a | b, a ^ b for any integers, with two's complement
+   semantics (op: '&' '|' '^') */
+static Value int_bitop(int op, Value a, Value b)
+{
+    unsigned long *x, *y;
+    int nx, ny, n, i, na = int_sign(a) < 0, nb = int_sign(b) < 0, rneg;
+    Value r;
+    if (a.t != T_BIG && b.t != T_BIG) {
+        long p = a.u.i, q = b.u.i;
+        return mkint(op == '&' ? (p & q)
+            : (op == '|' ? (p | q) : (p ^ q)));
+    }
+    nx = int_to_bin(a, &x);
+    ny = int_to_bin(b, &y);
+    n = (nx > ny ? nx : ny) + 1;
+    x = bin_twos(x, nx, n, na);
+    y = bin_twos(y, ny, n, nb);
+    for (i = 0; i < n; i++) {
+        if (op == '&') x[i] &= y[i];
+        else if (op == '|') x[i] |= y[i];
+        else x[i] ^= y[i];
+    }
+    rneg = (int)((x[n - 1] >> 15) & 1UL);
+    if (rneg) {
+        for (i = 0; i < n; i++) x[i] = (~x[i]) & 0xFFFFUL;
+        for (i = 0; i < n; i++) {
+            x[i]++;
+            if (x[i] <= 0xFFFFUL) break;
+            x[i] = 0;
+        }
+    }
+    r = int_from_bin(x, n, rneg);
+    free(x); free(y);
+    return r;
+}
+static Value int_invert(Value a)
+{
+    return int_sub(int_neg(a), mkint(1));
+}
+/* 2**k */
+static Value int_pow2(long k)
+{
+    return int_pow(mkint(2), k);
+}
+/* the integer value of an integral double (no NaN, no infinity) */
 static Value int_from_double(double d)
 {
-    char b[400];
-    Value r;
+    double t, f, mant;
+    int e;
+    Value r, hi;
     if (d != d)
         throw_new(cls_ValueError,
         "cannot convert float NaN to integer");
     if (d > DBL_MAX || d < -DBL_MAX)
         throw_new(cls_OverflowError,
             "cannot convert float infinity to integer");
-    if (d < (double)SI_MAX && d > -(double)SI_MAX)
-        return mkint((long)d);
+    t = d < 0 ? ceil(d) : floor(d);
+    if (t < (double)SI_MAX && t > -(double)SI_MAX)
+        return mkint((long)t);
     /* 32-bit long too */
-    sprintf(b, "%.0f", d);
-    if (parse_int(b, (long)strlen(b), 10, &r)) return r;
-    return mkint(0);
+    f = frexp(t < 0 ? -t : t, &e);
+    /* 0.5 <= f < 1, |t| = f * 2**e */
+    mant = ldexp(f, 53);
+    /* an exact integer below 2**53 */
+    e -= 53;
+    if (e < 0) { mant = ldexp(mant, e);
+        e = 0;
+    }
+    /* exact: t is integral */
+    hi = mkint((long)floor(mant / 67108864.0));    /* 2**26 */
+    r = int_add(int_mul(hi, mkint(67108864L)),
+                mkint
+                    (
+                    (long)(mant - floor(mant / 67108864.0)
+                    * 67108864.0)));
+    if (e > 0) r = int_mul(r, int_pow2(e));
+    return t < 0 ? int_neg(r) : r;
+}
+/* exact comparison of an integer with a (non-NaN) double: -1, 0, 1 */
+static int int_cmp_dbl(Value a, double d)
+{
+    double t;
+    int c;
+    if (d > DBL_MAX) return -1;
+    if (d < -DBL_MAX) return 1;
+    if (a.t != T_BIG) {
+        double x = (double)a.u.i;
+        if (x < 9007199254740992.0 && x > -9007199254740992.0)
+        /* exact below 2**53 */
+            return x < d ? -1 : (x > d ? 1 : 0);
+    }
+    t = d < 0 ? ceil(d) : floor(d);
+    c = int_cmp(a, int_from_double(t));
+    if (c) return c;
+    return d > t ? -1 : (d < t ? 1 : 0);
+}
+/* a / b with correct rounding for integers of any size; b != 0 */
+static double int_truediv(Value a, Value b)
+{
+    double x, y, r;
+    long la, lb, s;
+    Value q, rem, A, B;
+    int neg;
+    if (a.t != T_BIG && b.t != T_BIG) {
+        x = (double)a.u.i; y = (double)b.u.i;
+        if (x < 9007199254740992.0 && x > -9007199254740992.0 &&
+            y < 9007199254740992.0 && y > -9007199254740992.0) return x
+                / y;
+    }
+    neg = (int_sign(a) < 0) != (int_sign(b) < 0);
+    if (int_sign(a) == 0) return neg ? -0.0 : 0.0;
+    A = int_sign(a) < 0 ? int_neg(a) : a;
+    B = int_sign(b) < 0 ? int_neg(b) : b;
+    la = int_bitlen(A); lb = int_bitlen(B);
+    s = lb - la + 66;
+    /* the quotient gets 65 or 66 bits */
+    if (s >= 0) A = int_mul(A, int_pow2(s));
+    else B = int_mul(B, int_pow2(-s));
+    int_divmod(A, B, &q, &rem);
+    q = int_add(int_mul(q, mkint(2)), mkint(int_sign(rem) != 0));
+    /* sticky bit */
+    x = int_todouble(q);
+    r = ldexp(x, (int)(-s - 1));
+    if (r > DBL_MAX)
+        throw_new(cls_OverflowError,
+        "integer division result too large for a float");
+    return neg ? -r : r;
+}
+/* CPython's hash of an integer: the value modulo 2**61 - 1 (sign
+   kept), -1 becomes -2 */
+static Value int_hash_mod(Value v)
+{
+    Value m, r;
+    int neg;
+    if (v.t != T_BIG) return v.u.i == -1 ? mkint(-2) : mkint(v.u.i);
+    neg = AS_BIG(v)->sign < 0;
+    m = int_sub(int_pow2(61), mkint(1));
+    r = int_mod(neg ? int_neg(v) : v, m);
+    if (neg) r = int_neg(r);
+    if (r.t == T_INT && r.u.i == -1) r = mkint(-2);
+    return r;
+}
+/* CPython's hash of a float (finite: m * 2**e is reduced modulo 2**61
+   - 1, where 2 has the order 61); equal to the hash of the integer
+   when the float is integral */
+static Value float_hash_exact(double d)
+{
+    double f, mant;
+    int e, r61, neg = 0;
+    Value m, h;
+    if (d != d) return mkint(0);
+    if (d > DBL_MAX) return mkint(314159L);
+    if (d < -DBL_MAX) return mkint(-314159L);
+    if (d == floor(d)) {
+        if (d < 1e9 && d > -1e9)
+            return mkint(d == -1.0 ? -2L : (long)d);
+        return int_hash_mod(int_from_double(d));
+    }
+    if (d < 0) { neg = 1; d = -d; }
+    f = frexp(d, &e);
+    mant = ldexp(f, 53);
+    e -= 53;                              /* e < 0 here */
+    r61 = (int)(((long)e % 61L + 61L) % 61L);
+    m = int_from_double(mant);
+    h = int_mod(int_mul(m, int_pow2(r61)),
+        int_sub(int_pow2(61), mkint(1)));
+    if (neg) h = int_neg(h);
+    if (h.t == T_INT && h.u.i == -1) h = mkint(-2);
+    return h;
+}
+/* hash(complex(re, im)): hash(re) + 1000003 * hash(im), wrapped to a
+   signed 64 bit value */
+static Value complex_hash_exact(double re, double im)
+{
+    Value h = float_hash_exact(re), m64, r;
+    if (im == 0.0) return h;
+    h = int_add(h, int_mul(mkint(1000003L), float_hash_exact(im)));
+    m64 = int_pow2(64);
+    r = int_mod(h, m64);
+    if (int_cmp(r, int_pow2(63)) >= 0) r = int_sub(r, m64);
+    if (r.t == T_INT && r.u.i == -1) r = mkint(-2);
+    return r;
+}
+/* the exact hash as an unsigned long for dictionaries (the low word of
+   the Python hash) */
+static unsigned long hash_fold(Value h)
+{
+    if (h.t != T_BIG) return (unsigned long)h.u.i;
+    {
+        Big *g = AS_BIG(h);
+        unsigned long x = 7;
+        int i;
+        for (i = 0; i < g->n; i++) x = x * 10007UL + g->d[i];
+        return g->sign < 0 ? 0UL - x : x;
+    }
 }
 static unsigned long int_hash(Value v)
 {
-    if (v.t != T_BIG) return (unsigned long)
-        (v.u.i < 0 ? -v.u.i : v.u.i) * 2654435761UL
-                              + (v.u.i < 0 ? 1UL : 0UL);
-    {
-        Big *g = AS_BIG(v);
-        unsigned long h = 7;
-        int i;
-        for (i = 0; i < g->n; i++) h = h * 31 + g->d[i];
-        return h;
-    }
+    return hash_fold(int_hash_mod(v));
 }
 static double fl_mod(double a, double b)
 {
     double r = fmod(a, b);
     if (r != 0 && ((r < 0) != (b < 0))) r += b;
+    else if (r == 0) r = b < 0 ? -0.0 : 0.0;
+    /* the sign of the divisor, as in CPython */
     return r;
 }
 static double fl_floordiv(double a, double b)
@@ -2365,7 +2700,8 @@ static double fl_floordiv(double a, double b)
         fd = floor(div);
         if (div - fd > 0.5) fd += 1.0;
     } else {
-        fd = a / b < 0 ? -0.0 : 0.0;
+        fd = a / b;
+        fd = (fd < 0 || (fd == 0 && 1.0 / fd < 0)) ? -0.0 : 0.0;
     }
     return fd;
 }
@@ -2382,8 +2718,30 @@ static void float_repr(double d, char *out)
         return;
     }
     for (p = 1; p <= 17; p++) {
+        int dl, found = 0;
         sprintf(b, "%.*e", p - 1, d);
         if (strtod(b, NULL) == d) break;
+        /* the shortest digits may be a neighbour of the nearest p
+           digits (power of 2 edges) */
+        for (dl = 0; dl < 2 && !found && p < 17; dl++) {
+            char c2[48];
+            int k = (int)(strchr(b, 'e') - b) - 1, carry = 1;
+            strcpy(c2, b);
+            for (; k >= 0 && carry; k--) {
+                if (c2[k] == '.' || c2[k] == '-') continue;
+                if (dl == 0) { if (c2[k] == '9') c2[k] = '0';
+                    else { c2[k]++;
+                        carry = 0;
+                    } }
+                else { if (c2[k] == '0') c2[k] = '9';
+                    else { c2[k]--;
+                        carry = 0;
+                    } }
+            }
+            if (carry || c2[b[0] == '-'] == '0') continue;
+            if (strtod(c2, NULL) == d) { strcpy(b, c2); found = 1; }
+        }
+        if (found) break;
     }
     q = b;
     if (*q == '-') { neg = 1; q++; }
@@ -2422,34 +2780,43 @@ static void float_repr(double d, char *out)
 }
 static int parse_float(const char *s, long n, double *out)
 {
-    char tmp[400];
-    char *end;
-    long i = 0, e = n;
-    int k;
+    char *tmp, *end;
+    long i = 0, e = n, k, m;
+    int ok;
     while (i < e && ch_space[(unsigned char)s[i]]) i++;
     while (e > i && ch_space[(unsigned char)s[e - 1]]) e--;
-    if (e - i <= 0 || e - i > 380) return 0;
-    memcpy(tmp, s + i, (size_t)(e - i));
-    tmp[e - i] = 0;
-    for (k = 0; tmp[k]; k++) tmp[k] = (char)
-        to_low[(unsigned char)tmp[k]];
+    if (e - i <= 0) return 0;
+    tmp = (char *)xmalloc((size_t)(e - i) + 1);
+    for (k = i, m = 0; k < e; k++) {
+        if (s[k] == '_') {               /* only between two digits */
+            if (k == i || k + 1 >= e
+                || !ch_digit[(unsigned char)s[k - 1]] ||
+                !ch_digit[(unsigned char)s[k + 1]]) { free(tmp);
+                    return 0; }
+            continue;
+        }
+        tmp[m++] = (char)to_low[(unsigned char)s[k]];
+    }
+    tmp[m] = 0;
     {
         const char *t = tmp;
         int sg = 1;
         if (*t == '-') { sg = -1; t++; } else if (*t == '+') t++;
-        if (strcmp(t, "inf") == 0 || strcmp(t, "infinity") == 0)
-            { *out = sg * HUGE_VAL;
+        if (strcmp(t, "inf") == 0 || strcmp(t, "infinity") == 0) {
+            *out = sg * HUGE_VAL; free(tmp); return 1;
+        }
+        if (strcmp(t, "nan") == 0) { *out = HUGE_VAL - HUGE_VAL;
+            free(tmp);
             return 1;
         }
-        if (strcmp(t, "nan") == 0) { *out = sg * HUGE_VAL - HUGE_VAL;
-            return 1;
-        }
-        if (!(ch_digit[(unsigned char)*t] || *t == '.')) return 0;
-        if (strchr(t, 'x') || strchr(t, 'n') || strchr(t, 'i'))
-            return 0;
+        if (!(ch_digit[(unsigned char)*t] || *t == '.')
+            || strchr(t, 'x') || strchr(t, 'n') ||
+            strchr(t, 'i')) { free(tmp); return 0; }
     }
     *out = strtod(tmp, &end);
-    return *end == 0;
+    ok = *end == 0;
+    free(tmp);
+    return ok;
 }
 /* ===== p2_lex.c ===== */
 /* ====================================================================
@@ -2504,6 +2871,9 @@ static const char *CS_DIGIT = "0123456789";
 static const char *CS_UP = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 static const char *CS_LOW = "abcdefghijklmnopqrstuvwxyz";
 static const char *CS_HEX = "0123456789abcdefABCDEF";
+/* the printable ASCII characters (space to tilde), as host characters
+   */
+static const char *CS_PRINT = " !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 
 static void init_chars(void)
 {
@@ -2512,7 +2882,7 @@ static void init_chars(void)
     for (i = 0; i < 256; i++) {
         ch_digit[i] = ch_alpha[i] = ch_alnum[i] = ch_space[i]
             = ch_upper[i] = ch_lower[i] = 0;
-        ch_hex[i] = 0;
+        ch_hex[i] = ch_print[i] = 0;
         to_up[i] = to_low[i] = (unsigned char)i;
     }
     for (p = CS_DIGIT; *p; p++) { ch_digit[(unsigned char)*p] = 1;
@@ -2533,6 +2903,8 @@ static void init_chars(void)
         to_low[(unsigned char)CS_UP[i]] = (unsigned char)CS_LOW[i];
     }
     for (p = CS_HEX; *p; p++) ch_hex[(unsigned char)*p] = 1;
+    for (p = CS_PRINT; *p; p++) ch_print[(unsigned char)*p] = 1;
+    for (i = 0; i < 256; i++) if (ch_alnum[i]) ch_print[i] = 1;
     ch_alpha[(unsigned char)'_'] = 1;
     ch_alnum[(unsigned char)'_'] = 1;
     for (p = " \t\n\r\f\v"; *p; p++) ch_space[(unsigned char)*p] = 1;
@@ -4956,19 +5328,61 @@ static void throw_key(Value key)
     throw_val(new_exc_args(cls_KeyError, v, 1));
 }
 
-static Value make_range(long a, long b, long c)
+/* a range of small ints keeps them in a/b/c as T_INT; one with a large
+   bound is "big" and all its arithmetic goes through the integer
+   functions */
+static Value make_range_v(Value a, Value b, Value c)
 {
     Range *r = (Range *)gc_alloc(sizeof(Range), T_RANGE);
-    r->start = a; r->stop = b; r->step = c;
+    if (a.t == T_BOOL) a = mkint(a.u.i);
+    if (b.t == T_BOOL) b = mkint(b.u.i);
+    if (c.t == T_BOOL) c = mkint(c.u.i);
+    r->a = a; r->b = b; r->c = c;
+    r->big = !(a.t == T_INT && b.t == T_INT && c.t == T_INT);
     return mkobj(r, T_RANGE);
+}
+static Value make_range(long a, long b, long c)
+{
+    return make_range_v(mkint(a), mkint(b), mkint(c));
+}
+static long range_len_small(Range *r)
+{
+    long start = r->a.u.i, stop = r->b.u.i, step = r->c.u.i;
+    if (step > 0) return start < stop ? (stop - start - 1)
+        / step + 1 : 0;
+    return start > stop ? (start - stop - 1) / (-step) + 1 : 0;
+}
+/* the length as an integer (any size) */
+static Value range_lenv(Range *r)
+{
+    if (!r->big) return mkint(range_len_small(r));
+    if (int_sign(r->c) > 0) {
+        if (int_cmp(r->a, r->b) >= 0) return mkint(0);
+        return int_add
+            (int_floordiv(int_sub(int_sub(r->b, r->a), mkint(1)),
+            r->c), mkint(1));
+    }
+    if (int_cmp(r->a, r->b) <= 0) return mkint(0);
+    return int_add(int_floordiv(int_sub(int_sub(r->a, r->b), mkint(1)),
+        int_neg(r->c)), mkint(1));
 }
 static long range_len(Range *r)
 {
-    if (r->step > 0)
-        return r->start < r->stop ? (r->stop - r->start - 1)
-        / r->step + 1 : 0;
-    return r->start > r->stop
-        ? (r->start - r->stop - 1) / (-r->step) + 1 : 0;
+    Value v;
+    if (!r->big) return range_len_small(r);
+    {
+        long n;
+        v = range_lenv(r);
+        if (!int_fits_long(v, &n))
+            throw_new(cls_OverflowError,
+                "Python int too large to convert to C ssize_t");
+        return n;
+    }
+}
+/* start + i * step */
+static Value range_item(Range *r, Value i)
+{
+    return int_add(r->a, int_mul(i, r->c));
 }
 
 static Value mk_prop(int type, Value g, Value s)
@@ -4991,7 +5405,7 @@ static int py_truthy(Value v)
     case T_COMPLEX: return AS_CPLX(v)->re != 0 || AS_CPLX(v)->im != 0;
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n != 0;
     case T_DICT: case T_SET: return AS_DICT(v)->n != 0;
-    case T_RANGE: return range_len((Range *)v.u.o) != 0;
+    case T_RANGE: return int_sign(range_lenv((Range *)v.u.o)) != 0;
     case T_ND: return nd_truthy(v);
     case T_DVIEW: return AS_DICT(((DView *)v.u.o)->d)->n != 0;
     case T_INST: {
@@ -5053,20 +5467,33 @@ static double to_dbl(Value v)
     if (v.t == T_FLOAT) return v.u.d;
     return int_todouble(v);
 }
-static long need_long(Value v, const char *what)
+/* an integer value (any size) from an int, bool, int subclass or
+   object with __index__ */
+static Value need_intv(Value v, const char *what)
 {
-    if (v.t == T_INST && AS_INST(v)->pay.t == T_INT) return AS_INST(v)
-        ->pay.u.i;
-    if (v.t == T_INT || v.t == T_BOOL) return v.u.i;
+    if (v.t == T_INST
+        && (AS_INST(v)->pay.t == T_INT || AS_INST(v)->pay.t == T_BIG))
+        return AS_INST(v)->pay;
+    if (v.t == T_INT || v.t == T_BIG) return v;
+    if (v.t == T_BOOL) return mkint(v.u.i);
     if (v.t == T_INST) {
         Value *m = class_find(AS_INST(v)->cls, S_index);
         if (m) { Value r = call1(*m, v);
-            if (r.t == T_INT) return r.u.i;
+            if (r.t == T_INT || r.t == T_BIG) return r;
         }
     }
     throw_new(cls_TypeError, "%.60s must be an integer, not '%.40s'",
         what, type_name(v));
-    return 0;
+    return v;
+}
+static long need_long(Value v, const char *what)
+{
+    Value r = need_intv(v, what);
+    long n;
+    if (!int_fits_long(r, &n))
+        throw_new(cls_OverflowError,
+            "Python int too large to convert to C ssize_t");
+    return n;
 }
 
 /* ---- dict views ------------------------------------------------- */
@@ -5108,10 +5535,33 @@ static int cplx_parts(Value v, double *re, double *im)
     if (is_num(v)) { *re = to_dbl(v); *im = 0.0; return 1; }
     return 0;
 }
+/* exact order of two real numbers (ints compare to floats without
+   rounding the int); *unord is set for NaN */
+static int num_cmp(Value a, Value b, int *unord)
+{
+    *unord = 0;
+    if (a.t == T_FLOAT && b.t == T_FLOAT) {
+        double x = a.u.d, y = b.u.d;
+        if (x != x || y != y) { *unord = 1; return 0; }
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    if (a.t == T_FLOAT) {
+        if (a.u.d != a.u.d) { *unord = 1; return 0; }
+        return -int_cmp_dbl(b, a.u.d);
+    }
+    if (b.t == T_FLOAT) {
+        if (b.u.d != b.u.d) { *unord = 1; return 0; }
+        return int_cmp_dbl(a, b.u.d);
+    }
+    return int_cmp(a, b);
+}
 static int num_eq(Value a, Value b)
 {
-    if (a.t == T_FLOAT || b.t == T_FLOAT) return to_dbl(a)
-        == to_dbl(b);
+    int u, c;
+    if (a.t == T_FLOAT || b.t == T_FLOAT) {
+        c = num_cmp(a, b, &u);
+        return !u && c == 0;
+    }
     return int_cmp(a, b) == 0;
 }
 static int py_eq(Value a, Value b)
@@ -5119,6 +5569,12 @@ static int py_eq(Value a, Value b)
     if (is_num(a) && is_num(b)) return num_eq(a, b);
     if (a.t == T_COMPLEX || b.t == T_COMPLEX) {
         double ar, ai, br, bi;
+        if (a.t == T_COMPLEX && is_num(b))
+            return AS_CPLX(a)->im == 0.0
+                && num_eq(mkfloat(AS_CPLX(a)->re), b);
+        if (b.t == T_COMPLEX && is_num(a))
+            return AS_CPLX(b)->im == 0.0
+                && num_eq(mkfloat(AS_CPLX(b)->re), a);
         if (cplx_parts(a, &ar, &ai) && cplx_parts(b, &br, &bi))
             return ar == br && ai == bi;
         if (a.t != T_INST && b.t != T_INST) return 0;
@@ -5186,10 +5642,12 @@ static int py_eq(Value a, Value b)
         return 1; }
     case T_RANGE: {
         Range *x = (Range *)a.u.o, *y = (Range *)b.u.o;
-        long lx = range_len(x), ly = range_len(y);
-        if (lx != ly) return 0;
-        if (lx == 0) return 1;
-        return x->start == y->start && (lx == 1 || x->step == y->step);
+        Value lx = range_lenv(x), ly = range_lenv(y);
+        if (int_cmp(lx, ly) != 0) return 0;
+        if (int_sign(lx) == 0) return 1;
+        if (int_cmp(x->a, y->a) != 0) return 0;
+        return (lx.t == T_INT && lx.u.i == 1)
+            || int_cmp(x->c, y->c) == 0;
         }
     case T_INST: goto inst;
     default: return a.u.o == b.u.o;
@@ -5217,18 +5675,7 @@ static unsigned long py_hash(Value v)
     switch (v.t) {
     case T_NONE: return 1234567UL;
     case T_BOOL: case T_INT: case T_BIG: return int_hash(v);
-    case T_FLOAT: {
-        double d = v.u.d;
-        if (d == floor(d) && d < (double)SI_MAX && d > -(double)SI_MAX)
-            return int_hash(mkint((long)d));
-        if (d != d) return 0;
-        {
-            unsigned char *p = (unsigned char *)&d;
-            unsigned long h = 17;
-            size_t i;
-            for (i = 0; i < sizeof(double); i++) h = h * 31 + p[i];
-            return h;
-        } }
+    case T_FLOAT: return hash_fold(float_hash_exact(v.u.d));
     case T_STR: case T_BYTES: return str_hash(AS_STR(v));
     case T_TUPLE: {
         List *l = AS_LIST(v);
@@ -5237,11 +5684,9 @@ static unsigned long py_hash(Value v)
         for (i = 0; i < l->n; i++) h = (h * 1000003UL)
             ^ py_hash(l->a[i]);
         return h; }
-    case T_COMPLEX: {
-        unsigned long h = py_hash(mkfloat(AS_CPLX(v)->re));
-        if (AS_CPLX(v)->im != 0.0)
-            h += 1000003UL * py_hash(mkfloat(AS_CPLX(v)->im));
-        return h; }
+    case T_COMPLEX
+        : return hash_fold(complex_hash_exact(AS_CPLX(v)->re,
+        AS_CPLX(v)->im));
     case T_LIST: case T_DICT: case T_SET: case T_BARR:
         throw_new(cls_TypeError, "unhashable type: '%.40s'",
             type_name(v));
@@ -5251,7 +5696,8 @@ static unsigned long py_hash(Value v)
         if (m) {
             Value r = call1(*m, v);
             if (r.t == T_INT || r.t == T_BOOL) return (unsigned long)
-                r.u.i;
+                (r.u.i == -1 ? -2L : r.u.i);
+            if (r.t == T_BIG) return hash_fold(int_hash_mod(r));
             throw_new(cls_TypeError,
                 "__hash__ method should return an integer");
         }
@@ -5303,8 +5749,8 @@ static int cmp3(Value a, Value b, int *ok)
     *ok = 1;
     if (is_num(a) && is_num(b)) {
         if (a.t == T_FLOAT || b.t == T_FLOAT) {
-            double x = to_dbl(a), y = to_dbl(b);
-            return x < y ? -1 : (x > y ? 1 : 0);
+            int u;
+            return num_cmp(a, b, &u);
         }
         return int_cmp(a, b);
     }
@@ -5375,10 +5821,11 @@ static int rich_cmp(int op, Value a, Value b)
     }
     if (a.t == T_FLOAT || b.t == T_FLOAT) {
         if (is_num(a) && is_num(b)) {
-            double x = to_dbl(a), y = to_dbl(b);
+            int u, c = num_cmp(a, b, &u);
+            if (u) return 0;
             switch (op) {
-            case C_LT: return x < y; case C_LE: return x <= y;
-            case C_GT: return x > y; default: return x >= y;
+            case C_LT: return c < 0; case C_LE: return c <= 0;
+            case C_GT: return c > 0; default: return c >= 0;
             }
         }
     }
@@ -5455,11 +5902,61 @@ static int rich_lt_hook(Value a, Value b)
 static void repr_buf(Value v, Buf *b, int depth);
 static void str_buf(Value v, Buf *b);
 
+/* decode one UTF-8 sequence at s[i..n): the code point, and its length
+   in *len */
+static unsigned long u8_next(const unsigned char *s, long i, long n,
+    int *len)
+{
+    unsigned long c = s[i];
+    int k = 1;
+    if (c >= 0xF0 && i + 3 < n && (s[i + 1] & 0xC0) == 0x80) {
+        c = ((c & 0x07UL) << 18) | ((s[i + 1] & 0x3FUL) << 12)
+            | ((s[i + 2] & 0x3FUL) << 6)
+            | (s[i + 3] & 0x3FUL);
+        k = 4;
+    } else if (c >= 0xE0 && c < 0xF0 && i + 2 < n
+        && (s[i + 1] & 0xC0) == 0x80) {
+        c = ((c & 0x0FUL) << 12) | ((s[i + 1] & 0x3FUL) << 6)
+            | (s[i + 2] & 0x3FUL);
+        k = 3;
+    } else if (c >= 0xC0 && c < 0xE0 && i + 1 < n
+        && (s[i + 1] & 0xC0) == 0x80) {
+        c = ((c & 0x1FUL) << 6) | (s[i + 1] & 0x3FUL);
+        k = 2;
+    }
+    *len = k;
+    return c;
+}
+/* code points that str.isprintable()/repr() treat as not printable
+   (categories C* and Z* except the space), as far as can be told
+   without the whole Unicode table */
+static int uni_nonprint(unsigned long c)
+{
+    static const unsigned long rg[][2] = {
+        { 0x80UL, 0xA0UL }, { 0xADUL, 0xADUL }, { 0x378UL, 0x379UL }
+            , { 0x600UL, 0x605UL },
+        { 0x61CUL, 0x61CUL }, { 0x6DDUL, 0x6DDUL }
+            , { 0x70FUL, 0x70FUL }, { 0x8E2UL, 0x8E2UL },
+        { 0x1680UL, 0x1680UL }, { 0x180EUL, 0x180EUL }
+            , { 0x2000UL, 0x200FUL },
+        { 0x2028UL, 0x202FUL }, { 0x205FUL, 0x206FUL }
+            , { 0x3000UL, 0x3000UL },
+        { 0xD800UL, 0xF8FFUL }, { 0xFEFFUL, 0xFEFFUL }
+            , { 0xFFF0UL, 0xFFFBUL },
+        { 0xFFFEUL, 0xFFFFUL }, { 0x1D173UL, 0x1D17AUL }
+            , { 0xE0000UL, 0xE00FFUL },
+        { 0xE01F0UL, 0xE0FFFUL }, { 0xF0000UL, 0x10FFFFUL }
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(rg) / sizeof(rg[0])); i++)
+        if (c >= rg[i][0] && c <= rg[i][1]) return 1;
+    return 0;
+}
 static void repr_str_lit(Str *s, Buf *b)
 {
     long i;
     int q = '\'';
-    char t[8];
+    char t[40];
     if (memchr(s->s, '\'', (size_t)s->len)
         && !memchr(s->s, '"', (size_t)s->len)) q = '"';
     buf_addc(b, q);
@@ -5469,8 +5966,24 @@ static void repr_str_lit(Str *s, Buf *b)
         else if (c == '\n') buf_add(b, "\\n");
         else if (c == '\t') buf_add(b, "\\t");
         else if (c == '\r') buf_add(b, "\\r");
-        else if (c < 32 || c == 127) { sprintf(t, "\\x%02x", c);
+        else if (c < 0x80 && !ch_print[c]) { sprintf(t, "\\x%02x", c);
             buf_add(b, t);
+        }
+        else if (c >= 0xC2) {
+            int k;
+            unsigned long u = u8_next((const unsigned char *)s->s, i,
+                s->len, &k);
+            if (k > 1 && uni_nonprint(u)) {
+                if (u < 256UL) sprintf(t, "\\x%02lx", u);
+                else if (u < 65536UL) sprintf(t, "\\u%04lx", u);
+                else sprintf(t, "\\U%08lx", u);
+                buf_add(b, t);
+            } else {
+                int j;
+                for (j = 0; j < k; j++)
+                    buf_addc(b, (unsigned char)s->s[i + j]);
+            }
+            i += k - 1;
         }
         else buf_addc(b, c);
     }
@@ -5491,7 +6004,7 @@ static void repr_bytes_lit(const char *s, long n, Buf *b)
         else if (c == '\n') buf_add(b, "\\n");
         else if (c == '\t') buf_add(b, "\\t");
         else if (c == '\r') buf_add(b, "\\r");
-        else if (c < 32 || c >= 127) { sprintf(tt, "\\x%02x", c);
+        else if (!ch_print[c]) { sprintf(tt, "\\x%02x", c);
             buf_add(b, tt);
         }
         else buf_addc(b, c);
@@ -5590,11 +6103,14 @@ static void repr_buf(Value v, Buf *b, int depth)
         break; }
     case T_RANGE: {
         Range *r = (Range *)v.u.o;
-        if (r->step == 1)
-            sprintf(t, "range(%ld, %ld)", r->start, r->stop);
-        else sprintf(t, "range(%ld, %ld, %ld)", r->start, r->stop,
-            r->step);
-        buf_add(b, t);
+        buf_add(b, "range(");
+        int_str(r->a, b);
+        buf_add(b, ", ");
+        int_str(r->b, b);
+        if (!(r->c.t == T_INT && r->c.u.i == 1)) { buf_add(b, ", ");
+            int_str(r->c, b);
+        }
+        buf_addc(b, ')');
         break; }
     case T_FUNC:
         buf_add(b, "<function ");
@@ -6063,6 +6579,12 @@ static Value get_attr(Value o, Str *nm)
     default: break;
     }
     if (nm == S_class) return mkobj(class_of(o), T_CLASS);
+    if (o.t == T_RANGE) {
+        Range *r = (Range *)o.u.o;
+        if (nm == intern_c("start")) return r->a;
+        if (nm == intern_c("stop")) return r->b;
+        if (nm == intern_c("step")) return r->c;
+    }
     if (o.t == T_COMPLEX) {
         if (nm == intern_c("real")) return mkfloat(AS_CPLX(o)->re);
         if (nm == intern_c("imag")) return mkfloat(AS_CPLX(o)->im);
@@ -6275,6 +6797,56 @@ static void slice_adjust(Value lo, Value hi, Value st, long len,
     if (s < 0) *cnt = a > b ? (a - b - 1) / (-s) + 1 : 0;
     else *cnt = a < b ? (b - a - 1) / s + 1 : 0;
 }
+/* slice_adjust for lengths and bounds of any size (ranges);
+   start/stop/step as integers */
+static int slice_isint(Value v)
+{
+    return v.t == T_INT || v.t == T_BOOL || v.t == T_BIG;
+}
+static void slice_adjust_v(Value lo, Value hi, Value st, Value len,
+    Value *start, Value *stop,
+                           Value *step)
+{
+    Value s = mkint(1), lower, upper, a, b;
+    if (st.t != T_NONE) {
+        if (!slice_isint(st))
+            throw_new(cls_TypeError,
+                      "slice indices must be integers or None "
+                          "or have an __index__ method");
+        s = st;
+        if (int_sign(s) == 0)
+            throw_new(cls_ValueError, "slice step cannot be zero");
+    }
+    if (int_sign(s) < 0) { lower = mkint(-1);
+        upper = int_sub(len, mkint(1));
+    }
+    else { lower = mkint(0); upper = len; }
+    if (lo.t == T_NONE) a = int_sign(s) < 0 ? upper : lower;
+    else {
+        if (!slice_isint(lo))
+            throw_new(cls_TypeError,
+                      "slice indices must be integers or None "
+                          "or have an __index__ method");
+        a = lo;
+        if (int_sign(a) < 0) { a = int_add(a, len);
+            if (int_cmp(a, lower) < 0) a = lower;
+        }
+        else if (int_cmp(a, upper) > 0) a = upper;
+    }
+    if (hi.t == T_NONE) b = int_sign(s) < 0 ? lower : upper;
+    else {
+        if (!slice_isint(hi))
+            throw_new(cls_TypeError,
+                      "slice indices must be integers or None "
+                          "or have an __index__ method");
+        b = hi;
+        if (int_sign(b) < 0) { b = int_add(b, len);
+            if (int_cmp(b, lower) < 0) b = lower;
+        }
+        else if (int_cmp(b, upper) > 0) b = upper;
+    }
+    *start = a; *stop = b; *step = s;
+}
 static Value slice_get(Value o, Value lo, Value hi, Value st)
 {
     long start, stop, step, cnt, i, len;
@@ -6316,11 +6888,11 @@ static Value slice_get(Value o, Value lo, Value hi, Value st)
     case T_ND: return nd_subscr(o, mkslice(lo, hi, st));
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
-        long n = range_len(r);
-        slice_adjust(lo, hi, st, n, &start, &stop, &step, &cnt);
-        return make_range(r->start + start * r->step,
-            r->start + (start + cnt * step) * r->step,
-                          r->step * step); }
+        Value gs, ge, gt;
+        slice_adjust_v(lo, hi, st, range_lenv(r), &gs, &ge, &gt);
+        return make_range_v(range_item(r, gs), range_item(r, ge),
+            int_mul(r->c, gt));
+        }
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_getitem);
         if (m) {
@@ -6349,6 +6921,12 @@ static long norm_index(long i, long n, const char *what)
 static void slice_del(Value o, Value lo, Value hi, Value st);
 static Value subscr(Value o, Value idx)
 {
+    if (idx.t == T_BIG
+        && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR
+        || o.t == T_BYTES ||
+                           o.t == T_BARR))
+        throw_new(cls_IndexError,
+            "cannot fit 'int' into an index-sized integer");
     if (idx.t == T_SLICE && o.t != T_INST && o.t != T_ND
         && o.t != T_DICT) {
         List *sl = AS_LIST(idx);
@@ -6414,10 +6992,14 @@ static Value subscr(Value o, Value idx)
         break;
     case T_ND: return nd_subscr(o, idx);
     case T_RANGE:
-        if (idx.t == T_INT || idx.t == T_BOOL) {
+        if (idx.t == T_INT || idx.t == T_BOOL || idx.t == T_BIG) {
             Range *r = (Range *)o.u.o;
-            long i = norm_index(idx.u.i, range_len(r), "range object");
-            return mkint(r->start + i * r->step);
+            Value i = idx, len = range_lenv(r);
+            if (int_sign(i) < 0) i = int_add(i, len);
+            if (int_sign(i) < 0 || int_cmp(i, len) >= 0)
+                throw_new(cls_IndexError,
+                    "range object index out of range");
+            return range_item(r, i);
         }
         throw_new(cls_TypeError,
             "range indices must be integers or slices, not %.40s",
@@ -6548,6 +7130,12 @@ static void slice_set(Value o, Value lo, Value hi, Value st, Value v)
 }
 static void setitem(Value o, Value idx, Value v)
 {
+    if (idx.t == T_BIG
+        && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR
+        || o.t == T_BYTES ||
+                           o.t == T_BARR))
+        throw_new(cls_IndexError,
+            "cannot fit 'int' into an index-sized integer");
     if (idx.t == T_SLICE && o.t != T_INST && o.t != T_ND
         && o.t != T_DICT) {
         List *sl = AS_LIST(idx);
@@ -6614,6 +7202,12 @@ static void setitem(Value o, Value idx, Value v)
 }
 static void delitem(Value o, Value idx)
 {
+    if (idx.t == T_BIG
+        && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR
+        || o.t == T_BYTES ||
+                           o.t == T_BARR))
+        throw_new(cls_IndexError,
+            "cannot fit 'int' into an index-sized integer");
     if (idx.t == T_SLICE && o.t != T_INST && o.t != T_DICT) {
         List *sl = AS_LIST(idx);
         slice_del(o, sl->a[0], sl->a[1], sl->a[2]);
@@ -6737,8 +7331,13 @@ static Value get_iter(Value o)
     return mkobj(it, T_ITER);
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
+        if (r->big) {
+            it = iter_new(IK_BRANGE);
+            it->a = r->a; it->b = r->b; it->c = r->c;
+            return mkobj(it, T_ITER);
+        }
         it = iter_new(IK_RANGE);
-        it->i = r->start; it->n = r->stop; it->step = r->step;
+        it->i = r->a.u.i; it->n = r->b.u.i; it->step = r->c.u.i;
         return mkobj(it, T_ITER); }
     case T_DVIEW: {
         DView *dv = (DView *)o.u.o;
@@ -6826,6 +7425,12 @@ static int iter_next(Value it, Value *out)
         *out = mkint(t->i);
         t->i += t->step;
         return 1;
+    case IK_BRANGE: {
+        int c = int_cmp(t->a, t->b);
+        if (int_sign(t->c) > 0 ? c >= 0 : c <= 0) return 0;
+        *out = t->a;
+        t->a = int_add(t->a, t->c);
+        return 1; }
     case IK_DICT: case IK_DVALS: case IK_DITEMS: case IK_SET: {
         Dict *d = AS_DICT(t->a);
         while (t->i < d->used && d->e[t->i].k.t == T_UNSET) t->i++;
@@ -6842,10 +7447,11 @@ static int iter_next(Value it, Value *out)
         {
             Value *base = vsp;
             VPUSH(x);
-            *out = mktuple2(mkint(t->i), x);
+            *out = mktuple2(t->b.t == T_BIG ? t->b : mkint(t->i), x);
             vsp = base;
         }
-        t->i++;
+        if (t->b.t == T_BIG) t->b = int_add(t->b, mkint(1));
+        else t->i++;
         return 1; }
     case IK_ZIP: {
         List *its = AS_LIST(t->a);
@@ -6896,7 +7502,7 @@ static int iter_next(Value it, Value *out)
         if (t->a.t == T_STR) *out = mkstr(AS_STR(t->a)->s + t->i, 1);
         else if (t->a.t == T_RANGE) {
             Range *r = (Range *)t->a.u.o;
-            *out = mkint(r->start + t->i * r->step);
+            *out = mkint(r->a.u.i + t->i * r->c.u.i);
         } else *out = AS_LIST(t->a)->a[t->i];
         t->i--;
         return 1; }
@@ -6998,13 +7604,27 @@ static int contains(Value c, Value x)
         return 0; }
     case T_RANGE: {
         Range *r = (Range *)c.u.o;
-        if (x.t == T_INT || x.t == T_BOOL) {
-            long v = x.u.i;
-            if (r->step > 0)
-                return v >= r->start && v < r->stop && (v - r->start)
-                % r->step == 0;
-            return v <= r->start && v > r->stop
-                && (r->start - v) % (-r->step) == 0;
+        if (x.t == T_FLOAT) {
+            if (x.u.d != floor(x.u.d) || x.u.d - x.u.d != 0.0)
+                return 0;
+            x = int_from_double(x.u.d);
+        }
+        if (x.t == T_INT || x.t == T_BOOL || x.t == T_BIG) {
+            if (!r->big && x.t != T_BIG) {
+                long v = x.u.i, start = r->a.u.i, stop = r->b.u.i,
+                    step = r->c.u.i;
+                if (step > 0)
+                    return v >= start && v < stop && (v - start)
+                    % step == 0;
+                return v <= start && v > stop
+                    && (start - v) % (-step) == 0;
+            }
+            if (int_sign(r->c) > 0) {
+                if (int_cmp(x, r->a) < 0 || int_cmp(x, r->b) >= 0)
+                    return 0;
+            } else if (int_cmp(x, r->a) > 0 || int_cmp(x, r->b) <= 0)
+                return 0;
+            return int_sign(int_mod(int_sub(x, r->a), r->c)) == 0;
         }
         return 0; }
     case T_DVIEW: {
@@ -7151,7 +7771,14 @@ static Value num_binop(int op, Value a, Value b)
             if (x < 0 && y != floor(y))
                 return cplx_binop(B_POW, mkcomplex(x, 0.0),
                     mkcomplex(y, 0.0));
-            return mkfloat(pow(x, y));
+            {
+                double r = pow(x, y);
+                if ((r > DBL_MAX || r < -DBL_MAX) && x - x == 0
+                    && y - y == 0)
+                    throw_new(cls_OverflowError,
+                        "(34, 'Numerical result out of range')");
+                return mkfloat(r);
+            }
         default: break;
         }
         throw_new(cls_TypeError,
@@ -7166,51 +7793,74 @@ static Value num_binop(int op, Value a, Value b)
     case B_DIV: {
         if (int_sign(b) == 0)
             throw_new(cls_ZeroDivisionError, "division by zero");
-        return mkfloat(int_todouble(a) / int_todouble(b)); }
+        return mkfloat(int_truediv(a, b)); }
     case B_FDIV: return int_floordiv(a, b);
     case B_MOD: return int_mod(a, b);
     case B_POW: return int_pow_v(a, b);
     case B_AND: case B_OR: case B_XOR:
-        if (a.t == T_BIG || b.t == T_BIG)
-            throw_new(cls_OverflowError,
-                "bitwise operations on huge integers are not "
-                "supported");
         if (a.t == T_BOOL && b.t == T_BOOL)
             return tobool
                 ((int)(op == B_AND ? (a.u.i & b.u.i)
                 : (op == B_OR ? (a.u.i | b.u.i) : (a.u.i ^ b.u.i))));
-        return mkint(op == B_AND ? (a.u.i & b.u.i)
-            : (op == B_OR ? (a.u.i | b.u.i) : (a.u.i ^ b.u.i)));
+        return int_bitop(op == B_AND ? '&' : (op == B_OR ? '|' : '^'),
+            a, b);
     case B_LSH: {
         if (int_sign(b) < 0)
             throw_new(cls_ValueError, "negative shift count");
+        if (int_sign(a) == 0) return mkint(0);
         if (b.t == T_BIG || b.u.i > 100000000L)
             throw_new(cls_OverflowError, "shift count too large");
-        return int_mul(a, int_pow(mkint(2), b.u.i)); }
+        if (a.t != T_BIG && b.u.i < 30L && a.u.i < (1L << (30 - b.u.i))
+            &&
+            a.u.i > -(1L << (30 - b.u.i)))
+            return mkint(a.u.i * (1L << b.u.i));
+        return int_mul(a, int_pow2(b.u.i)); }
     default: {
         if (int_sign(b) < 0)
             throw_new(cls_ValueError, "negative shift count");
-        if (b.t == T_BIG || b.u.i > 100000000L)
+        if (int_sign(a) == 0) return mkint(0);
+        /* a limb (base 10000) has fewer than 14 bits, a small int
+           fewer than 70 */
+        if (b.t == T_BIG
+            || b.u.i > 14L * (a.t == T_BIG ? (long)AS_BIG(a)->n : 5L))
             return mkint(int_sign(a) < 0 ? -1 : 0);
-        return int_floordiv(a, int_pow(mkint(2), b.u.i)); }
+        if (a.t != T_BIG && b.u.i < 31L) {
+            long dv = 1L << b.u.i, q = a.u.i / dv;
+            if (a.u.i < 0 && a.u.i % dv != 0) q--;
+            /* floor, not truncation */
+            return mkint(q);
+        }
+        return int_floordiv(a, int_pow2(b.u.i)); }
     }
 }
-static Value seq_repeat(Value s, long n)
+/* repetition count of "seq * n" for an integer n of any size: clamps
+   to 0 for negative and raises the errors CPython gives for sizes that
+   cannot be allocated */
+static long repeat_count(Value n, long unit)
 {
-    long i;
-    if (n < 0) n = 0;
+    if (n.t == T_BIG && int_bitlen(n) > 63)
+        throw_new(cls_OverflowError,
+            "cannot fit 'int' into an index-sized integer");
+    if (int_sign(n) <= 0) return 0;
+    if (unit == 0) return 0;
+    if (n.t == T_BIG) throw_new(cls_MemoryError, "");
+    if (n.u.i > 400000000L / unit) throw_new(cls_MemoryError, "");
+    return n.u.i;
+}
+static Value seq_repeat(Value s, Value nv)
+{
+    long i, n;
     if (s.t == T_STR) {
         Str *x = AS_STR(s);
         Buf b;
-        if (x->len * n > 400000000L)
-            throw_new(cls_OverflowError,
-            "repeated string is too long");
+        n = x->len == 0 ? 0 : repeat_count(nv, x->len);
         buf_init(&b);
         for (i = 0; i < n; i++) buf_addn(&b, x->s, x->len);
         return buf_value(&b);
     } else {
         List *l = AS_LIST(s), *r;
         long j;
+        n = l->n == 0 ? 0 : repeat_count(nv, l->n);
         r = s.t == T_LIST ? list_new(l->n * n) : tuple_new(l->n * n);
         for (i = 0; i < n; i++)
             for (j = 0; j < l->n; j++) r->a[i * l->n + j] = l->a[j];
@@ -7231,9 +7881,13 @@ static Value set_op(int op, Value a, Value b)
         for (i = 0; i < y->used; i++) if (y->e[i].k.t != T_UNSET)
             set_add(r, y->e[i].k);
     } else if (op == B_AND) {
-        for (i = 0; i < x->used; i++)
-            if (x->e[i].k.t != T_UNSET && dict_get(y, x->e[i].k, &o))
-                set_add(r, x->e[i].k);
+        /* like CPython: walk the smaller set (the right one when sizes
+           are equal) and keep its elements, which matters for 1 and
+           1.0 */
+        Dict *w = x->n < y->n ? x : y, *o2 = x->n < y->n ? y : x;
+        for (i = 0; i < w->used; i++)
+            if (w->e[i].k.t != T_UNSET && dict_get(o2, w->e[i].k, &o))
+                set_add(r, w->e[i].k);
     } else if (op == B_SUB) {
         for (i = 0; i < x->used; i++)
             if (x->e[i].k.t != T_UNSET && !dict_get(y, x->e[i].k, &o))
@@ -7285,18 +7939,21 @@ static Value binop(int op, Value a, Value b)
             buf_free(&bf);
             return r;
         }
-        if (op == B_MUL && (b.t == T_INT || b.t == T_BOOL)) {
+        if (op == B_MUL
+            && (b.t == T_INT || b.t == T_BOOL || b.t == T_BIG)) {
+            long cnt;
             bytes_get(a, &pa, &na);
+            cnt = na == 0 ? 0 : repeat_count(b, na);
             buf_init(&bf);
-            for (i = 0; i < b.u.i; i++) buf_addn(&bf, pa, na);
+            for (i = 0; i < cnt; i++) buf_addn(&bf, pa, na);
             r = a.t == T_BARR ? mkbarr(bf.s, bf.n)
                 : mkbytes(bf.s, bf.n);
             buf_free(&bf);
             return r;
         }
     }
-    if (op == B_MUL && (b.t == T_BYTES || b.t == T_BARR)
-        && (a.t == T_INT || a.t == T_BOOL))
+    if (op == B_MUL && (b.t == T_BYTES || b.t == T_BARR) &&
+        (a.t == T_INT || a.t == T_BOOL || a.t == T_BIG))
         return binop(op, b, a);
     if (op == B_ADD && a.t == b.t && (a.t == T_LIST || a.t == T_TUPLE))
         {
@@ -7311,12 +7968,12 @@ static Value binop(int op, Value a, Value b)
         return mkobj(r, a.t);
     }
     if (op == B_MUL) {
-        if ((a.t == T_STR || a.t == T_LIST || a.t == T_TUPLE)
-            && (b.t == T_INT || b.t == T_BOOL))
-            return seq_repeat(a, b.u.i);
-        if ((b.t == T_STR || b.t == T_LIST || b.t == T_TUPLE)
-            && (a.t == T_INT || a.t == T_BOOL))
-            return seq_repeat(b, a.u.i);
+        if ((a.t == T_STR || a.t == T_LIST || a.t == T_TUPLE) &&
+            (b.t == T_INT || b.t == T_BOOL || b.t == T_BIG))
+            return seq_repeat(a, b);
+        if ((b.t == T_STR || b.t == T_LIST || b.t == T_TUPLE) &&
+            (a.t == T_INT || a.t == T_BOOL || a.t == T_BIG))
+            return seq_repeat(b, a);
         if ((a.t == T_STR || a.t == T_LIST || a.t == T_TUPLE)
             && b.t != T_INST)
             throw_new(cls_TypeError,
@@ -7459,7 +8116,7 @@ static Value unop(int op, Value a)
             "bad operand type for unary +: '%.40s'", type_name(a));
     } else {
         if (a.t == T_INT || a.t == T_BOOL) return mkint(-a.u.i - 1);
-        if (a.t == T_BIG) return int_sub(int_neg(a), mkint(1));
+        if (a.t == T_BIG) return int_invert(a);
         if (a.t == T_INST) {
             Value *m = class_find(AS_INST(a)->cls, S_invert);
             if (m) return call1(*m, a);
@@ -9334,7 +9991,7 @@ static int run_source(const char *src, long len)
    p7_fmt.c   format() mini language, % formatting, str.format
    ================================================================= */
 typedef struct FSpec {
-    int fill, align, sign, alt, zero, comma, under;
+    int fill, align, sign, alt, zero, comma, under, pct;
     long width, prec;
     int type;
 } FSpec;
@@ -9349,6 +10006,7 @@ static void parse_spec(const char *s, long n, FSpec *sp)
     sp->zero = 0;
     sp->comma = 0;
     sp->under = 0;
+    sp->pct = 0;
     sp->width = -1;
     sp->prec = -1;
     sp->type = 0;
@@ -9379,15 +10037,26 @@ static void parse_spec(const char *s, long n, FSpec *sp)
     if (i < n) throw_new(cls_ValueError, "Invalid format specifier");
 }
 
-/* insert thousands separators in the integer part of digits */
-static void add_grouping(Buf *out, const char *d, long n, int sepc)
+/* digits d[0..nd) with a separator between groups of g (3 for decimal,
+   4 for x o b). With minw > 0 (zero padding) leading zeros are added
+   until the output plus 'other' characters outside it reach minw, as
+   CPython does (so a separator never leads) */
+static void group_run(Buf *out, const char *d, long nd, int sepc,
+    int g, long other, long minw)
 {
-    long i, intlen = 0;
-    while (intlen < n && ch_digit[(unsigned char)d[intlen]]) intlen++;
-    for (i = 0; i < n; i++) {
-        if (i < intlen && i > 0 && (intlen - i) % 3 == 0)
-            buf_addc(out, sepc);
-        buf_addc(out, d[i]);
+    long nz = 0, i, n2, len;
+    if (minw > 0) {
+        for (;;) {
+            n2 = nd + nz;
+            len = n2 + (n2 - 1) / g;
+            if (len + other >= minw) break;
+            nz++;
+        }
+    }
+    n2 = nd + nz;
+    for (i = 0; i < n2; i++) {
+        if (i > 0 && (n2 - i) % g == 0) buf_addc(out, sepc);
+        buf_addc(out, i < nz ? '0' : d[i - nz]);
     }
 }
 
@@ -9437,10 +10106,10 @@ static const char *sign_str(FSpec *sp, int neg)
 
 static Value format_float_spec(double d, FSpec *sp)
 {
-    char tmp[512], fm[32];
+    char *tmp, fm[16];
     Buf body;
-    int neg = 0, t = sp->type;
-    long prec = sp->prec;
+    int neg = 0, t = sp->type, k;
+    long prec = sp->prec, other;
     Value r;
     if (d != d) {
         return pad_result(sp, sign_str(sp, 0), "", "nan", 3, '>');
@@ -9450,38 +10119,74 @@ static Value format_float_spec(double d, FSpec *sp)
         return pad_result(sp, sign_str(sp, neg), "",
             t == 'F' || t == 'E' || t == 'G' ? "INF" : "inf", 3, '>');
     }
+    if (prec > 1000000L)
+        throw_new(cls_ValueError, "precision too big");
+    tmp = (char *)xmalloc((size_t)(440 + (prec > 0 ? prec : 0)));
     if (t == 0) {
         if (prec < 0) { float_repr(d, tmp); }
         else {
-            sprintf(fm, "%%.%ldg", prec == 0 ? 1L : prec);
-            sprintf(tmp, fm, d);
-            if (!strchr(tmp, '.') && !strchr(tmp, 'e')
-                && !strchr(tmp, 'n')) strcat(tmp, ".0");
+            sprintf(tmp, sp->alt ? "%#.*g" : "%.*g",
+                (int)(prec == 0 ? 1L : prec), d);
+            if (!strchr(tmp, 'e') && !strchr(tmp, 'n')) {
+                /* no type: the exponent form starts one digit earlier
+                   than with 'g' */
+                char *ep;
+                int pr = (int)(prec == 0 ? 1L : prec);
+                sprintf(tmp, "%.*e", pr - 1, d);
+                ep = strchr(tmp, 'e');
+                if (ep && atoi(ep + 1) == pr - 1 && d != 0) {
+                    if (!sp->alt) {
+                        char *m = ep;
+                        while (m > tmp && m[-1] == '0') m--;
+                        if (m > tmp && m[-1] == '.') m--;
+                        memmove(m, ep, strlen(ep) + 1);
+                    }
+                } else {
+                    sprintf(tmp, sp->alt ? "%#.*g" : "%.*g", pr, d);
+                    if (!strchr(tmp, '.') && !strchr(tmp, 'e')
+                        && !strchr(tmp, 'n'))
+                        strcat(tmp, ".0");
+                }
+            }
         }
     } else if (t == '%') {
-        sprintf(fm, "%%.%ldf", prec < 0 ? 6L : prec);
-        sprintf(tmp, fm, d * 100.0);
+        sprintf(tmp, sp->alt ? "%#.*f" : "%.*f",
+            (int)(prec < 0 ? 6L : prec), d * 100.0);
         strcat(tmp, "%");
     } else {
         int ct = t;
         if (ct == 'F') ct = 'f';
-        sprintf(fm, "%%.%ld%c", prec < 0 ? 6L : prec, ct);
-        sprintf(tmp, fm, d);
+        if (ct == 'n') ct = 'g';
+        k = 0;
+        fm[k++] = '%';
+        if (sp->alt) fm[k++] = '#';
+        fm[k++] = '.'; fm[k++] = '*'; fm[k++] = (char)ct; fm[k] = 0;
+        sprintf(tmp, fm, (int)(prec < 0 ? 6L : prec), d);
     }
     buf_init(&body);
-    if (sp->comma || sp->under)
-        add_grouping(&body, tmp, (long)strlen(tmp),
-        sp->comma ? ',' : '_');
-    else buf_add(&body, tmp);
+    if (sp->comma || sp->under) {
+        long intlen = 0, tl = (long)strlen(tmp);
+        while (intlen < tl && ch_digit[(unsigned char)tmp[intlen]])
+            intlen++;
+        other = (long)strlen(sign_str(sp, neg)) + (tl - intlen);
+        group_run(&body, tmp, intlen, sp->comma ? ',' : '_', 3, other,
+                  sp->zero && !sp->align ? sp->width : 0);
+        buf_add(&body, tmp + intlen);
+    } else buf_add(&body, tmp);
     r = pad_result(sp, sign_str(sp, neg), "", body.s, body.n, '>');
     buf_free(&body);
+    free(tmp);
     return r;
 }
+
+/* set by the % operator: a precision on an integer conversion means a
+   minimum digit count */
+static int fmt_pct_mode;
 
 static Value format_int_spec(Value v, FSpec *sp)
 {
     Buf body, g;
-    int neg = int_sign(v) < 0;
+    int neg = int_sign(v) < 0, isdec;
     const char *prefix = "";
     Value r, av = neg ? int_neg(v) : v;
     buf_init(&body);
@@ -9497,15 +10202,31 @@ static Value format_int_spec(Value v, FSpec *sp)
     break;
     default: int_str(av, &body); break;
     }
+    isdec
+        = !(sp->type == 'x' || sp->type == 'X' || sp->type == 'o'
+        || sp->type == 'b');
     if (sp->type == 'X') {
         long i;
         for (i = 0; i < body.n; i++) body.s[i] = (char)
             to_up[(unsigned char)body.s[i]];
         if (prefix[0]) prefix = "0X";
     }
+    if (sp->pct && sp->prec > body.n) {
+    /* "%.5d": at least 5 digits */
+        long i, z = sp->prec - body.n;
+        buf_init(&g);
+        for (i = 0; i < z; i++) buf_addc(&g, '0');
+        buf_addn(&g, body.s, body.n);
+        buf_free(&body);
+        body = g;
+    }
     if (sp->comma || sp->under) {
         buf_init(&g);
-        add_grouping(&g, body.s, body.n, sp->comma ? ',' : '_');
+        group_run(&g, body.s, body.n, sp->comma ? ',' : '_',
+            isdec ? 3 : 4,
+                  (long)strlen(sign_str(sp, neg))
+                      + (long)strlen(prefix),
+                  sp->zero && !sp->align ? sp->width : 0);
         buf_free(&body);
         body = g;
     }
@@ -9596,6 +10317,8 @@ static Value format_complex_spec(Value v, FSpec *sp)
 static Value format_value(Value v, const char *spec, long speclen)
 {
     FSpec sp;
+    int pct = fmt_pct_mode;
+    fmt_pct_mode = 0;
     if (speclen == 0) {
         if (v.t == T_STR) return v;
         return py_str(v);
@@ -9608,6 +10331,7 @@ static Value format_value(Value v, const char *spec, long speclen)
             type_name(v));
     }
     parse_spec(spec, speclen, &sp);
+    sp.pct = pct;
     if (v.t == T_STR || (sp.type == 's')) {
         Value s = v.t == T_STR ? v : py_str(v);
         long len = AS_STR(s)->len;
@@ -9622,9 +10346,23 @@ static Value format_value(Value v, const char *spec, long speclen)
         return format_value(py_str(v), spec, speclen);
     if (v.t == T_INT || v.t == T_BOOL || v.t == T_BIG) {
         int t = sp.type;
+        if (sp.comma && sp.under)
+            throw_new(cls_ValueError,
+            "Cannot specify both ',' and '_'.");
+        if (sp.comma && t != 0 && t != 'd' && t != 'e' && t != 'E'
+            && t != 'f' && t != 'F' &&
+            t != 'g' && t != 'G' && t != '%')
+            throw_new(cls_ValueError, "Cannot specify ',' with '%c'.",
+                t);
+        if (sp.under && (t == 'c' || t == 'n' || t == 's'))
+            throw_new(cls_ValueError, "Cannot specify '_' with '%c'.",
+                t);
         if (t == 'c') {
             Buf b;
             Value r;
+            if (v.t == T_BIG || v.u.i < 0 || v.u.i > 0x10FFFFL)
+                throw_new(cls_OverflowError,
+                    "%%c arg not in range(0x110000)");
             buf_init(&b);
             put_utf8(&b, (unsigned long)v.u.i);
             r = pad_result(&sp, "", "", b.s, b.n, '<');
@@ -9633,7 +10371,7 @@ static Value format_value(Value v, const char *spec, long speclen)
         }
         if (t == 0 || t == 'd' || t == 'n' || t == 'x' || t == 'X'
             || t == 'o' || t == 'b') {
-            if (sp.prec >= 0)
+            if (sp.prec >= 0 && !sp.pct)
                 throw_new(cls_ValueError,
                     "Precision not allowed in integer format "
                     "specifier");
@@ -9647,7 +10385,11 @@ static Value format_value(Value v, const char *spec, long speclen)
     if (v.t == T_COMPLEX) return format_complex_spec(v, &sp);
     if (v.t == T_FLOAT) {
         int t = sp.type;
-        if (t == 0 || strchr("eEfFgG%", t))
+        if (sp.under && t == 'n')
+            throw_new(cls_ValueError, "Cannot specify '_' with 'n'.");
+        if (sp.comma && t == 'n')
+            throw_new(cls_ValueError, "Cannot specify ',' with 'n'.");
+        if (t == 0 || t == 'n' || strchr("eEfFgG%", t))
             return format_float_spec(v.u.d, &sp);
         throw_new(cls_ValueError,
             "Unknown format code '%c' for object of type 'float'", t);
@@ -9795,6 +10537,7 @@ static Value py_format_percent(Value fmt, Value args)
         spec[sl++] = (char)t;
         spec[sl] = 0;
         if (t == 'd' && arg.t == T_BOOL) arg = mkint(arg.u.i);
+        fmt_pct_mode = 1;
         res = format_value(arg, spec, sl);
         buf_addn(&out, AS_STR(res)->s, AS_STR(res)->len);
     }
@@ -10229,6 +10972,38 @@ BI(bi_abs)
         type_name(v));
     return NONE_V;
 }
+/* round-half-even of the exact quotient a / b (a >= 0, b > 0) */
+static Value int_round_div(Value a, Value b)
+{
+    Value q, r, h;
+    int c;
+    int_divmod(a, b, &q, &r);
+    h = int_mul(r, mkint(2));
+    c = int_cmp(h, b);
+    if (c > 0 || (c == 0 && int_sign(int_mod(q, mkint(2))) != 0))
+        q = int_add(q, mkint(1));
+    return q;
+}
+/* round(d, -m) for m > 0: d rounded to a multiple of 10**m, exactly
+   (bigint arithmetic) */
+static double round_float_neg(double d, long m)
+{
+    double f, mant, r;
+    int e, neg = 0;
+    Value p10, num, den, q;
+    if (m > 400) return d < 0 ? -0.0 : 0.0;
+    if (d < 0) { neg = 1; d = -d; }
+    p10 = int_pow(mkint(10), m);
+    f = frexp(d, &e);
+    mant = ldexp(f, 53);
+    e -= 53;                                   /* d = mant * 2**e */
+    num = int_from_double(mant);
+    if (e >= 0) { num = int_mul(num, int_pow2(e)); den = p10; }
+    else den = int_mul(int_pow2(-e), p10);
+    q = int_round_div(num, den);
+    r = int_todouble(int_mul(q, p10));
+    return neg ? -r : r;
+}
 BI(bi_round)
 {
     Value v, nd;
@@ -10238,18 +11013,20 @@ BI(bi_round)
     if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET &&
         !class_find(AS_INST(v)->cls, intern_c("__round__")))
         v = AS_INST(v)->pay;
+    if (nd.t == T_BIG && (is_intv(v) || v.t == T_FLOAT)) {
+        if (int_sign(nd) > 0) return v.t == T_BOOL ? mkint(v.u.i) : v;
+        return v.t == T_FLOAT ? mkfloat(v.u.d < 0 ? -0.0 : 0.0)
+            : mkint(0);
+    }
     if (is_intv(v)) {
         if (nd.t == T_UNSET || nd.t == T_NONE || to_index(nd) >= 0)
             return v.t == T_BOOL ? mkint(v.u.i) : v;
         {
-            Value p = int_pow(mkint(10), -to_index(nd)), q, r, h;
-            int_divmod(v, p, &q, &r);
-            h = int_mul(r, mkint(2));
-            if (int_cmp(h, p) > 0
-                || (int_cmp(h, p) == 0
-                && (q.t != T_BIG ? (q.u.i & 1) : 0)))
-                q = int_add(q, mkint(1));
-            return int_mul(q, p);
+            Value p = int_pow(mkint(10), -to_index(nd)), q;
+            int neg = int_sign(v) < 0;
+            q = int_round_div(neg ? int_neg(v) : v, p);
+            q = int_mul(q, p);
+            return neg ? int_neg(q) : q;
         }
     }
     if (v.t == T_FLOAT) {
@@ -10274,13 +11051,8 @@ BI(bi_round)
             if (k >= 0) {
                 sprintf(tmp, "%.*f", (int)k, d);
                 return mkfloat(strtod(tmp, NULL));
-            } else {
-                double p = pow(10.0, (double)-k), q = d / p,
-                    r = floor(q);
-                if (q - r > 0.5) r += 1.0;
-                else if (q - r == 0.5 && fmod(r, 2.0) != 0) r += 1.0;
-                return mkfloat(r * p);
             }
+            return mkfloat(round_float_neg(d, -k));
         }
     }
     if (v.t == T_INST) {
@@ -10327,29 +11099,51 @@ BI(bi_divmod)
               type_name(A(0)), type_name(A(1)));
     return NONE_V;
 }
+/* base ** -1 modulo m (m != 0), or ValueError when there is no inverse
+   */
+static Value int_modinv(Value a, Value m)
+{
+    Value am = int_sign(m) < 0 ? int_neg(m) : m, r0, r1, s0, s1, q, t;
+    r0 = int_mod(a, am); r1 = am; s0 = mkint(1); s1 = mkint(0);
+    while (int_sign(r1) != 0) {
+        q = int_floordiv(r0, r1);
+        t = int_sub(r0, int_mul(q, r1)); r0 = r1; r1 = t;
+        t = int_sub(s0, int_mul(q, s1)); s0 = s1; s1 = t;
+    }
+    if (!(r0.t == T_INT && r0.u.i == 1))
+        throw_new(cls_ValueError,
+            "base is not invertible for the given modulus");
+    return int_mod(s0, m);
+}
+/* pow(base, e, m) for integers of any size */
+static Value int_powmod(Value base, Value e, Value m)
+{
+    Value r, b, q, rem;
+    if (int_sign(m) == 0)
+        throw_new(cls_ValueError, "pow() 3rd argument cannot be 0");
+    if (int_sign(e) < 0) { b = int_modinv(base, m); e = int_neg(e); }
+    else b = int_mod(base, m);
+    r = int_mod(mkint(1), m);
+    while (int_sign(e) > 0) {
+        int_divmod(e, mkint(2), &q, &rem);
+        if (int_sign(rem) != 0) r = int_mod(int_mul(r, b), m);
+        e = q;
+        if (int_sign(e) > 0) b = int_mod(int_mul(b, b), m);
+    }
+    return r;
+}
 BI(bi_pow)
 {
     need(x, 2, 3, "pow");
     if (x->n == 3 && A(2).t != T_NONE) {
-        Value r = mkint(1), b = int_mod(A(0), A(2)), e = A(1);
-        long ee;
-        if (!is_intv(A(0)) || !is_intv(e) || !is_intv(A(2)))
+        Value b = unpay(A(0)), e = unpay(A(1)), m = unpay(A(2));
+        if (!is_intv(b) || !is_intv(e) || !is_intv(m))
             throw_new(cls_TypeError,
                 "pow() 3rd argument not allowed unless all "
                     "arguments are integers");
-        if (int_sign(e) < 0)
-            throw_new(cls_ValueError,
-            "pow() 2nd argument cannot be negative when 3rd "
-                "argument specified");
-        if (e.t == T_BIG)
-            throw_new(cls_OverflowError, "exponent too large");
-        ee = e.u.i;
-        while (ee > 0) {
-            if (ee & 1) r = int_mod(int_mul(r, b), A(2));
-            ee >>= 1;
-            if (ee) b = int_mod(int_mul(b, b), A(2));
-        }
-        return int_mod(r, A(2));
+        return int_powmod(b.t == T_BOOL ? mkint(b.u.i) : b,
+            e.t == T_BOOL ? mkint(e.u.i) : e,
+                          m.t == T_BOOL ? mkint(m.u.i) : m);
     }
     return binop(B_POW, A(0), A(1));
 }
@@ -10514,16 +11308,47 @@ BI(bi_set)
 }
 BI(bi_range)
 {
-    long a = 0, b, c = 1;
+    Value a = mkint(0), b, c = mkint(1);
     need(x, 1, 3, "range");
-    if (x->n == 1) b = to_index(A(0));
+    if (x->n == 1) b = need_intv(A(0), "argument");
     else {
-        a = to_index(A(0)); b = to_index(A(1));
-        if (x->n == 3) c = to_index(A(2));
+        a = need_intv(A(0), "argument");
+        b = need_intv(A(1), "argument");
+        if (x->n == 3) c = need_intv(A(2), "argument");
     }
-    if (c == 0)
+    if (int_sign(c) == 0)
         throw_new(cls_ValueError, "range() arg 3 must not be zero");
-    return make_range(a, b, c);
+    return make_range_v(a, b, c);
+}
+/* range.index / range.count */
+static Value range_self(Args *x, const char *what)
+{
+    if (x->n < 1 || x->a[0].t != T_RANGE)
+        throw_new(cls_TypeError,
+            "descriptor '%s' requires a 'range' object", what);
+    return x->a[0];
+}
+BI(rg_count)
+{
+    Value r = range_self(x, "count");
+    need(x, 2, 2, "count");
+    return mkint(contains(r, A(1)) ? 1 : 0);
+}
+BI(rg_index)
+{
+    Value rv = range_self(x, "index"), v = A(1), i;
+    Range *r = (Range *)rv.u.o;
+    need(x, 2, 2, "index");
+    if (!contains(rv, v)) {
+        Buf b;
+        buf_init(&b);
+        repr_buf(v, &b, 0);
+        buf_add(&b, " is not in range");
+        throw_new(cls_ValueError, "%.200s", b.s);
+    }
+    if (v.t == T_FLOAT) v = int_from_double(v.u.d);
+    i = int_floordiv(int_sub(v, r->a), r->c);
+    return i;
 }
 BI(bi_enumerate)
 {
@@ -10533,12 +11358,13 @@ BI(bi_enumerate)
     Value sv = kwget(x, "start");
     need(x, 1, 2, "enumerate");
     if (x->n > 1) sv = A(1);
-    if (sv.t != T_UNSET) start = to_index(sv);
+    if (sv.t != T_UNSET && sv.t != T_BIG) start = to_index(sv);
     iv = get_iter(A(0));
     VPUSH(iv);
     it = iter_new(IK_ENUM);
     it->a = iv;
     it->i = start;
+    it->b = sv.t == T_BIG ? sv : NONE_V;
     vsp--;
     return mkobj(it, T_ITER);
 }
@@ -10592,8 +11418,17 @@ BI(bi_reversed)
     need(x, 1, 1, "reversed");
     v = A(0);
     if (v.t == T_DICT || v.t == T_DVIEW) v = iter_to_list(v);
-    if (v.t == T_LIST || v.t == T_TUPLE || v.t == T_STR
-        || v.t == T_RANGE) {
+    if (v.t == T_RANGE) {
+        Range *r = (Range *)v.u.o;
+        Value len = range_lenv(r);
+        if (int_sign(len) == 0) return get_iter(make_range(0, 0, 1));
+        return get_iter
+            (make_range_v(range_item(r, int_sub(len, mkint(1))),
+            int_sub(r->a, r->c),
+                                     int_neg(r->c)));
+    }
+    if (v.t == T_BYTES || v.t == T_BARR) v = iter_to_list(v);
+    if (v.t == T_LIST || v.t == T_TUPLE || v.t == T_STR) {
         it = iter_new(IK_REV);
         it->a = v;
         it->i = py_len(v) - 1;
@@ -10992,8 +11827,34 @@ BI(bi_id)
 }
 BI(bi_hash)
 {
+    Value v;
     need(x, 1, 1, "hash");
-    return mkint((long)(py_hash(A(0)) & 0x3fffffffUL));
+    v = A(0);
+    if (v.t == T_INST) {
+        Value *m = class_find(AS_INST(v)->cls, S_hash);
+        if (!m || m->t == T_BUILTIN) v = unpay(v);
+    }
+    switch (v.t) {
+    case T_BOOL: case T_INT: case T_BIG: return int_hash_mod(v);
+    case T_FLOAT: return float_hash_exact(v.u.d);
+    case T_COMPLEX
+        : return complex_hash_exact(AS_CPLX(v)->re, AS_CPLX(v)->im);
+    case T_NONE
+        : return int_add(int_mul(mkint(42388L), mkint(100000L)),
+        mkint(94112L));
+    case T_INST: {
+        Value *m = class_find(AS_INST(v)->cls, S_hash);
+        if (m) {
+            Value r = call1(*m, v);
+            if (r.t == T_BOOL) return mkint(r.u.i);
+            if (r.t == T_INT || r.t == T_BIG) return int_hash_mod(r);
+            throw_new(cls_TypeError,
+                "__hash__ method should return an integer");
+        }
+        break; }
+    default: break;
+    }
+    return mkint((long)(py_hash(v) & 0x3fffffffUL));
 }
 BI(bi_format)
 {
@@ -11214,6 +12075,159 @@ static Value str_case(Str *s, int up)
 }
 BI(s_upper) { return str_case(SELF, 1); }
 BI(s_lower) { return str_case(SELF, 0); }
+BI(bi_ascii)
+{
+    Value r;
+    Buf b;
+    Str *s;
+    long i;
+    int k;
+    char t[40];
+    need(x, 1, 1, "ascii");
+    r = py_repr(A(0));
+    s = AS_STR(r);
+    buf_init(&b);
+    for (i = 0; i < s->len; i += k) {
+        unsigned long c = u8_next((const unsigned char *)s->s, i,
+            s->len, &k);
+        if (c < 128UL) buf_addc(&b, (int)c);
+        else {
+            if (c < 256UL) sprintf(t, "\\x%02lx", c);
+            else if (c < 65536UL) sprintf(t, "\\u%04lx", c);
+            else sprintf(t, "\\U%08lx", c);
+            buf_add(&b, t);
+        }
+    }
+    r = buf_value(&b);
+    return r;
+}
+/* str.translate(table): table maps ordinals to a str, an int, or None
+   (delete) */
+BI(s_translate)
+{
+    Str *s = SELF;
+    Value tab, res, v;
+    Buf b;
+    long i;
+    int k;
+    need(x, 2, 2, "translate");
+    tab = A(1);
+    buf_init(&b);
+    for (i = 0; i < s->len; i += k) {
+        unsigned long c = u8_next((const unsigned char *)s->s, i,
+            s->len, &k);
+        int have = 0;
+        if (tab.t == T_DICT)
+            have = dict_get(AS_DICT(tab), mkint((long)c), &v);
+        else if (tab.t == T_LIST || tab.t == T_TUPLE) {
+            if ((long)c < AS_LIST(tab)->n) { v = AS_LIST(tab)->a[c];
+                have = 1;
+            }
+        } else if (tab.t == T_STR) {
+            long q = 0, pos = 0;
+            int kk;
+            const unsigned char *ts
+                = (const unsigned char *)AS_STR(tab)->s;
+            long tn = AS_STR(tab)->len;
+            while (pos < tn && (unsigned long)q < c) {
+                (void)u8_next(ts, pos, tn, &kk); pos += kk; q++;
+            }
+            if (pos < tn && (unsigned long)q == c) {
+                (void)u8_next(ts, pos, tn, &kk);
+                v = mkstr(AS_STR(tab)->s + pos, kk);
+                have = 1;
+            }
+        } else
+            throw_new(cls_TypeError,
+                "translate table must be a mapping or sequence");
+        if (!have || v.t == T_UNSET) { buf_addn(&b, s->s + i, k);
+            continue;
+        }
+        if (v.t == T_NONE) continue;
+        if (v.t == T_INT) {
+            if (v.u.i < 0 || v.u.i > 0x10FFFFL)
+                throw_new(cls_ValueError,
+                    "character mapping must be in range(0x110000)");
+            put_utf8(&b, (unsigned long)v.u.i);
+        } else if (v.t == T_STR)
+            buf_addn(&b, AS_STR(v)->s, AS_STR(v)->len);
+        else throw_new(cls_TypeError,
+            "character mapping must return integer, None or str");
+    }
+    res = buf_value(&b);
+    return res;
+}
+BI(s_maketrans)
+{
+    Dict *d = dict_new();
+    Value dv = mkobj(d, T_DICT);
+    int off = (x->n > 0 && A(0).t == T_CLASS) ? 1 : 0;
+    Args a2 = *x;
+    a2.n = x->n - off; a2.a = x->a + off;
+    x = &a2;
+    VPUSH(dv);
+    if (x->n == 1) {
+        Dict *src;
+        long i;
+        if (A(0).t != T_DICT)
+            throw_new(cls_TypeError,
+                      "if you give only one argument to "
+                          "maketrans it must be a dict");
+        src = AS_DICT(A(0));
+        for (i = 0; i < src->used; i++) {
+            Value k = src->e[i].k;
+            if (k.t == T_UNSET) continue;
+            if (k.t == T_STR) {
+                int kk;
+                if (AS_STR(k)->len == 0 ||
+                    (u8_next((const unsigned char *)AS_STR(k)->s, 0,
+                        AS_STR(k)->len, &kk),
+                     kk != AS_STR(k)->len))
+                    throw_new(cls_ValueError,
+                        "string keys in translate table must be of "
+                        "length 1");
+                k
+                    = mkint
+                    ((long)u8_next((const unsigned char *)AS_STR(k)->s,
+                    0,
+                                        AS_STR(k)->len, &kk));
+            }
+            dict_set(d, k, src->e[i].v);
+        }
+    } else if (x->n >= 2) {
+        Str *f = astr(A(0), "maketrans"), *t = astr(A(1), "maketrans");
+        long i = 0, j = 0;
+        int k1, k2;
+        while (i < f->len && j < t->len) {
+            unsigned long a = u8_next((const unsigned char *)f->s, i,
+                f->len, &k1);
+            unsigned long b = u8_next((const unsigned char *)t->s, j,
+                t->len, &k2);
+            dict_set(d, mkint((long)a), mkint((long)b));
+            i += k1; j += k2;
+        }
+        if (i < f->len || j < t->len)
+            throw_new(cls_ValueError,
+                "the first two maketrans arguments must have equal "
+                "length");
+        if (x->n == 3) {
+            Str *z = astr(A(2), "maketrans");
+            long q = 0;
+            int kk;
+            while (q < z->len) {
+                dict_set(d,
+                    mkint((long)u8_next((const unsigned char *)z->s, q,
+                    z->len, &kk)),
+                         NONE_V);
+                q += kk;
+            }
+        }
+    } else
+        throw_new(cls_TypeError,
+            "maketrans expected at least 1 argument, got 0");
+    vsp--;
+    return dv;
+}
 BI(s_swapcase)
 {
     Str *s = SELF;
@@ -11283,16 +12297,36 @@ static long find_sub(Str *s, Str *u, long start, long end, int rev)
     }
     return -1;
 }
+/* a slice-style bound: any integer, clamped to +-SI_MAX like CPython
+   clamps to +-PY_SSIZE_T_MAX */
+static long to_slice_index(Value v)
+{
+    return slice_part(need_intv(v, "slice indices"));
+}
+/* a count or position that CPython holds in a C ssize_t: huge values
+   are an OverflowError, anything beyond this build's small range is
+   clamped */
+static long to_ssize(Value v)
+{
+    Value b = need_intv(v, "argument");
+    if (b.t == T_BIG
+        && (int_cmp(b, int_pow2(63)) >= 0
+        || int_cmp(b, int_neg(int_pow2(63))) < 0))
+        throw_new(cls_OverflowError,
+            "Python int too large to convert to C ssize_t");
+    return slice_part(b);
+}
 static void se_range(Args *x, int first, long len, long *st, long *en)
 {
     *st = 0; *en = len;
     if (x->n > first && A(first).t != T_NONE) {
-        *st = to_index(A(first));
+        *st = to_slice_index(A(first));
         if (*st < 0) { *st += len; if (*st < 0) *st = 0; }
     }
     if (x->n > first + 1 && A(first + 1).t != T_NONE) {
-        *en = to_index(A(first + 1));
+        *en = to_slice_index(A(first + 1));
         if (*en < 0) { *en += len; if (*en < 0) *en = 0; }
+        if (*en > len) *en = len;
     }
 }
 static Value find_impl(Args *x, int rev, int raise, const char *nm)
@@ -11318,7 +12352,8 @@ BI(s_count)
     need(x, 2, 4, "count");
     u = astr(A(1), "argument");
     se_range(x, 2, s->len, &st, &en);
-    if (u->len == 0) return mkint(en - st + 1);
+    if (u->len == 0)
+        return mkint(st > en || st > s->len ? 0 : en - st + 1);
     for (i = st; i + u->len <= en; ) {
         if (memcmp(s->s + i, u->s, (size_t)u->len) == 0) { n++;
             i += u->len;
@@ -11365,7 +12400,7 @@ static Value split_impl(Args *x, int rev)
     List *l = list_new(8);
     Value lv = mklist(l);
     VPUSH(lv);
-    if (mv.t != T_UNSET) maxs = to_index(mv);
+    if (mv.t != T_UNSET) maxs = to_ssize(mv);
     if (sepv.t == T_UNSET || sepv.t == T_NONE) {
         if (!rev) {
             i = 0;
@@ -11373,10 +12408,7 @@ static Value split_impl(Args *x, int rev)
                 while (i < n && ws((unsigned char)s->s[i])) i++;
                 if (i >= n) break;
                 if (maxs >= 0 && l->n >= maxs) {
-                    long e = n;
-                    while (e > i && ws((unsigned char)s->s[e - 1]))
-                        e--;
-                    list_push(l, mkstr(s->s + i, e - i));
+                    list_push(l, mkstr(s->s + i, n - i));
                     break;
                 }
                 j = i;
@@ -11393,9 +12425,7 @@ static Value split_impl(Args *x, int rev)
                 while (e > 0 && ws((unsigned char)s->s[e - 1])) e--;
                 if (e <= 0) break;
                 if (maxs >= 0 && cnt >= maxs) {
-                    long b = 0;
-                    while (b < e && ws((unsigned char)s->s[b])) b++;
-                    list_push(t, mkstr(s->s + b, e - b));
+                    list_push(t, mkstr(s->s, e));
                     break;
                 }
                 j = e;
@@ -11753,7 +12783,7 @@ BI(l_insert)
     List *l = self_list(x);
     long i;
     need(x, 3, 3, "insert");
-    i = to_index(A(1));
+    i = to_ssize(A(1));
     if (i < 0) { i += l->n; if (i < 0) i = 0; }
     if (i > l->n) i = l->n;
     list_push(l, NONE_V);
@@ -11794,11 +12824,13 @@ static Value seq_index(Args *x, int istuple)
     List *l = AS_LIST(A(0));
     long i, st = 0, en = l->n;
     need(x, 2, 4, "index");
-    if (x->n > 2) { st = to_index(A(2));
+    if (x->n > 2) { st = to_slice_index(A(2));
         if (st < 0) st += l->n;
         if (st < 0) st = 0;
     }
-    if (x->n > 3) { en = to_index(A(3)); if (en < 0) en += l->n; }
+    if (x->n > 3) { en = to_slice_index(A(3));
+        if (en < 0) en += l->n;
+    }
     for (i = st; i < en && i < l->n; i++)
         if (py_eq(l->a[i], A(1))) return mkint(i);
     if (istuple)
@@ -12043,27 +13075,149 @@ BI(st_clear)
 }
 
 /* ---- numbers ---------------------------------------------------- */
+BI(i_index)
+{
+    Value v = unpay(A(0));
+    return v.t == T_BOOL ? mkint(v.u.i) : v;
+}
 BI(i_bit_length)
 {
-    Value v = A(0);
-    long n = 0;
-    if (v.t == T_BIG) {
-        Buf b;
-        buf_init(&b);
-        int_str_base(int_sign(v) < 0 ? int_neg(v) : v, 2, &b);
-        n = b.n;
-        buf_free(&b);
-        return mkint(n);
-    }
-    {
-        unsigned long u = (unsigned long)(v.u.i < 0 ? -v.u.i : v.u.i);
-        while (u) { n++; u >>= 1; }
-    }
-    return mkint(n);
+    Value v = unpay(A(0));
+    return mkint(int_bitlen(v));
+}
+BI(i_bit_count)
+{
+    Value v = unpay(A(0));
+    if (int_sign(v) < 0) v = int_neg(v);
+    return mkint(int_bitcount(v));
+}
+BI(i_as_integer_ratio)
+{
+    Value r[2];
+    r[0] = unpay(A(0));
+    if (r[0].t == T_BOOL) r[0] = mkint(r[0].u.i);
+    r[1] = mkint(1);
+    return mktuple_from(r, 2);
+}
+BI(i_is_integer)
+{
+    (void)x;
+    return TRUE_V;
 }
 BI(f_is_integer)
 {
-    return mkbool(A(0).u.d == floor(A(0).u.d));
+    double d = unpay(A(0)).u.d;
+    return mkbool(d - d == 0.0 && d == floor(d));
+}
+BI(f_as_integer_ratio)
+{
+    double d = unpay(A(0)).u.d, f, m;
+    int e, neg = 0;
+    Value r[2];
+    if (d != d)
+        throw_new(cls_ValueError,
+        "cannot convert NaN to integer ratio");
+    if (d - d != 0.0)
+        throw_new(cls_OverflowError,
+        "cannot convert Infinity to integer ratio");
+    if (d < 0) { neg = 1; d = -d; }
+    if (d == 0.0) { r[0] = mkint(0);
+        r[1] = mkint(1);
+        return mktuple_from(r, 2);
+    }
+    f = frexp(d, &e);
+    m = ldexp(f, 53);                    /* an integer below 2**53 */
+    e -= 53;
+    while (e < 0 && fmod(m, 2.0) == 0.0) { m /= 2.0; e++; }
+    r[0] = int_from_double(m);
+    if (neg) r[0] = int_neg(r[0]);
+    if (e >= 0) { r[0] = int_mul(r[0], int_pow2(e)); r[1] = mkint(1); }
+    else r[1] = int_pow2(-e);
+    return mktuple_from(r, 2);
+}
+BI(f_hex)
+{
+    double d = unpay(A(0)).u.d, f, m;
+    int e, i;
+    char b[64], *q = b;
+    static const char hx[] = "0123456789abcdef";
+    if (d != d) return mkcstr("nan");
+    if (d > DBL_MAX) return mkcstr("inf");
+    if (d < -DBL_MAX) return mkcstr("-inf");
+    if (d == 0.0)
+        return mkcstr(1.0 / d < 0 ? "-0x0.0p+0" : "0x0.0p+0");
+    if (d < 0) { *q++ = '-'; d = -d; }
+    f = frexp(d, &e);                    /* 0.5 <= f < 1 */
+    m = ldexp(f, 53);
+    /* 53 bit integer, top bit set */
+    e -= 1;                              /* d = 1.xxx * 2**e */
+    if (e < -1022) {
+    /* subnormal: 0.xxx * 2**-1022 */
+        m = ldexp(m, e + 1022);
+        *q++ = '0'; *q++ = 'x'; *q++ = '0'; *q++ = '.';
+        e = -1022;
+    } else {
+        *q++ = '0'; *q++ = 'x'; *q++ = '1'; *q++ = '.';
+        m = m - ldexp(1.0, 52);
+    }
+    for (i = 13; i > 0; i--) {           /* 13 hex digits = 52 bits */
+        double w = ldexp(1.0, 4 * (i - 1));
+        double dg = floor(m / w);
+        *q++ = hx[(int)dg];
+        m -= dg * w;
+    }
+    sprintf(q, "p%c%d", e < 0 ? '-' : '+', e < 0 ? -e : e);
+    return mkcstr(b);
+}
+BI(f_fromhex)
+{
+    Value sv = A(x->n > 0 && A(0).t == T_CLASS ? 1 : 0);
+    const char *p, *t;
+    double v = 0.0, scale = 1.0;
+    int neg = 0, any = 0, e = 0, eneg = 0, seen_dot = 0, dg;
+    if (sv.t != T_STR)
+        throw_new(cls_TypeError, "fromhex() argument must be str");
+    p = AS_STR(sv)->s;
+    while (ch_space[(unsigned char)*p]) p++;
+    if (*p == '-') { neg = 1; p++; } else if (*p == '+') p++;
+    t = p;
+    if (strncmp(p, "inf", 3) == 0 || strncmp(p, "INF", 3) == 0)
+        return mkfloat(neg ? -HUGE_VAL : HUGE_VAL);
+    if (strncmp(p, "nan", 3) == 0 || strncmp(p, "NAN", 3) == 0)
+        return mkfloat(HUGE_VAL - HUGE_VAL);
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+    for (;; p++) {
+        if (*p == '.' && !seen_dot) { seen_dot = 1; continue; }
+        dg = digit_val((unsigned char)*p);
+        if (dg < 0 || dg > 15) break;
+        any = 1;
+        if (seen_dot) { scale /= 16.0; v += dg * scale; }
+        else v = v * 16.0 + dg;
+    }
+    if (!any)
+        throw_new(cls_ValueError,
+        "invalid hexadecimal floating-point string");
+    if (*p == 'p' || *p == 'P') {
+        p++;
+        if (*p == '-') { eneg = 1; p++; } else if (*p == '+') p++;
+        if (!ch_digit[(unsigned char)*p])
+            throw_new(cls_ValueError,
+                "invalid hexadecimal floating-point string");
+        while (ch_digit[(unsigned char)*p])
+            { if (e < 100000) e = e * 10 + (*p - '0');
+            p++;
+        }
+    }
+    while (ch_space[(unsigned char)*p]) p++;
+    if (*p)
+        throw_new(cls_ValueError,
+        "invalid hexadecimal floating-point string");
+    (void)t;
+    v = ldexp(v, eneg ? -e : e);
+    if (v > DBL_MAX)
+        throw_new(cls_OverflowError,
+            "hexadecimal value too large to represent as a float");
+    return mkfloat(neg ? -v : v);
 }
 
 /* ---- generators and iterators ----------------------------------- */
@@ -12543,13 +13697,16 @@ BI(bi_slice)
 BI(sl_indices)
 {
     List *sl;
-    long start, stop, step, cnt;
     Value r[3];
     need(x, 2, 2, "indices");
     sl = AS_LIST(A(0));
-    slice_adjust(sl->a[0], sl->a[1], sl->a[2], to_index(A(1)), &start,
-        &stop, &step, &cnt);
-    r[0] = mkint(start); r[1] = mkint(stop); r[2] = mkint(step);
+    {
+        Value len = need_intv(A(1), "length");
+        if (int_sign(len) < 0)
+            throw_new(cls_ValueError, "length should not be negative");
+        slice_adjust_v(sl->a[0], sl->a[1], sl->a[2], len, &r[0], &r[1],
+            &r[2]);
+    }
     return mktuple_from(r, 3);
 }
 
@@ -12584,9 +13741,12 @@ BI(s_isprintable)
 {
     Str *s = SELF;
     long i;
-    for (i = 0; i < s->len; i++)
-        if ((unsigned char)s->s[i] < 32
-            || (unsigned char)s->s[i] == 127) return FALSE_V;
+    int k;
+    for (i = 0; i < s->len; i += k) {
+        unsigned long c = u8_next((const unsigned char *)s->s, i,
+            s->len, &k);
+        if (c < 128UL ? !ch_print[c] : uni_nonprint(c)) return FALSE_V;
+    }
     return TRUE_V;
 }
 BI(s_isascii)
@@ -12852,12 +14012,31 @@ BI(b_hex)
     Buf b;
     Value sepv = x->n > 1 ? A(1) : kwget(x, "sep");
     const char *sep = NULL;
+    char sepc[2] = { 0, 0 };
+    Value gv = x->n > 2 ? A(2) : kwget(x, "bytes_per_sep");
+    long grp = 1;
     bx_self(A(0), &p, &n);
     if (sepv.t == T_STR && AS_STR(sepv)->len > 0) sep = AS_STR(sepv)
         ->s;
+    else if (sepv.t != T_UNSET && sepv.t != T_NONE && sepv.t != T_STR)
+        {
+        const char *bp;
+        long bn;
+        if (bytes_get(sepv, &bp, &bn) && bn == 1) { sepc[0] = bp[0];
+            sep = sepc;
+        }
+        else throw_new(cls_ValueError, "sep must be length 1.");
+    }
+    if (gv.t != T_UNSET && gv.t != T_NONE) grp = to_index(gv);
     buf_init(&b);
     for (i = 0; i < n; i++) {
-        if (sep && i) buf_add(&b, sep);
+        if (sep && i) {
+            /* positive: groups counted from the right, negative: from
+               the left */
+            long k = grp > 0 ? n - i : i;
+            long g = grp < 0 ? -grp : grp;
+            if (g > 0 && k % g == 0) buf_add(&b, sep);
+        }
         sprintf(t, "%02x", (unsigned char)p[i]);
         buf_add(&b, t);
     }
@@ -12943,8 +14122,10 @@ static Value via_str(Args *x, BFn fn)
         if (a.t == T_INST && AS_INST(a)->pay.t != T_UNSET)
             a = AS_INST(a)->pay;
         if (bytes_get(a, &bp, &bn)) av[i] = mkstr(bp, bn);
-        else if (i > 0 && (a.t == T_INT) && a.u.i >= 0 && a.u.i < 256)
-            {
+        else if (i == 1
+            && (fn == s_find || fn == s_count || fn == s_rfind)
+            && a.t == T_INT &&
+                 a.u.i >= 0 && a.u.i < 256) {
             char ch = (char)a.u.i;
             av[i] = mkstr(&ch, 1);
         } else if (i > 0
@@ -13164,7 +14345,7 @@ BI(ba_insert)
     long i;
     int c;
     need(x, 3, 3, "insert");
-    i = to_index(A(1));
+    i = to_ssize(A(1));
     c = byte_arg(A(2));
     if (i < 0) { i += a->n; if (i < 0) i = 0; }
     if (i > a->n) i = a->n;
@@ -13212,6 +14393,7 @@ static int int_pack_bytes(Value v, long n, int big, int sg, char *out)
 {
     long i;
     if (int_sign(v) < 0 && !sg) return -1;
+    if (n == 0) return int_sign(v) == 0;
     if (v.t == T_INT && n <= 64) {
         unsigned long u = (unsigned long)v.u.i;
         int neg = v.u.i < 0;
@@ -13222,7 +14404,6 @@ static int int_pack_bytes(Value v, long n, int big, int sg, char *out)
                 if (v.u.i >= lim || v.u.i < -lim) return 0;
             }
         }
-        if (n == 0) return v.u.i == 0;
         for (i = 0; i < n; i++) {
             unsigned c;
             if (i < (long)sizeof(long)) c = (unsigned)
@@ -13257,7 +14438,8 @@ static Value int_unpack_bytes(const char *p, long n, int big, int sg)
 {
     long i;
     int neg = sg && n > 0 && ((unsigned char)p[big ? 0 : n - 1] & 128);
-    if (n <= (long)sizeof(long) - 2 || (n <= 4 && !neg)) {
+    if (n < (long)sizeof(long)) {
+    /* fits a long, even with the sign */
         unsigned long u = 0;
         for (i = 0; i < n; i++) u = (u << 8) | (unsigned char)
             p[big ? i : n - 1 - i];
@@ -13445,6 +14627,9 @@ static void struct_parse(const char *f, long fl, SFmt *sf)
         sf->it[sf->n].off = pos;
         sf->n++;
         pos += (c == 's' || c == 'p') ? cnt : size * cnt;
+        if (pos > 1000000000L) { free(sf->it);
+            struct_err("total struct size too long");
+        }
     }
     sf->total = pos;
 }
@@ -18127,35 +19312,84 @@ static Nd *vec_new(long n)
     return nd_new1(ND_FLOAT, n);
 }
 
+/* a * b + c with a single rounding (OpenBLAS kernels use fused
+   multiply-add on current x86 and ARM CPUs, and whether a pivot comes
+   out exactly zero depends on it) */
+static double la_fma(double a, double b, double c)
+{
+#if FLT_RADIX != 2
+    return a * b + c;
+#else
+    /* exact product p + e (Dekker; volatile keeps x87 from double
+       rounding), then one rounding of p + e + c; the C99 fma() is not
+       used so that nothing beyond C89 is referenced */
+    volatile double t, ah, al, bh, bl, p, e, s, bb, er;
+    t = 134217729.0 * a; ah = t - (t - a); al = a - ah;
+    t = 134217729.0 * b; bh = t - (t - b); bl = b - bh;
+    p = a * b;
+    e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+    s = p + c; bb = s - p; er = (p - (s - bb)) + (c - bb);
+    return s + (er + e);
+#endif
+}
 /* LU with partial pivoting, in place; returns sign (+1/-1) or 0 when
-   singular */
+   singular. Left-looking (column by column), reciprocal pivot scaling
+   and fused dot products in the order of OpenBLAS getf2 (a dot for the
+   U part, a gemv with groups of four columns for the L part), so that
+   a matrix such as [[1,2,3],[4,5,6],[7,8,9]] gets the exactly zero
+   pivot that numpy reports (LinAlgError: Singular matrix) and nearly
+   the same rounding as numpy. */
 static int lu_dec(double *a, long n, long *piv)
 {
     long i, j, k, p;
     int sign = 1, sing = 0;
-    for (k = 0; k < n; k++) {
-        double mx = fabs(a[k * n + k]);
-        p = k;
-        for (i = k + 1; i < n; i++)
-            if (fabs(a[i * n + k]) > mx) { mx = fabs(a[i * n + k]);
+    for (j = 0; j < n; j++) {
+        double mx, r;
+        long nvec = (n - j) - (n - j) % 4;
+        for (i = 0; i < j; i++) {
+        /* U part: dot products */
+            double s = 0.0;
+            for (k = 0; k < i; k++)
+                s = la_fma(a[i * n + k], a[k * n + j], s);
+            a[i * n + j] -= s;
+        }
+        for (i = j; i < n; i++) {
+        /* L part: gemv */
+            double s = 0.0;
+            if (i - j >= nvec) {
+                for (k = 0; k < j; k++)
+                    s = la_fma(a[i * n + k], a[k * n + j], s);
+                a[i * n + j] -= s;
+            } else {
+                for (k = 0; k + 4 <= j; k += 4) {
+                    double t = 0.0;
+                    long q;
+                    for (q = 0; q < 4; q++)
+                        t = la_fma(a[i * n + k + q],
+                        -a[(k + q) * n + j], t);
+                    s += t;
+                }
+                for (; k < j; k++) s += a[i * n + k] * -a[k * n + j];
+                a[i * n + j] += s;
+            }
+        }
+        p = j; mx = fabs(a[j * n + j]);
+        for (i = j + 1; i < n; i++)
+            if (fabs(a[i * n + j]) > mx) { mx = fabs(a[i * n + j]);
                 p = i;
             }
-        piv[k] = p;
+        piv[j] = p;
         if (mx == 0.0) { sing = 1; continue; }
-        if (p != k) {
-            for (j = 0; j < n; j++) {
-                double t = a[k * n + j];
-                a[k * n + j] = a[p * n + j];
-                a[p * n + j] = t;
+        if (p != j) {
+            for (k = 0; k < n; k++) {
+                double t = a[j * n + k];
+                a[j * n + k] = a[p * n + k];
+                a[p * n + k] = t;
             }
             sign = -sign;
         }
-        for (i = k + 1; i < n; i++) {
-            double f = a[i * n + k] / a[k * n + k];
-            a[i * n + k] = f;
-            if (f != 0.0) for (j = k + 1; j < n; j++)
-                a[i * n + j] -= f * a[k * n + j];
-        }
+        r = 1.0 / a[j * n + j];
+        for (i = j + 1; i < n; i++) a[i * n + j] *= r;
     }
     return sing ? 0 : sign;
 }
@@ -18179,12 +19413,13 @@ static void lu_solve(const double *lu, long n, const long *piv,
                 b[i * nrhs + j] -= f * b[k * nrhs + j];
         }
     for (i = n - 1; i >= 0; i--) {
-        for (k = i + 1; k < n; k++) {
+        for (k = n - 1; k > i; k--) {
             double f = lu[i * n + k];
             if (f != 0.0) for (j = 0; j < nrhs; j++)
                 b[i * nrhs + j] -= f * b[k * nrhs + j];
         }
-        for (j = 0; j < nrhs; j++) b[i * nrhs + j] /= lu[i * n + i];
+        for (j = 0; j < nrhs; j++)
+            b[i * nrhs + j] *= 1.0 / lu[i * n + i];
     }
 }
 BI(la_det)
@@ -24469,8 +25704,53 @@ MATH1(m_sinh, sinh(v), 1)
 MATH1(m_cosh, cosh(v), 1)
 MATH1(m_tanh, tanh(v), 1)
 MATH1(m_exp, exp(v), 1)
-MATH1(m_log10, log10(v), v > 0)
-MATH1(m_log2, log(v) / log(2.0), v > 0)
+static double log2_d(double v)
+{
+    int e;
+    double m;
+    if (v >= 0.5 && v <= 2.0) return log(v) / log(2.0);
+    m = frexp(v, &e);                    /* exact for powers of two */
+    return (double)e + log(m) / log(2.0);
+}
+static double ln_d(double v) { return log(v); }
+static double log10_d(double v) { return log10(v); }
+/* log of a number that may be an integer too big for a double: f(m) +
+   e * f(2) for x = m * 2**e (CPython's loghelper); kind selects f */
+static double log_any(Value v, double (*f)(double))
+{
+    if (v.t == T_BIG && AS_BIG(v)->sign > 0) {
+        long bl = int_bitlen(v), sh = bl - 64;
+        double m;
+        Value top = sh > 0 ? int_floordiv(v, int_pow2(sh)) : v;
+        m = ldexp(int_todouble(top), (int)(-(sh > 0 ? 64 : bl)));
+        if (m >= 1.0) { m = 0.5; bl++; }
+        return f(m) + (double)bl * f(2.0);
+    }
+    if (v.t == T_BIG) domain_check(0);
+    {
+        double d = to_dbl(v);
+        domain_check(d > 0);
+        return f(d);
+    }
+}
+static Value log_arg(Args *x, int i)
+{
+    Value v = A(i);
+    if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET) v = AS_INST(v)
+        ->pay;
+    if (is_num(v)) return v;
+    return mkfloat(dbl_arg(x, i));
+}
+BI(m_log2)
+{
+    need(x, 1, 1, "log2");
+    return mkfloat(log_any(log_arg(x, 0), log2_d));
+}
+BI(m_log10)
+{
+    need(x, 1, 1, "log10");
+    return mkfloat(log_any(log_arg(x, 0), log10_d));
+}
 MATH1(m_fabs, fabs(v), 1)
 MATH1(m_degrees, v * 180.0 / 3.14159265358979323846, 1)
 MATH1(m_radians, v * 3.14159265358979323846 / 180.0, 1)
@@ -24478,14 +25758,14 @@ BI(m_log)
 {
     double v;
     need(x, 1, 2, "log");
-    v = dbl_arg(x, 0);
-    domain_check(v > 0);
+    v = log_any(log_arg(x, 0), ln_d);
     if (x->n == 2) {
-        double b = dbl_arg(x, 1);
-        domain_check(b > 0);
-        return mkfloat(log(v) / log(b));
+        double b = log_any(log_arg(x, 1), ln_d);
+        if (b == 0.0)
+            throw_new(cls_ZeroDivisionError, "float division by zero");
+        return mkfloat(v / b);
     }
-    return mkfloat(log(v));
+    return mkfloat(v);
 }
 BI(m_pow)
 {
@@ -24517,6 +25797,35 @@ BI(m_copysign)
     a = fabs(dbl_arg(x, 0));
     b = dbl_arg(x, 1);
     return mkfloat((b < 0 || (b == 0 && 1.0 / b < 0)) ? -a : a);
+}
+static double next_after(double x, double y)
+{
+    int e;
+    double m, step, r;
+    if (x != x || y != y) return x != x ? x : y;
+    if (x == y) return y;
+    if (x == 0) return y > 0 ? ldexp(1.0, -1074) : -ldexp(1.0, -1074);
+    m = frexp(x, &e);
+    step = ldexp(1.0, e - 53);
+    if (step < ldexp(1.0, -1074)) step = ldexp(1.0, -1074);
+    if (((y > x) != (x > 0)) && fabs(m) == 0.5 && e - 54 >= -1074)
+        step = ldexp(1.0, e - 54);
+    r = y > x ? x + step : x - step;
+    return r;
+}
+BI(m_nextafter)
+{
+    need(x, 2, 2, "nextafter");
+    return mkfloat(next_after(dbl_arg(x, 0), dbl_arg(x, 1)));
+}
+BI(m_ulp)
+{
+    double v;
+    need(x, 1, 1, "ulp");
+    v = fabs(dbl_arg(x, 0));
+    if (v != v || v > DBL_MAX) return mkfloat(v);
+    if (v == DBL_MAX) return mkfloat(v - next_after(v, 0.0));
+    return mkfloat(next_after(v, HUGE_VAL) - v);
 }
 static Value dbl_to_int(double d)
 {
@@ -24632,18 +25941,13 @@ BI(m_isqrt)
         while ((s + 1) * (s + 1) <= n.u.i) s++;
         return mkint(s);
     }
-    r = int_from_double(sqrt(int_todouble(n)));
+    r = int_pow2((int_bitlen(n) + 1) / 2);
+    /* at least sqrt(n); Newton from above */
     for (;;) {
         nr = int_floordiv(int_add(r, int_floordiv(n, r)), mkint(2));
-        if (int_cmp(nr, r) == 0) break;
-        if (int_cmp(int_sub(nr, r), mkint(1)) == 0
-            && int_cmp(int_mul(nr, nr), n) > 0) break;
+        if (int_cmp(nr, r) >= 0) break;
         r = nr;
     }
-    while (int_cmp(int_mul(r, r), n) > 0) r = int_sub(r, mkint(1));
-    while (int_cmp(int_mul(int_add(r, mkint(1)), int_add(r, mkint(1))),
-        n) <= 0)
-        r = int_add(r, mkint(1));
     return r;
 }
 BI(m_comb)
@@ -24695,6 +25999,7 @@ BI(m_fsum)
 {
     double *p = (double *)xmalloc(sizeof(double) * 64), xv, y, hi,
         lo = 0.0, yr;
+    double special = 0.0, inf_sum = 0.0;
     long np = 0, cap = 64, i, j, n;
     Value it, v;
     need(x, 1, 1, "fsum");
@@ -24702,10 +26007,20 @@ BI(m_fsum)
     VPUSH(it);
     while (iter_next(it, &v)) {
         xv = to_dbl(v);
+        if (xv - xv != 0.0) {                    /* infinity or NaN */
+            special += xv;
+            if (xv == xv) inf_sum += xv;
+            continue;
+        }
         for (i = j = 0; j < np; j++) {
             y = p[j];
             if (fabs(xv) < fabs(y)) { double t = xv; xv = y; y = t; }
             hi = xv + y;
+            if (hi - hi != 0.0) {
+                free(p);
+                throw_new(cls_OverflowError,
+                    "intermediate overflow in fsum");
+            }
             yr = hi - xv;
             lo = y - yr;
             if (lo != 0.0) p[i++] = lo;
@@ -24718,6 +26033,12 @@ BI(m_fsum)
         p[np++] = xv;
     }
     vsp--;
+    if (special != 0.0 || special != special) {
+        free(p);
+        if (inf_sum != inf_sum)
+            throw_new(cls_ValueError, "-inf + inf in fsum");
+        return mkfloat(special);
+    }
     n = np;
     hi = 0.0;
     if (n > 0) {
@@ -25014,31 +26335,174 @@ BI(r_seed)
     return NONE_V;
 }
 BI(r_random) { (void)x; return mkfloat(rng_double()); }
+/* k random bits as an integer (any k) */
+static Value rng_bits_v(long k)
+{
+    Value r = mkint(0);
+    while (k > 0) {
+        long take = k > 24 ? 24 : k;
+        unsigned long w = (rng_next() >> 8) & 0xffffffUL;
+        w >>= 24 - take;
+        r = int_add(int_mul(r, mkint(1L << take)), mkint((long)w));
+        k -= take;
+    }
+    return r;
+}
+/* a random integer in [0, n) for n > 0 of any size */
+static Value rng_below_v(Value n)
+{
+    if (n.t == T_INT && n.u.i < 1073741824L)
+        return mkint(rng_below(n.u.i));
+    {
+        long bits = int_bitlen(int_sub(n, mkint(1)));
+        Value r;
+        do r = rng_bits_v(bits); while (int_cmp(r, n) >= 0);
+        return r;
+    }
+}
 BI(r_randint)
 {
-    long a, b;
+    Value a, b;
     need(x, 2, 2, "randint");
-    a = to_index(A(0)); b = to_index(A(1));
-    if (b < a)
-        throw_new(cls_ValueError,
-            "empty range for randrange() (%ld, %ld, %ld)", a, b + 1,
-        b + 1 - a);
-    return mkint(a + rng_below(b - a + 1));
+    a = need_intv(A(0), "randint"); b = need_intv(A(1), "randint");
+    if (int_cmp(b, a) < 0) {
+        Buf bf;
+        buf_init(&bf);
+        int_str(a, &bf);
+        buf_add(&bf, ", ");
+        int_str(int_add(b, mkint(1)), &bf);
+        throw_new(cls_ValueError, "empty range in randrange(%.200s)",
+            bf.s);
+    }
+    return int_add(a, rng_below_v(int_add(int_sub(b, a), mkint(1))));
 }
 BI(r_randrange)
 {
-    long a = 0, b, s = 1, n;
+    Value a = mkint(0), b, s = mkint(1), n, w;
     need(x, 1, 3, "randrange");
-    if (x->n == 1) b = to_index(A(0));
-    else { a = to_index(A(0));
-        b = to_index(A(1));
-        if (x->n == 3) s = to_index(A(2));
+    if (x->n == 1) {
+        b = need_intv(A(0), "randrange");
+        if (int_sign(b) <= 0)
+            throw_new(cls_ValueError, "empty range for randrange()");
+        return rng_below_v(b);
     }
-    if (s == 0) throw_new(cls_ValueError, "zero step for randrange()");
-    n = s > 0 ? (b - a + s - 1) / s : (a - b - s - 1) / (-s);
-    if (n <= 0)
-        throw_new(cls_ValueError, "empty range for randrange()");
-    return mkint(a + s * rng_below(n));
+    a = need_intv(A(0), "randrange"); b = need_intv(A(1), "randrange");
+    if (x->n == 3) s = need_intv(A(2), "randrange");
+    if (int_sign(s) == 0)
+        throw_new(cls_ValueError, "zero step for randrange()");
+    w = int_sub(b, a);
+    if (int_sign(s) > 0)
+        n = int_floordiv(int_add(w, int_sub(s, mkint(1))), s);
+    else n = int_floordiv(int_add(w, int_add(s, mkint(1))), s);
+    if (int_sign(n) <= 0) {
+        Buf bf;
+        buf_init(&bf);
+        int_str(a, &bf); buf_add(&bf, ", "); int_str(b, &bf);
+        if (!(s.t == T_INT && s.u.i == 1)) { buf_add(&bf, ", ");
+            int_str(s, &bf);
+        }
+        throw_new(cls_ValueError, "empty range in randrange(%.300s)",
+            bf.s);
+    }
+    return int_add(a, int_mul(s, rng_below_v(n)));
+}
+BI(r_getrandbits)
+{
+    long k;
+    need(x, 1, 1, "getrandbits");
+    k = need_long(A(0), "k");
+    if (k < 0)
+        throw_new(cls_ValueError,
+        "number of bits must be non-negative");
+    return rng_bits_v(k);
+}
+BI(r_randbytes)
+{
+    long n, i;
+    char *buf;
+    Value r;
+    need(x, 1, 1, "randbytes");
+    n = need_long(A(0), "n");
+    if (n < 0)
+        throw_new(cls_ValueError, "negative argument not allowed");
+    if (n > 400000000L) throw_new(cls_MemoryError, "");
+    buf = (char *)xmalloc((size_t)n + 1);
+    for (i = 0; i < n; i++) buf[i] = (char)
+        ((rng_next() >> 12) & 255UL);
+    r = mkbytes(buf, n);
+    free(buf);
+    return r;
+}
+/* normal deviate with the polar method (two uniforms) */
+static double rng_gauss(void)
+{
+    double u, v, q;
+    do {
+        u = 2.0 * rng_double() - 1.0;
+        v = 2.0 * rng_double() - 1.0;
+        q = u * u + v * v;
+    } while (q >= 1.0 || q == 0.0);
+    return u * sqrt(-2.0 * log(q) / q);
+}
+BI(r_gauss)
+{
+    double mu = 0.0, sigma = 1.0;
+    need(x, 0, 2, "gauss");
+    if (x->n > 0) mu = dbl_arg(x, 0);
+    if (x->n > 1) sigma = dbl_arg(x, 1);
+    return mkfloat(mu + sigma * rng_gauss());
+}
+BI(r_expovariate)
+{
+    double lambd;
+    need(x, 1, 1, "expovariate");
+    lambd = dbl_arg(x, 0);
+    if (lambd == 0.0)
+        throw_new(cls_ZeroDivisionError, "float division by zero");
+    return mkfloat(-log(1.0 - rng_double()) / lambd);
+}
+BI(r_choices)
+{
+    Value l, kv = kwget(x, "k"), wv = kwget(x, "weights"), res;
+    long n, k = 1, i;
+    List *out;
+    need(x, 1, 3, "choices");
+    if (x->n > 1) wv = A(1);
+    if (x->n > 2) kv = A(2);
+    if (kv.t != T_UNSET) k = need_long(kv, "k");
+    l = iter_to_list(A(0));
+    VPUSH(l);
+    n = AS_LIST(l)->n;
+    if (n == 0 && k > 0)
+        throw_new(cls_IndexError,
+        "Cannot choose from an empty sequence");
+    out = list_new(k > 0 ? k : 0);
+    res = mklist(out);
+    VPUSH(res);
+    if (wv.t != T_UNSET && wv.t != T_NONE) {
+        Value wl = iter_to_list(wv);
+        double total = 0.0;
+        VPUSH(wl);
+        if (AS_LIST(wl)->n != n)
+            throw_new(cls_ValueError,
+                "The number of weights does not match the "
+                "population");
+        for (i = 0; i < n; i++) total += to_dbl(AS_LIST(wl)->a[i]);
+        for (i = 0; i < k; i++) {
+            double t = rng_double() * total, c = 0.0;
+            long j;
+            for (j = 0; j < n - 1; j++)
+                { c += to_dbl(AS_LIST(wl)->a[j]);
+                if (t < c) break;
+            }
+            list_push(out, AS_LIST(l)->a[j]);
+        }
+    } else {
+        for (i = 0; i < k; i++)
+            list_push(out, AS_LIST(l)->a[rng_below(n)]);
+    }
+    vsp = vsp - 2 - (wv.t != T_UNSET && wv.t != T_NONE ? 1 : 0);
+    return res;
 }
 BI(r_uniform)
 {
@@ -25120,6 +26584,24 @@ BI(t_clock)
     (void)x;
     return mkfloat(host_clock());
 }
+/* nanoseconds as an exact integer: whole seconds * 10**9 + the
+   fraction */
+static Value ns_value(double t)
+{
+    double secs = floor(t);
+    return int_add(int_mul(int_from_double(secs), mkint(1000000000L)),
+                   mkint((long)((t - secs) * 1e9)));
+}
+BI(t_time_ns)
+{
+    (void)x;
+    return ns_value(host_time());
+}
+BI(t_clock_ns)
+{
+    (void)x;
+    return ns_value(host_clock());
+}
 BI(t_sleep)
 {
     double d = dbl_arg(x, 0);
@@ -25184,7 +26666,7 @@ static struct { const char *name;
         "UnicodeDecodeError", &cls_UnicodeDecodeError,
         &cls_dummy_exc[1] },
     { "UnicodeEncodeError", &cls_dummy_exc[3], &cls_dummy_exc[1] },
-    { "MemoryError", &cls_dummy_exc[4], &cls_Exception },
+    { "MemoryError", &cls_MemoryError, &cls_Exception },
     { "ReferenceError", &cls_dummy_exc[5], &cls_Exception },
     { "BufferError", &cls_dummy_exc[6], &cls_Exception },
     { "SystemError", &cls_dummy_exc[7], &cls_Exception },
@@ -25416,7 +26898,9 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_str, "capitalize", s_capitalize);
     def_bi(cls_str, "title", s_title);
     def_bi(cls_str, "swapcase", s_swapcase);
-    def_bi(cls_str, "strip", s_strip);
+    def_bi(cls_str, "translate", s_translate);
+    def_bi(cls_str, "maketrans", s_maketrans);
+    def_bi(NULL, "ascii", bi_ascii); def_bi(cls_str, "strip", s_strip);
     def_bi(cls_str, "lstrip", s_lstrip);
     def_bi(cls_str, "rstrip", s_rstrip);
     def_bi(cls_str, "split", s_split);
@@ -25594,7 +27078,16 @@ static void init_runtime(int argc, char **argv)
     complex_methods();
     /* numbers */
     def_bi(cls_int, "bit_length", i_bit_length);
+    def_bi(cls_int, "__index__", i_index);
     def_bi(cls_float, "is_integer", f_is_integer);
+    def_bi(cls_float, "as_integer_ratio", f_as_integer_ratio);
+    def_bi(cls_float, "hex", f_hex);
+    def_bi(cls_float, "fromhex", f_fromhex);
+    def_bi(cls_int, "bit_count", i_bit_count);
+    def_bi(cls_int, "as_integer_ratio", i_as_integer_ratio);
+    def_bi(cls_int, "is_integer", i_is_integer);
+    def_bi(cls_range, "count", rg_count);
+    def_bi(cls_range, "index", rg_index);
     /* generators / iterators */
     def_bi(cls_gen, "__next__", g_next);
     def_bi(cls_gen, "__iter__", g_iter);
@@ -25695,7 +27188,8 @@ static void init_runtime(int argc, char **argv)
     mod_def(m, "isinf", m_isinf);
     mod_def(m, "isfinite", m_isfinite); mod_def(m, "fmod", m_fmod);
     mod_def(m, "copysign", m_copysign);
-    mod_def(m, "degrees", m_degrees);
+    mod_def(m, "nextafter", m_nextafter);
+    mod_def(m, "ulp", m_ulp); mod_def(m, "degrees", m_degrees);
     mod_def(m, "radians", m_radians);
     mod_def(m, "comb", m_comb);
     mod_def(m, "prod", m_prod);
@@ -25733,6 +27227,11 @@ static void init_runtime(int argc, char **argv)
     mod_def(m, "choice", r_choice);
     mod_def(m, "shuffle", r_shuffle);
     mod_def(m, "sample", r_sample);
+    mod_def(m, "getrandbits", r_getrandbits);
+    mod_def(m, "randbytes", r_randbytes);
+    mod_def(m, "gauss", r_gauss); mod_def(m, "normalvariate", r_gauss);
+    mod_def(m, "expovariate", r_expovariate);
+    mod_def(m, "choices", r_choices);
     {
         Args seedargs;
         seedargs.n = 0;
@@ -25751,6 +27250,10 @@ static void init_runtime(int argc, char **argv)
     mod_def(m, "monotonic", t_clock);
     mod_def(m, "process_time", t_clock);
     mod_def(m, "sleep", t_sleep);
+    mod_def(m, "time_ns", t_time_ns);
+    mod_def(m, "perf_counter_ns", t_clock_ns);
+    mod_def(m, "monotonic_ns", t_clock_ns);
+    mod_def(m, "process_time_ns", t_clock_ns);
     m = new_module("sys");
     sys_mod = m;
     av = list_new(argc + 1);
@@ -26371,14 +27874,14 @@ static long rp_cp_of(RParse *P, long st, int len)
 static long re_wadd(long a, long b)
 {
     if (a < 0 || b < 0) return -1;
-    if (a + b > 1000000000000L) return -1;
+    if (a + b > 1000000000L) return -1;
     return a + b;
 }
 static long re_wmul(long a, long k)
 {
     if (k == 0 || a == 0) return 0;
     if (a < 0) return -1;
-    if (a > 1000000000000L / k) return -1;
+    if (a > 1000000000L / k) return -1;
     return a * k;
 }
 static void rn_width(RParse *P, int ni, long *lo, long *hi)
@@ -26486,8 +27989,11 @@ static int rb_finish(RParse *P, RSetB *b, int neg, int icase)
     RSet *st = &P->sets[si];
     int c;
     if (icase) {
-        for (c = 'a'; c <= 'z'; c++) {
-            int u = to_up[c];
+        const char *lp;
+        for (lp = "abcdefghijklmnopqrstuvwxyz"; *lp; lp++) {
+            int u;
+            c = (unsigned char)*lp;
+            u = to_up[c];
             if (u == c) continue;
             if (BM_HAS(b->bm, c) || BM_HAS(b->bm, u))
                 { BM_SET(b->bm, c);
@@ -26516,7 +28022,7 @@ static long rp_hexval(RParse *P, long ndig, long *tot)
     while (got < ndig && P->t.nlen == 1 && ch_hex[P->t.s[P->t.nstart]])
         {
         int c = P->t.s[P->t.nstart];
-        int d = c <= '9' ? c - '0' : (to_low[c] - 'a' + 10);
+        int d = digit_val(c);
         v = v * 16 + d;
         got++;
         rt_advance(&P->t, P->patv);
@@ -28729,10 +30235,8 @@ static void re_bounds(Str *s, Value posv, Value endv, long *pos,
     long *endpos)
 {
     long p = 0, e = s->len;
-    if (posv.t != T_UNSET && posv.t != T_NONE)
-        p = need_long(posv, "pos");
-    if (endv.t != T_UNSET && endv.t != T_NONE)
-        e = need_long(endv, "endpos");
+    if (posv.t != T_UNSET && posv.t != T_NONE) p = to_ssize(posv);
+    if (endv.t != T_UNSET && endv.t != T_NONE) e = to_ssize(endv);
     if (p < 0) p = 0; else if (p > s->len) p = s->len;
     if (e < 0) e = 0; else if (e > s->len) e = s->len;
     *pos = p; *endpos = e;
@@ -28946,7 +30450,7 @@ static Value re_subn(Value patv, Value replv, Value strv, Value countv,
     Buf out;
     Value r;
     if (countv.t != T_UNSET && countv.t != T_NONE)
-        count = need_long(countv, "count");
+        count = to_ssize(countv);
     if (strv.t == T_INST) strv = AS_INST(strv)->pay;
     memset(&T, 0, sizeof(T));
     if (!callable) {
@@ -29026,7 +30530,7 @@ static Value re_split(Value patv, Value strv, Value maxv)
     Value rv = mklist(res);
     RIt it;
     if (maxv.t != T_UNSET && maxv.t != T_NONE)
-        maxsplit = need_long(maxv, "maxsplit");
+        maxsplit = to_ssize(maxv);
     it.pos = 0; it.endpos = s->len; it.na = -1; it.done = 0;
     VPUSH(rv);
     while (maxsplit <= 0 || cnt < maxsplit) {
@@ -29249,7 +30753,7 @@ BI(re_error_init)
     VPUSH(msg);
     if (pat.t != T_UNSET && pat.t != T_NONE && pos.t != T_UNSET
         && pos.t != T_NONE) {
-        long p = need_long(pos, "pos");
+        long p = to_ssize(pos);
         re_error_fill(in, msg, pat, p, 1);
     } else {
         re_error_fill(in, msg, pat.t == T_UNSET ? NONE_V : pat, 0, 0);
@@ -29499,8 +31003,8 @@ static void j_str(Buf *b, const char *s, long n, int ascii)
         else if (c == '\n') buf_add(b, "\\n");
         else if (c == '\r') buf_add(b, "\\r");
         else if (c == '\t') buf_add(b, "\\t");
-        else if (c == 8) buf_add(b, "\\b");
-        else if (c == 12) buf_add(b, "\\f");
+        else if (c == (unsigned)'\b') buf_add(b, "\\b");
+        else if (c == (unsigned)'\f') buf_add(b, "\\f");
         else if (c < 128) {
             j_u4(b, (long)c);
         } else {
@@ -29978,10 +31482,8 @@ static int jd_hex4(const unsigned char *s, long *out)
     int k;
     for (k = 0; k < 4; k++) {
         int c = s[k], d;
-        if (c >= '0' && c <= '9') d = c - '0';
-        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-        else return 0;
+        if (!ch_hex[c]) return 0;
+        d = digit_val(c);
         v = v * 16 + d;
     }
     *out = v;
@@ -30189,7 +31691,7 @@ static Value jd_object(JDec *D, long i, long *end)
 }
 static int jd_isdig(int c)
 {
-    return c >= '0' && c <= '9';
+    return c >= 0 && c < 256 && ch_digit[c];
 }
 static Value jd_number(JDec *D, long i, long *end, int *ok)
 {
@@ -30200,7 +31702,7 @@ static Value jd_number(JDec *D, long i, long *end, int *ok)
     *ok = 0;
     if (j < n && s[j] == '-') j++;
     if (j >= n) return NONE_V;
-    if (s[j] >= '1' && s[j] <= '9')
+    if (jd_isdig(s[j]) && s[j] != '0')
         { while (j < n && jd_isdig(s[j])) j++;
     }
     else if (s[j] == '0') j++;
@@ -31201,14 +32703,17 @@ BI(m_htons)
 }
 BI(m_htonl)
 {
-    long v;
+    Value v;
+    unsigned long u;
     need(x, 1, 1, "htonl");
-    v = need_long(A(0), "x");
-    if (v < 0 || v > 4294967295L)
+    v = need_intv(A(0), "x");
+    if (int_sign(v) < 0 || int_cmp(v, int_pow2(32)) >= 0)
         throw_new(cls_OverflowError, "int larger than 32 bits");
-    return mkint
-        ((long)(little_endian() ? swap32((unsigned long)v)
-        : (unsigned long)v));
+    u = ((unsigned long)int_floordiv(v, mkint(65536L)).u.i << 16) |
+        (unsigned long)int_mod(v, mkint(65536L)).u.i;
+    u = little_endian() ? swap32(u) : u;
+    return int_add(int_mul(mkint((long)(u >> 16)), mkint(65536L)),
+        mkint((long)(u & 0xffffUL)));
 }
 BI(m_inet_aton)
 {

@@ -61,29 +61,70 @@ static Nd *vec_new(long n)
     return nd_new1(ND_FLOAT, n);
 }
 
-/* LU with partial pivoting, in place; returns sign (+1/-1) or 0 when singular */
+/* a * b + c with a single rounding (OpenBLAS kernels use fused multiply-add on current x86 and
+   ARM CPUs, and whether a pivot comes out exactly zero depends on it) */
+static double la_fma(double a, double b, double c)
+{
+#if FLT_RADIX != 2
+    return a * b + c;
+#else
+    /* exact product p + e (Dekker; volatile keeps x87 from double rounding), then one rounding
+       of p + e + c; the C99 fma() is not used so that nothing beyond C89 is referenced */
+    volatile double t, ah, al, bh, bl, p, e, s, bb, er;
+    t = 134217729.0 * a; ah = t - (t - a); al = a - ah;
+    t = 134217729.0 * b; bh = t - (t - b); bl = b - bh;
+    p = a * b;
+    e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+    s = p + c; bb = s - p; er = (p - (s - bb)) + (c - bb);
+    return s + (er + e);
+#endif
+}
+/* LU with partial pivoting, in place; returns sign (+1/-1) or 0 when singular.
+   Left-looking (column by column), reciprocal pivot scaling and fused dot products in the
+   order of OpenBLAS getf2 (a dot for the U part, a gemv with groups of four columns for the L
+   part), so that a matrix such as [[1,2,3],[4,5,6],[7,8,9]] gets the exactly zero pivot that
+   numpy reports (LinAlgError: Singular matrix) and nearly the same rounding as numpy. */
 static int lu_dec(double *a, long n, long *piv)
 {
     long i, j, k, p;
     int sign = 1, sing = 0;
-    for (k = 0; k < n; k++) {
-        double mx = fabs(a[k * n + k]);
-        p = k;
-        for (i = k + 1; i < n; i++)
-            if (fabs(a[i * n + k]) > mx) { mx = fabs(a[i * n + k]); p = i; }
-        piv[k] = p;
+    for (j = 0; j < n; j++) {
+        double mx, r;
+        long nvec = (n - j) - (n - j) % 4;
+        for (i = 0; i < j; i++) {                      /* U part: dot products */
+            double s = 0.0;
+            for (k = 0; k < i; k++) s = la_fma(a[i * n + k], a[k * n + j], s);
+            a[i * n + j] -= s;
+        }
+        for (i = j; i < n; i++) {                      /* L part: gemv */
+            double s = 0.0;
+            if (i - j >= nvec) {
+                for (k = 0; k < j; k++) s = la_fma(a[i * n + k], a[k * n + j], s);
+                a[i * n + j] -= s;
+            } else {
+                for (k = 0; k + 4 <= j; k += 4) {
+                    double t = 0.0;
+                    long q;
+                    for (q = 0; q < 4; q++) t = la_fma(a[i * n + k + q], -a[(k + q) * n + j], t);
+                    s += t;
+                }
+                for (; k < j; k++) s += a[i * n + k] * -a[k * n + j];
+                a[i * n + j] += s;
+            }
+        }
+        p = j; mx = fabs(a[j * n + j]);
+        for (i = j + 1; i < n; i++)
+            if (fabs(a[i * n + j]) > mx) { mx = fabs(a[i * n + j]); p = i; }
+        piv[j] = p;
         if (mx == 0.0) { sing = 1; continue; }
-        if (p != k) {
-            for (j = 0; j < n; j++) {
-                double t = a[k * n + j]; a[k * n + j] = a[p * n + j]; a[p * n + j] = t;
+        if (p != j) {
+            for (k = 0; k < n; k++) {
+                double t = a[j * n + k]; a[j * n + k] = a[p * n + k]; a[p * n + k] = t;
             }
             sign = -sign;
         }
-        for (i = k + 1; i < n; i++) {
-            double f = a[i * n + k] / a[k * n + k];
-            a[i * n + k] = f;
-            if (f != 0.0) for (j = k + 1; j < n; j++) a[i * n + j] -= f * a[k * n + j];
-        }
+        r = 1.0 / a[j * n + j];
+        for (i = j + 1; i < n; i++) a[i * n + j] *= r;
     }
     return sing ? 0 : sign;
 }
@@ -104,11 +145,11 @@ static void lu_solve(const double *lu, long n, const long *piv, double *b, long 
             if (f != 0.0) for (j = 0; j < nrhs; j++) b[i * nrhs + j] -= f * b[k * nrhs + j];
         }
     for (i = n - 1; i >= 0; i--) {
-        for (k = i + 1; k < n; k++) {
+        for (k = n - 1; k > i; k--) {
             double f = lu[i * n + k];
             if (f != 0.0) for (j = 0; j < nrhs; j++) b[i * nrhs + j] -= f * b[k * nrhs + j];
         }
-        for (j = 0; j < nrhs; j++) b[i * nrhs + j] /= lu[i * n + i];
+        for (j = 0; j < nrhs; j++) b[i * nrhs + j] *= 1.0 / lu[i * n + i];
     }
 }
 BI(la_det)

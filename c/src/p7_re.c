@@ -481,14 +481,14 @@ static long rp_cp_of(RParse *P, long st, int len)
 static long re_wadd(long a, long b)
 {
     if (a < 0 || b < 0) return -1;
-    if (a + b > 1000000000000L) return -1;
+    if (a + b > 1000000000L) return -1;
     return a + b;
 }
 static long re_wmul(long a, long k)
 {
     if (k == 0 || a == 0) return 0;
     if (a < 0) return -1;
-    if (a > 1000000000000L / k) return -1;
+    if (a > 1000000000L / k) return -1;
     return a * k;
 }
 static void rn_width(RParse *P, int ni, long *lo, long *hi)
@@ -593,8 +593,11 @@ static int rb_finish(RParse *P, RSetB *b, int neg, int icase)
     RSet *st = &P->sets[si];
     int c;
     if (icase) {
-        for (c = 'a'; c <= 'z'; c++) {
-            int u = to_up[c];
+        const char *lp;
+        for (lp = "abcdefghijklmnopqrstuvwxyz"; *lp; lp++) {
+            int u;
+            c = (unsigned char)*lp;
+            u = to_up[c];
             if (u == c) continue;
             if (BM_HAS(b->bm, c) || BM_HAS(b->bm, u)) { BM_SET(b->bm, c); BM_SET(b->bm, u); }
         }
@@ -617,7 +620,7 @@ static long rp_hexval(RParse *P, long ndig, long *tot)
     long v = 0, got = 0;
     while (got < ndig && P->t.nlen == 1 && ch_hex[P->t.s[P->t.nstart]]) {
         int c = P->t.s[P->t.nstart];
-        int d = c <= '9' ? c - '0' : (to_low[c] - 'a' + 10);
+        int d = digit_val(c);
         v = v * 16 + d;
         got++;
         rt_advance(&P->t, P->patv);
@@ -2595,8 +2598,8 @@ BI(mt_expand)
 static void re_bounds(Str *s, Value posv, Value endv, long *pos, long *endpos)
 {
     long p = 0, e = s->len;
-    if (posv.t != T_UNSET && posv.t != T_NONE) p = need_long(posv, "pos");
-    if (endv.t != T_UNSET && endv.t != T_NONE) e = need_long(endv, "endpos");
+    if (posv.t != T_UNSET && posv.t != T_NONE) p = to_ssize(posv);
+    if (endv.t != T_UNSET && endv.t != T_NONE) e = to_ssize(endv);
     if (p < 0) p = 0; else if (p > s->len) p = s->len;
     if (e < 0) e = 0; else if (e > s->len) e = s->len;
     *pos = p; *endpos = e;
@@ -2791,7 +2794,7 @@ static Value re_subn(Value patv, Value replv, Value strv, Value countv, int want
     RIt it;
     Buf out;
     Value r;
-    if (countv.t != T_UNSET && countv.t != T_NONE) count = need_long(countv, "count");
+    if (countv.t != T_UNSET && countv.t != T_NONE) count = to_ssize(countv);
     if (strv.t == T_INST) strv = AS_INST(strv)->pay;
     memset(&T, 0, sizeof(T));
     if (!callable) {
@@ -2861,7 +2864,7 @@ static Value re_split(Value patv, Value strv, Value maxv)
     List *res = list_new(8);
     Value rv = mklist(res);
     RIt it;
-    if (maxv.t != T_UNSET && maxv.t != T_NONE) maxsplit = need_long(maxv, "maxsplit");
+    if (maxv.t != T_UNSET && maxv.t != T_NONE) maxsplit = to_ssize(maxv);
     it.pos = 0; it.endpos = s->len; it.na = -1; it.done = 0;
     VPUSH(rv);
     while (maxsplit <= 0 || cnt < maxsplit) {
@@ -3064,7 +3067,7 @@ BI(re_error_init)
     }
     VPUSH(msg);
     if (pat.t != T_UNSET && pat.t != T_NONE && pos.t != T_UNSET && pos.t != T_NONE) {
-        long p = need_long(pos, "pos");
+        long p = to_ssize(pos);
         re_error_fill(in, msg, pat, p, 1);
     } else {
         re_error_fill(in, msg, pat.t == T_UNSET ? NONE_V : pat, 0, 0);

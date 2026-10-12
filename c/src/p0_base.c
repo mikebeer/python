@@ -141,7 +141,8 @@ typedef struct Module {
     Str *gp;             /* global name prefix ("pkg.mod.") for modules written in Python */
     struct Dict *gmap;   /* attribute name -> global slot cache */
 } Module;
-typedef struct Range { Hdr h; long start, stop, step; } Range;
+/* start, stop, step as integers; big = 0 when all three are small ints (then .u.i is used) */
+typedef struct Range { Hdr h; Value a, b, c; int big; } Range;
 #define ND_MAXD 8
 enum { ND_BOOL = 0, ND_INT = 1, ND_FLOAT = 2, ND_COMPLEX = 3 };
 /* complex arrays keep 2 * size doubles (re, im interleaved) in dv */
@@ -181,7 +182,7 @@ typedef struct Gen {
 
 enum { IK_LIST, IK_TUPLE, IK_STR, IK_RANGE, IK_DICT, IK_DVALS, IK_DITEMS, IK_SET,
        IK_ENUM, IK_ZIP, IK_MAP, IK_FILTER, IK_REV, IK_FILE, IK_CALL, IK_LISTREV, IK_ND, IK_BYTES,
-       IK_CALLSENT };
+       IK_CALLSENT, IK_BRANGE };
 typedef struct Iter {
     Hdr h;
     int kind;
@@ -307,6 +308,7 @@ static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, 
     *cls_method, *cls_gen, *cls_module, *cls_iter, *cls_prop, *cls_file, *cls_cell,
     *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice, *cls_dview[3], *cls_notimpl,
         *cls_bytes, *cls_bytearray, *cls_complex, *cls_frozenset;
+static Class *cls_MemoryError;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError, *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError, *cls_KeyError, *cls_ValueError,
     *cls_TypeError, *cls_NameError, *cls_UnboundLocalError, *cls_AttributeError,
@@ -327,7 +329,7 @@ static Str *S_init, *S_str, *S_repr, *S_eq, *S_ne, *S_lt, *S_le, *S_gt, *S_ge, *
     *S_new, *S_module, *S_reversed;
 
 static unsigned char ch_digit[256], ch_alpha[256], ch_alnum[256], ch_space[256],
-    ch_upper[256], ch_lower[256], ch_hex[256];
+    ch_upper[256], ch_lower[256], ch_hex[256], ch_print[256];
 static unsigned char to_up[256], to_low[256];
 
 #define V_ISINT(v) ((v).t == T_INT)
@@ -382,9 +384,14 @@ static Value cplx_unop(int op, Value a);
 static double n_hypot(double a, double b);
 
 /* ---- value constructors ----------------------------------------------- */
+static Value big_from_long(long n);
+/* a long beyond +-SI_MAX (possible with a 64-bit long under -DPY_SI32 and for every
+   host value that is not an index or a count) becomes a big integer, so that a
+   T_INT always satisfies |n| <= SI_MAX and equal integers have equal representations */
 static Value mkint(long n)
 {
     Value v;
+    if (n > SI_MAX || n < -SI_MAX) return big_from_long(n);
     v.t = T_INT; v.u.i = n;
     return v;
 }
@@ -515,6 +522,7 @@ static unsigned long str_hash(Str *s)
     unsigned long h;
     long i;
     if (s->hash) return s->hash;
+    if (s->len == 0) return 0;          /* hash('') == 0 as in CPython (not cached) */
     h = 5381UL;
     for (i = 0; i < s->len; i++) h = ((h << 5) + h) ^ (unsigned char)s->s[i];
     h &= 0x7fffffffUL;
@@ -893,6 +901,9 @@ static void gc_scan(Hdr *h)
         gc_push(b->self); gc_push(b->fn);
         break; }
     case T_CELL: gc_push(((Cell *)h)->v); break;
+    case T_RANGE:
+        gc_push(((Range *)h)->a); gc_push(((Range *)h)->b); gc_push(((Range *)h)->c);
+        break;
     case T_MODULE:
         gc_pushp(((Module *)h)->name, T_STR); gc_mark_amap(&((Module *)h)->ns);
         gc_pushp(((Module *)h)->gp, T_STR); gc_pushp(((Module *)h)->gmap, T_DICT);

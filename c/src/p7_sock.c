@@ -494,12 +494,16 @@ BI(m_htons)
 }
 BI(m_htonl)
 {
-    long v;
+    Value v;
+    unsigned long u;
     need(x, 1, 1, "htonl");
-    v = need_long(A(0), "x");
-    if (v < 0 || v > 4294967295L)
+    v = need_intv(A(0), "x");
+    if (int_sign(v) < 0 || int_cmp(v, int_pow2(32)) >= 0)
         throw_new(cls_OverflowError, "int larger than 32 bits");
-    return mkint((long)(little_endian() ? swap32((unsigned long)v) : (unsigned long)v));
+    u = ((unsigned long)int_floordiv(v, mkint(65536L)).u.i << 16) |
+        (unsigned long)int_mod(v, mkint(65536L)).u.i;
+    u = little_endian() ? swap32(u) : u;
+    return int_add(int_mul(mkint((long)(u >> 16)), mkint(65536L)), mkint((long)(u & 0xffffUL)));
 }
 BI(m_inet_aton)
 {

@@ -170,16 +170,55 @@ static void throw_key(Value key)
     throw_val(new_exc_args(cls_KeyError, v, 1));
 }
 
-static Value make_range(long a, long b, long c)
+/* a range of small ints keeps them in a/b/c as T_INT; one with a large bound is "big" and all
+   its arithmetic goes through the integer functions */
+static Value make_range_v(Value a, Value b, Value c)
 {
     Range *r = (Range *)gc_alloc(sizeof(Range), T_RANGE);
-    r->start = a; r->stop = b; r->step = c;
+    if (a.t == T_BOOL) a = mkint(a.u.i);
+    if (b.t == T_BOOL) b = mkint(b.u.i);
+    if (c.t == T_BOOL) c = mkint(c.u.i);
+    r->a = a; r->b = b; r->c = c;
+    r->big = !(a.t == T_INT && b.t == T_INT && c.t == T_INT);
     return mkobj(r, T_RANGE);
+}
+static Value make_range(long a, long b, long c)
+{
+    return make_range_v(mkint(a), mkint(b), mkint(c));
+}
+static long range_len_small(Range *r)
+{
+    long start = r->a.u.i, stop = r->b.u.i, step = r->c.u.i;
+    if (step > 0) return start < stop ? (stop - start - 1) / step + 1 : 0;
+    return start > stop ? (start - stop - 1) / (-step) + 1 : 0;
+}
+/* the length as an integer (any size) */
+static Value range_lenv(Range *r)
+{
+    if (!r->big) return mkint(range_len_small(r));
+    if (int_sign(r->c) > 0) {
+        if (int_cmp(r->a, r->b) >= 0) return mkint(0);
+        return int_add(int_floordiv(int_sub(int_sub(r->b, r->a), mkint(1)), r->c), mkint(1));
+    }
+    if (int_cmp(r->a, r->b) <= 0) return mkint(0);
+    return int_add(int_floordiv(int_sub(int_sub(r->a, r->b), mkint(1)), int_neg(r->c)), mkint(1));
 }
 static long range_len(Range *r)
 {
-    if (r->step > 0) return r->start < r->stop ? (r->stop - r->start - 1) / r->step + 1 : 0;
-    return r->start > r->stop ? (r->start - r->stop - 1) / (-r->step) + 1 : 0;
+    Value v;
+    if (!r->big) return range_len_small(r);
+    {
+        long n;
+        v = range_lenv(r);
+        if (!int_fits_long(v, &n))
+            throw_new(cls_OverflowError, "Python int too large to convert to C ssize_t");
+        return n;
+    }
+}
+/* start + i * step */
+static Value range_item(Range *r, Value i)
+{
+    return int_add(r->a, int_mul(i, r->c));
 }
 
 static Value mk_prop(int type, Value g, Value s)
@@ -202,7 +241,7 @@ static int py_truthy(Value v)
     case T_COMPLEX: return AS_CPLX(v)->re != 0 || AS_CPLX(v)->im != 0;
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n != 0;
     case T_DICT: case T_SET: return AS_DICT(v)->n != 0;
-    case T_RANGE: return range_len((Range *)v.u.o) != 0;
+    case T_RANGE: return int_sign(range_lenv((Range *)v.u.o)) != 0;
     case T_ND: return nd_truthy(v);
     case T_DVIEW: return AS_DICT(((DView *)v.u.o)->d)->n != 0;
     case T_INST: {
@@ -255,16 +294,27 @@ static double to_dbl(Value v)
     if (v.t == T_FLOAT) return v.u.d;
     return int_todouble(v);
 }
-static long need_long(Value v, const char *what)
+/* an integer value (any size) from an int, bool, int subclass or object with __index__ */
+static Value need_intv(Value v, const char *what)
 {
-    if (v.t == T_INST && AS_INST(v)->pay.t == T_INT) return AS_INST(v)->pay.u.i;
-    if (v.t == T_INT || v.t == T_BOOL) return v.u.i;
+    if (v.t == T_INST && (AS_INST(v)->pay.t == T_INT || AS_INST(v)->pay.t == T_BIG))
+        return AS_INST(v)->pay;
+    if (v.t == T_INT || v.t == T_BIG) return v;
+    if (v.t == T_BOOL) return mkint(v.u.i);
     if (v.t == T_INST) {
         Value *m = class_find(AS_INST(v)->cls, S_index);
-        if (m) { Value r = call1(*m, v); if (r.t == T_INT) return r.u.i; }
+        if (m) { Value r = call1(*m, v); if (r.t == T_INT || r.t == T_BIG) return r; }
     }
     throw_new(cls_TypeError, "%.60s must be an integer, not '%.40s'", what, type_name(v));
-    return 0;
+    return v;
+}
+static long need_long(Value v, const char *what)
+{
+    Value r = need_intv(v, what);
+    long n;
+    if (!int_fits_long(r, &n))
+        throw_new(cls_OverflowError, "Python int too large to convert to C ssize_t");
+    return n;
 }
 
 /* ---- dict views ------------------------------------------------------- */
@@ -301,9 +351,33 @@ static int cplx_parts(Value v, double *re, double *im)
     if (is_num(v)) { *re = to_dbl(v); *im = 0.0; return 1; }
     return 0;
 }
+/* exact order of two real numbers (ints compare to floats without rounding the int);
+   *unord is set for NaN */
+static int num_cmp(Value a, Value b, int *unord)
+{
+    *unord = 0;
+    if (a.t == T_FLOAT && b.t == T_FLOAT) {
+        double x = a.u.d, y = b.u.d;
+        if (x != x || y != y) { *unord = 1; return 0; }
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    if (a.t == T_FLOAT) {
+        if (a.u.d != a.u.d) { *unord = 1; return 0; }
+        return -int_cmp_dbl(b, a.u.d);
+    }
+    if (b.t == T_FLOAT) {
+        if (b.u.d != b.u.d) { *unord = 1; return 0; }
+        return int_cmp_dbl(a, b.u.d);
+    }
+    return int_cmp(a, b);
+}
 static int num_eq(Value a, Value b)
 {
-    if (a.t == T_FLOAT || b.t == T_FLOAT) return to_dbl(a) == to_dbl(b);
+    int u, c;
+    if (a.t == T_FLOAT || b.t == T_FLOAT) {
+        c = num_cmp(a, b, &u);
+        return !u && c == 0;
+    }
     return int_cmp(a, b) == 0;
 }
 static int py_eq(Value a, Value b)
@@ -311,6 +385,10 @@ static int py_eq(Value a, Value b)
     if (is_num(a) && is_num(b)) return num_eq(a, b);
     if (a.t == T_COMPLEX || b.t == T_COMPLEX) {
         double ar, ai, br, bi;
+        if (a.t == T_COMPLEX && is_num(b))
+            return AS_CPLX(a)->im == 0.0 && num_eq(mkfloat(AS_CPLX(a)->re), b);
+        if (b.t == T_COMPLEX && is_num(a))
+            return AS_CPLX(b)->im == 0.0 && num_eq(mkfloat(AS_CPLX(b)->re), a);
         if (cplx_parts(a, &ar, &ai) && cplx_parts(b, &br, &bi)) return ar == br && ai == bi;
         if (a.t != T_INST && b.t != T_INST) return 0;
     }
@@ -374,10 +452,11 @@ static int py_eq(Value a, Value b)
         return 1; }
     case T_RANGE: {
         Range *x = (Range *)a.u.o, *y = (Range *)b.u.o;
-        long lx = range_len(x), ly = range_len(y);
-        if (lx != ly) return 0;
-        if (lx == 0) return 1;
-        return x->start == y->start && (lx == 1 || x->step == y->step); }
+        Value lx = range_lenv(x), ly = range_lenv(y);
+        if (int_cmp(lx, ly) != 0) return 0;
+        if (int_sign(lx) == 0) return 1;
+        if (int_cmp(x->a, y->a) != 0) return 0;
+        return (lx.t == T_INT && lx.u.i == 1) || int_cmp(x->c, y->c) == 0; }
     case T_INST: goto inst;
     default: return a.u.o == b.u.o;
     }
@@ -404,18 +483,7 @@ static unsigned long py_hash(Value v)
     switch (v.t) {
     case T_NONE: return 1234567UL;
     case T_BOOL: case T_INT: case T_BIG: return int_hash(v);
-    case T_FLOAT: {
-        double d = v.u.d;
-        if (d == floor(d) && d < (double)SI_MAX && d > -(double)SI_MAX)
-            return int_hash(mkint((long)d));
-        if (d != d) return 0;
-        {
-            unsigned char *p = (unsigned char *)&d;
-            unsigned long h = 17;
-            size_t i;
-            for (i = 0; i < sizeof(double); i++) h = h * 31 + p[i];
-            return h;
-        } }
+    case T_FLOAT: return hash_fold(float_hash_exact(v.u.d));
     case T_STR: case T_BYTES: return str_hash(AS_STR(v));
     case T_TUPLE: {
         List *l = AS_LIST(v);
@@ -423,10 +491,7 @@ static unsigned long py_hash(Value v)
         long i;
         for (i = 0; i < l->n; i++) h = (h * 1000003UL) ^ py_hash(l->a[i]);
         return h; }
-    case T_COMPLEX: {
-        unsigned long h = py_hash(mkfloat(AS_CPLX(v)->re));
-        if (AS_CPLX(v)->im != 0.0) h += 1000003UL * py_hash(mkfloat(AS_CPLX(v)->im));
-        return h; }
+    case T_COMPLEX: return hash_fold(complex_hash_exact(AS_CPLX(v)->re, AS_CPLX(v)->im));
     case T_LIST: case T_DICT: case T_SET: case T_BARR:
         throw_new(cls_TypeError, "unhashable type: '%.40s'", type_name(v));
         return 0;
@@ -434,7 +499,8 @@ static unsigned long py_hash(Value v)
         Value *m = class_find(AS_INST(v)->cls, S_hash);
         if (m) {
             Value r = call1(*m, v);
-            if (r.t == T_INT || r.t == T_BOOL) return (unsigned long)r.u.i;
+            if (r.t == T_INT || r.t == T_BOOL) return (unsigned long)(r.u.i == -1 ? -2L : r.u.i);
+            if (r.t == T_BIG) return hash_fold(int_hash_mod(r));
             throw_new(cls_TypeError, "__hash__ method should return an integer");
         }
         if (class_find(AS_INST(v)->cls, S_eq))
@@ -473,8 +539,8 @@ static int cmp3(Value a, Value b, int *ok)
     *ok = 1;
     if (is_num(a) && is_num(b)) {
         if (a.t == T_FLOAT || b.t == T_FLOAT) {
-            double x = to_dbl(a), y = to_dbl(b);
-            return x < y ? -1 : (x > y ? 1 : 0);
+            int u;
+            return num_cmp(a, b, &u);
         }
         return int_cmp(a, b);
     }
@@ -542,10 +608,11 @@ static int rich_cmp(int op, Value a, Value b)
     }
     if (a.t == T_FLOAT || b.t == T_FLOAT) {
         if (is_num(a) && is_num(b)) {
-            double x = to_dbl(a), y = to_dbl(b);
+            int u, c = num_cmp(a, b, &u);
+            if (u) return 0;
             switch (op) {
-            case C_LT: return x < y; case C_LE: return x <= y;
-            case C_GT: return x > y; default: return x >= y;
+            case C_LT: return c < 0; case C_LE: return c <= 0;
+            case C_GT: return c > 0; default: return c >= 0;
             }
         }
     }
@@ -616,11 +683,48 @@ static int rich_lt_hook(Value a, Value b)
 static void repr_buf(Value v, Buf *b, int depth);
 static void str_buf(Value v, Buf *b);
 
+/* decode one UTF-8 sequence at s[i..n): the code point, and its length in *len */
+static unsigned long u8_next(const unsigned char *s, long i, long n, int *len)
+{
+    unsigned long c = s[i];
+    int k = 1;
+    if (c >= 0xF0 && i + 3 < n && (s[i + 1] & 0xC0) == 0x80) {
+        c = ((c & 0x07UL) << 18) | ((s[i + 1] & 0x3FUL) << 12) | ((s[i + 2] & 0x3FUL) << 6)
+            | (s[i + 3] & 0x3FUL);
+        k = 4;
+    } else if (c >= 0xE0 && c < 0xF0 && i + 2 < n && (s[i + 1] & 0xC0) == 0x80) {
+        c = ((c & 0x0FUL) << 12) | ((s[i + 1] & 0x3FUL) << 6) | (s[i + 2] & 0x3FUL);
+        k = 3;
+    } else if (c >= 0xC0 && c < 0xE0 && i + 1 < n && (s[i + 1] & 0xC0) == 0x80) {
+        c = ((c & 0x1FUL) << 6) | (s[i + 1] & 0x3FUL);
+        k = 2;
+    }
+    *len = k;
+    return c;
+}
+/* code points that str.isprintable()/repr() treat as not printable (categories C* and Z*
+   except the space), as far as can be told without the whole Unicode table */
+static int uni_nonprint(unsigned long c)
+{
+    static const unsigned long rg[][2] = {
+        { 0x80UL, 0xA0UL }, { 0xADUL, 0xADUL }, { 0x378UL, 0x379UL }, { 0x600UL, 0x605UL },
+        { 0x61CUL, 0x61CUL }, { 0x6DDUL, 0x6DDUL }, { 0x70FUL, 0x70FUL }, { 0x8E2UL, 0x8E2UL },
+        { 0x1680UL, 0x1680UL }, { 0x180EUL, 0x180EUL }, { 0x2000UL, 0x200FUL },
+        { 0x2028UL, 0x202FUL }, { 0x205FUL, 0x206FUL }, { 0x3000UL, 0x3000UL },
+        { 0xD800UL, 0xF8FFUL }, { 0xFEFFUL, 0xFEFFUL }, { 0xFFF0UL, 0xFFFBUL },
+        { 0xFFFEUL, 0xFFFFUL }, { 0x1D173UL, 0x1D17AUL }, { 0xE0000UL, 0xE00FFUL },
+        { 0xE01F0UL, 0xE0FFFUL }, { 0xF0000UL, 0x10FFFFUL }
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(rg) / sizeof(rg[0])); i++)
+        if (c >= rg[i][0] && c <= rg[i][1]) return 1;
+    return 0;
+}
 static void repr_str_lit(Str *s, Buf *b)
 {
     long i;
     int q = '\'';
-    char t[8];
+    char t[40];
     if (memchr(s->s, '\'', (size_t)s->len) && !memchr(s->s, '"', (size_t)s->len)) q = '"';
     buf_addc(b, q);
     for (i = 0; i < s->len; i++) {
@@ -629,7 +733,21 @@ static void repr_str_lit(Str *s, Buf *b)
         else if (c == '\n') buf_add(b, "\\n");
         else if (c == '\t') buf_add(b, "\\t");
         else if (c == '\r') buf_add(b, "\\r");
-        else if (c < 32 || c == 127) { sprintf(t, "\\x%02x", c); buf_add(b, t); }
+        else if (c < 0x80 && !ch_print[c]) { sprintf(t, "\\x%02x", c); buf_add(b, t); }
+        else if (c >= 0xC2) {
+            int k;
+            unsigned long u = u8_next((const unsigned char *)s->s, i, s->len, &k);
+            if (k > 1 && uni_nonprint(u)) {
+                if (u < 256UL) sprintf(t, "\\x%02lx", u);
+                else if (u < 65536UL) sprintf(t, "\\u%04lx", u);
+                else sprintf(t, "\\U%08lx", u);
+                buf_add(b, t);
+            } else {
+                int j;
+                for (j = 0; j < k; j++) buf_addc(b, (unsigned char)s->s[i + j]);
+            }
+            i += k - 1;
+        }
         else buf_addc(b, c);
     }
     buf_addc(b, q);
@@ -648,7 +766,7 @@ static void repr_bytes_lit(const char *s, long n, Buf *b)
         else if (c == '\n') buf_add(b, "\\n");
         else if (c == '\t') buf_add(b, "\\t");
         else if (c == '\r') buf_add(b, "\\r");
-        else if (c < 32 || c >= 127) { sprintf(tt, "\\x%02x", c); buf_add(b, tt); }
+        else if (!ch_print[c]) { sprintf(tt, "\\x%02x", c); buf_add(b, tt); }
         else buf_addc(b, c);
     }
     buf_addc(b, q);
@@ -737,9 +855,12 @@ static void repr_buf(Value v, Buf *b, int depth)
         break; }
     case T_RANGE: {
         Range *r = (Range *)v.u.o;
-        if (r->step == 1) sprintf(t, "range(%ld, %ld)", r->start, r->stop);
-        else sprintf(t, "range(%ld, %ld, %ld)", r->start, r->stop, r->step);
-        buf_add(b, t);
+        buf_add(b, "range(");
+        int_str(r->a, b);
+        buf_add(b, ", ");
+        int_str(r->b, b);
+        if (!(r->c.t == T_INT && r->c.u.i == 1)) { buf_add(b, ", "); int_str(r->c, b); }
+        buf_addc(b, ')');
         break; }
     case T_FUNC:
         buf_add(b, "<function ");
@@ -1159,6 +1280,12 @@ static Value get_attr(Value o, Str *nm)
     default: break;
     }
     if (nm == S_class) return mkobj(class_of(o), T_CLASS);
+    if (o.t == T_RANGE) {
+        Range *r = (Range *)o.u.o;
+        if (nm == intern_c("start")) return r->a;
+        if (nm == intern_c("stop")) return r->b;
+        if (nm == intern_c("step")) return r->c;
+    }
     if (o.t == T_COMPLEX) {
         if (nm == intern_c("real")) return mkfloat(AS_CPLX(o)->re);
         if (nm == intern_c("imag")) return mkfloat(AS_CPLX(o)->im);
@@ -1335,6 +1462,44 @@ static void slice_adjust(Value lo, Value hi, Value st, long len, long *start, lo
     if (s < 0) *cnt = a > b ? (a - b - 1) / (-s) + 1 : 0;
     else *cnt = a < b ? (b - a - 1) / s + 1 : 0;
 }
+/* slice_adjust for lengths and bounds of any size (ranges); start/stop/step as integers */
+static int slice_isint(Value v)
+{
+    return v.t == T_INT || v.t == T_BOOL || v.t == T_BIG;
+}
+static void slice_adjust_v(Value lo, Value hi, Value st, Value len, Value *start, Value *stop,
+                           Value *step)
+{
+    Value s = mkint(1), lower, upper, a, b;
+    if (st.t != T_NONE) {
+        if (!slice_isint(st))
+            throw_new(cls_TypeError,
+                      "slice indices must be integers or None or have an __index__ method");
+        s = st;
+        if (int_sign(s) == 0) throw_new(cls_ValueError, "slice step cannot be zero");
+    }
+    if (int_sign(s) < 0) { lower = mkint(-1); upper = int_sub(len, mkint(1)); }
+    else { lower = mkint(0); upper = len; }
+    if (lo.t == T_NONE) a = int_sign(s) < 0 ? upper : lower;
+    else {
+        if (!slice_isint(lo))
+            throw_new(cls_TypeError,
+                      "slice indices must be integers or None or have an __index__ method");
+        a = lo;
+        if (int_sign(a) < 0) { a = int_add(a, len); if (int_cmp(a, lower) < 0) a = lower; }
+        else if (int_cmp(a, upper) > 0) a = upper;
+    }
+    if (hi.t == T_NONE) b = int_sign(s) < 0 ? lower : upper;
+    else {
+        if (!slice_isint(hi))
+            throw_new(cls_TypeError,
+                      "slice indices must be integers or None or have an __index__ method");
+        b = hi;
+        if (int_sign(b) < 0) { b = int_add(b, len); if (int_cmp(b, lower) < 0) b = lower; }
+        else if (int_cmp(b, upper) > 0) b = upper;
+    }
+    *start = a; *stop = b; *step = s;
+}
 static Value slice_get(Value o, Value lo, Value hi, Value st)
 {
     long start, stop, step, cnt, i, len;
@@ -1376,10 +1541,9 @@ static Value slice_get(Value o, Value lo, Value hi, Value st)
     case T_ND: return nd_subscr(o, mkslice(lo, hi, st));
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
-        long n = range_len(r);
-        slice_adjust(lo, hi, st, n, &start, &stop, &step, &cnt);
-        return make_range(r->start + start * r->step, r->start + (start + cnt * step) * r->step,
-                          r->step * step); }
+        Value gs, ge, gt;
+        slice_adjust_v(lo, hi, st, range_lenv(r), &gs, &ge, &gt);
+        return make_range_v(range_item(r, gs), range_item(r, ge), int_mul(r->c, gt)); }
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_getitem);
         if (m) {
@@ -1406,6 +1570,9 @@ static long norm_index(long i, long n, const char *what)
 static void slice_del(Value o, Value lo, Value hi, Value st);
 static Value subscr(Value o, Value idx)
 {
+    if (idx.t == T_BIG && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR || o.t == T_BYTES ||
+                           o.t == T_BARR))
+        throw_new(cls_IndexError, "cannot fit 'int' into an index-sized integer");
     if (idx.t == T_SLICE && o.t != T_INST && o.t != T_ND && o.t != T_DICT) {
         List *sl = AS_LIST(idx);
         return slice_get(o, sl->a[0], sl->a[1], sl->a[2]);
@@ -1461,10 +1628,13 @@ static Value subscr(Value o, Value idx)
         break;
     case T_ND: return nd_subscr(o, idx);
     case T_RANGE:
-        if (idx.t == T_INT || idx.t == T_BOOL) {
+        if (idx.t == T_INT || idx.t == T_BOOL || idx.t == T_BIG) {
             Range *r = (Range *)o.u.o;
-            long i = norm_index(idx.u.i, range_len(r), "range object");
-            return mkint(r->start + i * r->step);
+            Value i = idx, len = range_lenv(r);
+            if (int_sign(i) < 0) i = int_add(i, len);
+            if (int_sign(i) < 0 || int_cmp(i, len) >= 0)
+                throw_new(cls_IndexError, "range object index out of range");
+            return range_item(r, i);
         }
         throw_new(cls_TypeError, "range indices must be integers or slices, not %.40s",
             type_name(idx));
@@ -1583,6 +1753,9 @@ static void slice_set(Value o, Value lo, Value hi, Value st, Value v)
 }
 static void setitem(Value o, Value idx, Value v)
 {
+    if (idx.t == T_BIG && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR || o.t == T_BYTES ||
+                           o.t == T_BARR))
+        throw_new(cls_IndexError, "cannot fit 'int' into an index-sized integer");
     if (idx.t == T_SLICE && o.t != T_INST && o.t != T_ND && o.t != T_DICT) {
         List *sl = AS_LIST(idx);
         slice_set(o, sl->a[0], sl->a[1], sl->a[2], v);
@@ -1637,6 +1810,9 @@ static void setitem(Value o, Value idx, Value v)
 }
 static void delitem(Value o, Value idx)
 {
+    if (idx.t == T_BIG && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR || o.t == T_BYTES ||
+                           o.t == T_BARR))
+        throw_new(cls_IndexError, "cannot fit 'int' into an index-sized integer");
     if (idx.t == T_SLICE && o.t != T_INST && o.t != T_DICT) {
         List *sl = AS_LIST(idx);
         slice_del(o, sl->a[0], sl->a[1], sl->a[2]);
@@ -1734,8 +1910,13 @@ static Value get_iter(Value o)
     case T_SET: it = iter_new(IK_SET); it->a = o; return mkobj(it, T_ITER);
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
+        if (r->big) {
+            it = iter_new(IK_BRANGE);
+            it->a = r->a; it->b = r->b; it->c = r->c;
+            return mkobj(it, T_ITER);
+        }
         it = iter_new(IK_RANGE);
-        it->i = r->start; it->n = r->stop; it->step = r->step;
+        it->i = r->a.u.i; it->n = r->b.u.i; it->step = r->c.u.i;
         return mkobj(it, T_ITER); }
     case T_DVIEW: {
         DView *dv = (DView *)o.u.o;
@@ -1813,6 +1994,12 @@ static int iter_next(Value it, Value *out)
         *out = mkint(t->i);
         t->i += t->step;
         return 1;
+    case IK_BRANGE: {
+        int c = int_cmp(t->a, t->b);
+        if (int_sign(t->c) > 0 ? c >= 0 : c <= 0) return 0;
+        *out = t->a;
+        t->a = int_add(t->a, t->c);
+        return 1; }
     case IK_DICT: case IK_DVALS: case IK_DITEMS: case IK_SET: {
         Dict *d = AS_DICT(t->a);
         while (t->i < d->used && d->e[t->i].k.t == T_UNSET) t->i++;
@@ -1828,10 +2015,11 @@ static int iter_next(Value it, Value *out)
         {
             Value *base = vsp;
             VPUSH(x);
-            *out = mktuple2(mkint(t->i), x);
+            *out = mktuple2(t->b.t == T_BIG ? t->b : mkint(t->i), x);
             vsp = base;
         }
-        t->i++;
+        if (t->b.t == T_BIG) t->b = int_add(t->b, mkint(1));
+        else t->i++;
         return 1; }
     case IK_ZIP: {
         List *its = AS_LIST(t->a);
@@ -1878,7 +2066,7 @@ static int iter_next(Value it, Value *out)
         if (t->a.t == T_STR) *out = mkstr(AS_STR(t->a)->s + t->i, 1);
         else if (t->a.t == T_RANGE) {
             Range *r = (Range *)t->a.u.o;
-            *out = mkint(r->start + t->i * r->step);
+            *out = mkint(r->a.u.i + t->i * r->c.u.i);
         } else *out = AS_LIST(t->a)->a[t->i];
         t->i--;
         return 1; }
@@ -1971,10 +2159,20 @@ static int contains(Value c, Value x)
         return 0; }
     case T_RANGE: {
         Range *r = (Range *)c.u.o;
-        if (x.t == T_INT || x.t == T_BOOL) {
-            long v = x.u.i;
-            if (r->step > 0) return v >= r->start && v < r->stop && (v - r->start) % r->step == 0;
-            return v <= r->start && v > r->stop && (r->start - v) % (-r->step) == 0;
+        if (x.t == T_FLOAT) {
+            if (x.u.d != floor(x.u.d) || x.u.d - x.u.d != 0.0) return 0;
+            x = int_from_double(x.u.d);
+        }
+        if (x.t == T_INT || x.t == T_BOOL || x.t == T_BIG) {
+            if (!r->big && x.t != T_BIG) {
+                long v = x.u.i, start = r->a.u.i, stop = r->b.u.i, step = r->c.u.i;
+                if (step > 0) return v >= start && v < stop && (v - start) % step == 0;
+                return v <= start && v > stop && (start - v) % (-step) == 0;
+            }
+            if (int_sign(r->c) > 0) {
+                if (int_cmp(x, r->a) < 0 || int_cmp(x, r->b) >= 0) return 0;
+            } else if (int_cmp(x, r->a) > 0 || int_cmp(x, r->b) <= 0) return 0;
+            return int_sign(int_mod(int_sub(x, r->a), r->c)) == 0;
         }
         return 0; }
     case T_DVIEW: {
@@ -2096,7 +2294,12 @@ static Value num_binop(int op, Value a, Value b)
                 throw_new(cls_ZeroDivisionError, "0.0 cannot be raised to a negative power");
             if (x < 0 && y != floor(y))
                 return cplx_binop(B_POW, mkcomplex(x, 0.0), mkcomplex(y, 0.0));
-            return mkfloat(pow(x, y));
+            {
+                double r = pow(x, y);
+                if ((r > DBL_MAX || r < -DBL_MAX) && x - x == 0 && y - y == 0)
+                    throw_new(cls_OverflowError, "(34, 'Numerical result out of range')");
+                return mkfloat(r);
+            }
         default: break;
         }
         throw_new(cls_TypeError, "unsupported operand type(s) for %s: '%.40s' and '%.40s'",
@@ -2108,44 +2311,65 @@ static Value num_binop(int op, Value a, Value b)
     case B_MUL: return int_mul(a, b);
     case B_DIV: {
         if (int_sign(b) == 0) throw_new(cls_ZeroDivisionError, "division by zero");
-        return mkfloat(int_todouble(a) / int_todouble(b)); }
+        return mkfloat(int_truediv(a, b)); }
     case B_FDIV: return int_floordiv(a, b);
     case B_MOD: return int_mod(a, b);
     case B_POW: return int_pow_v(a, b);
     case B_AND: case B_OR: case B_XOR:
-        if (a.t == T_BIG || b.t == T_BIG)
-            throw_new(cls_OverflowError, "bitwise operations on huge integers are not supported");
         if (a.t == T_BOOL && b.t == T_BOOL)
             return tobool
                 ((int)(op == B_AND ? (a.u.i & b.u.i)
                 : (op == B_OR ? (a.u.i | b.u.i) : (a.u.i ^ b.u.i))));
-        return mkint(op == B_AND ? (a.u.i & b.u.i)
-            : (op == B_OR ? (a.u.i | b.u.i) : (a.u.i ^ b.u.i)));
+        return int_bitop(op == B_AND ? '&' : (op == B_OR ? '|' : '^'), a, b);
     case B_LSH: {
         if (int_sign(b) < 0) throw_new(cls_ValueError, "negative shift count");
+        if (int_sign(a) == 0) return mkint(0);
         if (b.t == T_BIG || b.u.i > 100000000L)
             throw_new(cls_OverflowError, "shift count too large");
-        return int_mul(a, int_pow(mkint(2), b.u.i)); }
+        if (a.t != T_BIG && b.u.i < 30L && a.u.i < (1L << (30 - b.u.i)) &&
+            a.u.i > -(1L << (30 - b.u.i)))
+            return mkint(a.u.i * (1L << b.u.i));
+        return int_mul(a, int_pow2(b.u.i)); }
     default: {
         if (int_sign(b) < 0) throw_new(cls_ValueError, "negative shift count");
-        if (b.t == T_BIG || b.u.i > 100000000L) return mkint(int_sign(a) < 0 ? -1 : 0);
-        return int_floordiv(a, int_pow(mkint(2), b.u.i)); }
+        if (int_sign(a) == 0) return mkint(0);
+        /* a limb (base 10000) has fewer than 14 bits, a small int fewer than 70 */
+        if (b.t == T_BIG || b.u.i > 14L * (a.t == T_BIG ? (long)AS_BIG(a)->n : 5L))
+            return mkint(int_sign(a) < 0 ? -1 : 0);
+        if (a.t != T_BIG && b.u.i < 31L) {
+            long dv = 1L << b.u.i, q = a.u.i / dv;
+            if (a.u.i < 0 && a.u.i % dv != 0) q--;       /* floor, not truncation */
+            return mkint(q);
+        }
+        return int_floordiv(a, int_pow2(b.u.i)); }
     }
 }
-static Value seq_repeat(Value s, long n)
+/* repetition count of "seq * n" for an integer n of any size: clamps to 0 for negative and
+   raises the errors CPython gives for sizes that cannot be allocated */
+static long repeat_count(Value n, long unit)
 {
-    long i;
-    if (n < 0) n = 0;
+    if (n.t == T_BIG && int_bitlen(n) > 63)
+        throw_new(cls_OverflowError, "cannot fit 'int' into an index-sized integer");
+    if (int_sign(n) <= 0) return 0;
+    if (unit == 0) return 0;
+    if (n.t == T_BIG) throw_new(cls_MemoryError, "");
+    if (n.u.i > 400000000L / unit) throw_new(cls_MemoryError, "");
+    return n.u.i;
+}
+static Value seq_repeat(Value s, Value nv)
+{
+    long i, n;
     if (s.t == T_STR) {
         Str *x = AS_STR(s);
         Buf b;
-        if (x->len * n > 400000000L) throw_new(cls_OverflowError, "repeated string is too long");
+        n = x->len == 0 ? 0 : repeat_count(nv, x->len);
         buf_init(&b);
         for (i = 0; i < n; i++) buf_addn(&b, x->s, x->len);
         return buf_value(&b);
     } else {
         List *l = AS_LIST(s), *r;
         long j;
+        n = l->n == 0 ? 0 : repeat_count(nv, l->n);
         r = s.t == T_LIST ? list_new(l->n * n) : tuple_new(l->n * n);
         for (i = 0; i < n; i++)
             for (j = 0; j < l->n; j++) r->a[i * l->n + j] = l->a[j];
@@ -2164,8 +2388,11 @@ static Value set_op(int op, Value a, Value b)
         for (i = 0; i < x->used; i++) if (x->e[i].k.t != T_UNSET) set_add(r, x->e[i].k);
         for (i = 0; i < y->used; i++) if (y->e[i].k.t != T_UNSET) set_add(r, y->e[i].k);
     } else if (op == B_AND) {
-        for (i = 0; i < x->used; i++)
-            if (x->e[i].k.t != T_UNSET && dict_get(y, x->e[i].k, &o)) set_add(r, x->e[i].k);
+        /* like CPython: walk the smaller set (the right one when sizes are equal) and keep
+           its elements, which matters for 1 and 1.0 */
+        Dict *w = x->n < y->n ? x : y, *o2 = x->n < y->n ? y : x;
+        for (i = 0; i < w->used; i++)
+            if (w->e[i].k.t != T_UNSET && dict_get(o2, w->e[i].k, &o)) set_add(r, w->e[i].k);
     } else if (op == B_SUB) {
         for (i = 0; i < x->used; i++)
             if (x->e[i].k.t != T_UNSET && !dict_get(y, x->e[i].k, &o)) set_add(r, x->e[i].k);
@@ -2208,16 +2435,19 @@ static Value binop(int op, Value a, Value b)
             buf_free(&bf);
             return r;
         }
-        if (op == B_MUL && (b.t == T_INT || b.t == T_BOOL)) {
+        if (op == B_MUL && (b.t == T_INT || b.t == T_BOOL || b.t == T_BIG)) {
+            long cnt;
             bytes_get(a, &pa, &na);
+            cnt = na == 0 ? 0 : repeat_count(b, na);
             buf_init(&bf);
-            for (i = 0; i < b.u.i; i++) buf_addn(&bf, pa, na);
+            for (i = 0; i < cnt; i++) buf_addn(&bf, pa, na);
             r = a.t == T_BARR ? mkbarr(bf.s, bf.n) : mkbytes(bf.s, bf.n);
             buf_free(&bf);
             return r;
         }
     }
-    if (op == B_MUL && (b.t == T_BYTES || b.t == T_BARR) && (a.t == T_INT || a.t == T_BOOL))
+    if (op == B_MUL && (b.t == T_BYTES || b.t == T_BARR) &&
+        (a.t == T_INT || a.t == T_BOOL || a.t == T_BIG))
         return binop(op, b, a);
     if (op == B_ADD && a.t == b.t && (a.t == T_LIST || a.t == T_TUPLE)) {
         List *x = AS_LIST(a), *y = AS_LIST(b), *r;
@@ -2229,10 +2459,12 @@ static Value binop(int op, Value a, Value b)
         return mkobj(r, a.t);
     }
     if (op == B_MUL) {
-        if ((a.t == T_STR || a.t == T_LIST || a.t == T_TUPLE) && (b.t == T_INT || b.t == T_BOOL))
-            return seq_repeat(a, b.u.i);
-        if ((b.t == T_STR || b.t == T_LIST || b.t == T_TUPLE) && (a.t == T_INT || a.t == T_BOOL))
-            return seq_repeat(b, a.u.i);
+        if ((a.t == T_STR || a.t == T_LIST || a.t == T_TUPLE) &&
+            (b.t == T_INT || b.t == T_BOOL || b.t == T_BIG))
+            return seq_repeat(a, b);
+        if ((b.t == T_STR || b.t == T_LIST || b.t == T_TUPLE) &&
+            (a.t == T_INT || a.t == T_BOOL || a.t == T_BIG))
+            return seq_repeat(b, a);
         if ((a.t == T_STR || a.t == T_LIST || a.t == T_TUPLE) && b.t != T_INST)
             throw_new(cls_TypeError, "can't multiply sequence by non-int of type '%.40s'",
                 type_name(b));
@@ -2359,7 +2591,7 @@ static Value unop(int op, Value a)
         throw_new(cls_TypeError, "bad operand type for unary +: '%.40s'", type_name(a));
     } else {
         if (a.t == T_INT || a.t == T_BOOL) return mkint(-a.u.i - 1);
-        if (a.t == T_BIG) return int_sub(int_neg(a), mkint(1));
+        if (a.t == T_BIG) return int_invert(a);
         if (a.t == T_INST) {
             Value *m = class_find(AS_INST(a)->cls, S_invert);
             if (m) return call1(*m, a);

@@ -54,32 +54,71 @@ def _transpose(a):
     return [list(r) for r in zip(*a)]
 
 
+def _fma(a, b, c):
+    """a * b + c with one rounding (Dekker product, then one rounded sum)"""
+    t = 134217729.0 * a
+    ah = t - (t - a)
+    al = a - ah
+    t = 134217729.0 * b
+    bh = t - (t - b)
+    bl = b - bh
+    p = a * b
+    e = ((ah * bh - p) + ah * bl + al * bh) + al * bl
+    s = p + c
+    bb = s - p
+    er = (p - (s - bb)) + (c - bb)
+    return s + (er + e)
+
+
 def _lu(a):
-    """partial pivoting LU: returns (lu, perm, sign) or None when singular"""
+    """partial pivoting LU, left-looking with reciprocal pivot scaling and fused dot products
+    in the order of OpenBLAS getf2 (same as the C interpreter), so exactly singular matrices
+    such as [[1,2,3],[4,5,6],[7,8,9]] get an exactly zero pivot as in numpy:
+    returns (lu, perm, sign), lu is None when singular"""
     n = len(a)
-    lu = [row[:] for row in a]
+    lu = [[float(v) for v in row] for row in a]
     perm = list(_range(n))
     sign = 1.0
-    for k in _range(n):
-        p = k
-        big = abs(lu[k][k])
-        for i in _range(k + 1, n):
-            if abs(lu[i][k]) > big:
-                big = abs(lu[i][k])
+    for j in _range(n):
+        nvec = (n - j) - (n - j) % 4
+        for i in _range(j):
+            s = 0.0
+            for k in _range(i):
+                s = _fma(lu[i][k], lu[k][j], s)
+            lu[i][j] -= s
+        for i in _range(j, n):
+            s = 0.0
+            if i - j >= nvec:
+                for k in _range(j):
+                    s = _fma(lu[i][k], lu[k][j], s)
+                lu[i][j] -= s
+            else:
+                k = 0
+                while k + 4 <= j:
+                    t = 0.0
+                    for q in _range(4):
+                        t = _fma(lu[i][k + q], -lu[k + q][j], t)
+                    s += t
+                    k += 4
+                while k < j:
+                    s += lu[i][k] * -lu[k][j]
+                    k += 1
+                lu[i][j] += s
+        p = j
+        big = abs(lu[j][j])
+        for i in _range(j + 1, n):
+            if abs(lu[i][j]) > big:
+                big = abs(lu[i][j])
                 p = i
         if big == 0.0:
             return None, perm, 0.0
-        if p != k:
-            lu[k], lu[p] = lu[p], lu[k]
-            perm[k], perm[p] = perm[p], perm[k]
+        if p != j:
+            lu[j], lu[p] = lu[p], lu[j]
+            perm[j], perm[p] = perm[p], perm[j]
             sign = -sign
-        piv = lu[k][k]
-        for i in _range(k + 1, n):
-            f = lu[i][k] / piv
-            lu[i][k] = f
-            if f != 0.0:
-                for j in _range(k + 1, n):
-                    lu[i][j] -= f * lu[k][j]
+        r = 1.0 / lu[j][j]
+        for i in _range(j + 1, n):
+            lu[i][j] *= r
     return lu, perm, sign
 
 
@@ -113,14 +152,14 @@ def _lu_solve(lu, perm, b):
                 for j in _range(m):
                     x[i][j] -= f * x[k][j]
     for i in _range(n - 1, -1, -1):
-        for k in _range(i + 1, n):
+        for k in _range(n - 1, i, -1):
             f = lu[i][k]
             if f != 0.0:
                 for j in _range(m):
                     x[i][j] -= f * x[k][j]
-        piv = lu[i][i]
+        r = 1.0 / lu[i][i]
         for j in _range(m):
-            x[i][j] /= piv
+            x[i][j] *= r
     return x
 
 

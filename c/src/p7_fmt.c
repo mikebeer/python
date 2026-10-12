@@ -2,7 +2,7 @@
    p7_fmt.c   format() mini language, % formatting, str.format
    ========================================================================= */
 typedef struct FSpec {
-    int fill, align, sign, alt, zero, comma, under;
+    int fill, align, sign, alt, zero, comma, under, pct;
     long width, prec;
     int type;
 } FSpec;
@@ -11,7 +11,7 @@ static void parse_spec(const char *s, long n, FSpec *sp)
 {
     long i = 0;
     sp->fill = ' '; sp->align = 0; sp->sign = 0; sp->alt = 0; sp->zero = 0;
-    sp->comma = 0; sp->under = 0; sp->width = -1; sp->prec = -1; sp->type = 0;
+    sp->comma = 0; sp->under = 0; sp->pct = 0; sp->width = -1; sp->prec = -1; sp->type = 0;
     if (n >= 2 && strchr("<>^=", s[1])) { sp->fill = s[0]; sp->align = s[1]; i = 2; }
     else if (n >= 1 && strchr("<>^=", s[0])) { sp->align = s[0]; i = 1; }
     if (i < n && strchr("+- ", s[i])) { sp->sign = s[i]; i++; }
@@ -32,14 +32,24 @@ static void parse_spec(const char *s, long n, FSpec *sp)
     if (i < n) throw_new(cls_ValueError, "Invalid format specifier");
 }
 
-/* insert thousands separators in the integer part of digits */
-static void add_grouping(Buf *out, const char *d, long n, int sepc)
+/* digits d[0..nd) with a separator between groups of g (3 for decimal, 4 for x o b).  With
+   minw > 0 (zero padding) leading zeros are added until the output plus 'other' characters
+   outside it reach minw, as CPython does (so a separator never leads) */
+static void group_run(Buf *out, const char *d, long nd, int sepc, int g, long other, long minw)
 {
-    long i, intlen = 0;
-    while (intlen < n && ch_digit[(unsigned char)d[intlen]]) intlen++;
-    for (i = 0; i < n; i++) {
-        if (i < intlen && i > 0 && (intlen - i) % 3 == 0) buf_addc(out, sepc);
-        buf_addc(out, d[i]);
+    long nz = 0, i, n2, len;
+    if (minw > 0) {
+        for (;;) {
+            n2 = nd + nz;
+            len = n2 + (n2 - 1) / g;
+            if (len + other >= minw) break;
+            nz++;
+        }
+    }
+    n2 = nd + nz;
+    for (i = 0; i < n2; i++) {
+        if (i > 0 && (n2 - i) % g == 0) buf_addc(out, sepc);
+        buf_addc(out, i < nz ? '0' : d[i - nz]);
     }
 }
 
@@ -81,10 +91,10 @@ static const char *sign_str(FSpec *sp, int neg)
 
 static Value format_float_spec(double d, FSpec *sp)
 {
-    char tmp[512], fm[32];
+    char *tmp, fm[16];
     Buf body;
-    int neg = 0, t = sp->type;
-    long prec = sp->prec;
+    int neg = 0, t = sp->type, k;
+    long prec = sp->prec, other;
     Value r;
     if (d != d) {
         return pad_result(sp, sign_str(sp, 0), "", "nan", 3, '>');
@@ -94,35 +104,67 @@ static Value format_float_spec(double d, FSpec *sp)
         return pad_result(sp, sign_str(sp, neg), "",
             t == 'F' || t == 'E' || t == 'G' ? "INF" : "inf", 3, '>');
     }
+    if (prec > 1000000L) throw_new(cls_ValueError, "precision too big");
+    tmp = (char *)xmalloc((size_t)(440 + (prec > 0 ? prec : 0)));
     if (t == 0) {
         if (prec < 0) { float_repr(d, tmp); }
         else {
-            sprintf(fm, "%%.%ldg", prec == 0 ? 1L : prec);
-            sprintf(tmp, fm, d);
-            if (!strchr(tmp, '.') && !strchr(tmp, 'e') && !strchr(tmp, 'n')) strcat(tmp, ".0");
+            sprintf(tmp, sp->alt ? "%#.*g" : "%.*g", (int)(prec == 0 ? 1L : prec), d);
+            if (!strchr(tmp, 'e') && !strchr(tmp, 'n')) {
+                /* no type: the exponent form starts one digit earlier than with 'g' */
+                char *ep;
+                int pr = (int)(prec == 0 ? 1L : prec);
+                sprintf(tmp, "%.*e", pr - 1, d);
+                ep = strchr(tmp, 'e');
+                if (ep && atoi(ep + 1) == pr - 1 && d != 0) {
+                    if (!sp->alt) {
+                        char *m = ep;
+                        while (m > tmp && m[-1] == '0') m--;
+                        if (m > tmp && m[-1] == '.') m--;
+                        memmove(m, ep, strlen(ep) + 1);
+                    }
+                } else {
+                    sprintf(tmp, sp->alt ? "%#.*g" : "%.*g", pr, d);
+                    if (!strchr(tmp, '.') && !strchr(tmp, 'e') && !strchr(tmp, 'n'))
+                        strcat(tmp, ".0");
+                }
+            }
         }
     } else if (t == '%') {
-        sprintf(fm, "%%.%ldf", prec < 0 ? 6L : prec);
-        sprintf(tmp, fm, d * 100.0);
+        sprintf(tmp, sp->alt ? "%#.*f" : "%.*f", (int)(prec < 0 ? 6L : prec), d * 100.0);
         strcat(tmp, "%");
     } else {
         int ct = t;
         if (ct == 'F') ct = 'f';
-        sprintf(fm, "%%.%ld%c", prec < 0 ? 6L : prec, ct);
-        sprintf(tmp, fm, d);
+        if (ct == 'n') ct = 'g';
+        k = 0;
+        fm[k++] = '%';
+        if (sp->alt) fm[k++] = '#';
+        fm[k++] = '.'; fm[k++] = '*'; fm[k++] = (char)ct; fm[k] = 0;
+        sprintf(tmp, fm, (int)(prec < 0 ? 6L : prec), d);
     }
     buf_init(&body);
-    if (sp->comma || sp->under) add_grouping(&body, tmp, (long)strlen(tmp), sp->comma ? ',' : '_');
-    else buf_add(&body, tmp);
+    if (sp->comma || sp->under) {
+        long intlen = 0, tl = (long)strlen(tmp);
+        while (intlen < tl && ch_digit[(unsigned char)tmp[intlen]]) intlen++;
+        other = (long)strlen(sign_str(sp, neg)) + (tl - intlen);
+        group_run(&body, tmp, intlen, sp->comma ? ',' : '_', 3, other,
+                  sp->zero && !sp->align ? sp->width : 0);
+        buf_add(&body, tmp + intlen);
+    } else buf_add(&body, tmp);
     r = pad_result(sp, sign_str(sp, neg), "", body.s, body.n, '>');
     buf_free(&body);
+    free(tmp);
     return r;
 }
+
+/* set by the % operator: a precision on an integer conversion means a minimum digit count */
+static int fmt_pct_mode;
 
 static Value format_int_spec(Value v, FSpec *sp)
 {
     Buf body, g;
-    int neg = int_sign(v) < 0;
+    int neg = int_sign(v) < 0, isdec;
     const char *prefix = "";
     Value r, av = neg ? int_neg(v) : v;
     buf_init(&body);
@@ -132,14 +174,25 @@ static Value format_int_spec(Value v, FSpec *sp)
     case 'b': int_str_base(av, 2, &body); prefix = sp->alt ? "0b" : ""; break;
     default: int_str(av, &body); break;
     }
+    isdec = !(sp->type == 'x' || sp->type == 'X' || sp->type == 'o' || sp->type == 'b');
     if (sp->type == 'X') {
         long i;
         for (i = 0; i < body.n; i++) body.s[i] = (char)to_up[(unsigned char)body.s[i]];
         if (prefix[0]) prefix = "0X";
     }
+    if (sp->pct && sp->prec > body.n) {          /* "%.5d": at least 5 digits */
+        long i, z = sp->prec - body.n;
+        buf_init(&g);
+        for (i = 0; i < z; i++) buf_addc(&g, '0');
+        buf_addn(&g, body.s, body.n);
+        buf_free(&body);
+        body = g;
+    }
     if (sp->comma || sp->under) {
         buf_init(&g);
-        add_grouping(&g, body.s, body.n, sp->comma ? ',' : '_');
+        group_run(&g, body.s, body.n, sp->comma ? ',' : '_', isdec ? 3 : 4,
+                  (long)strlen(sign_str(sp, neg)) + (long)strlen(prefix),
+                  sp->zero && !sp->align ? sp->width : 0);
         buf_free(&body);
         body = g;
     }
@@ -219,6 +272,8 @@ static Value format_complex_spec(Value v, FSpec *sp)
 static Value format_value(Value v, const char *spec, long speclen)
 {
     FSpec sp;
+    int pct = fmt_pct_mode;
+    fmt_pct_mode = 0;
     if (speclen == 0) {
         if (v.t == T_STR) return v;
         return py_str(v);
@@ -230,6 +285,7 @@ static Value format_value(Value v, const char *spec, long speclen)
             type_name(v));
     }
     parse_spec(spec, speclen, &sp);
+    sp.pct = pct;
     if (v.t == T_STR || (sp.type == 's')) {
         Value s = v.t == T_STR ? v : py_str(v);
         long len = AS_STR(s)->len;
@@ -241,9 +297,17 @@ static Value format_value(Value v, const char *spec, long speclen)
     if (v.t == T_BOOL && sp.type == 0) return format_value(py_str(v), spec, speclen);
     if (v.t == T_INT || v.t == T_BOOL || v.t == T_BIG) {
         int t = sp.type;
+        if (sp.comma && sp.under) throw_new(cls_ValueError, "Cannot specify both ',' and '_'.");
+        if (sp.comma && t != 0 && t != 'd' && t != 'e' && t != 'E' && t != 'f' && t != 'F' &&
+            t != 'g' && t != 'G' && t != '%')
+            throw_new(cls_ValueError, "Cannot specify ',' with '%c'.", t);
+        if (sp.under && (t == 'c' || t == 'n' || t == 's'))
+            throw_new(cls_ValueError, "Cannot specify '_' with '%c'.", t);
         if (t == 'c') {
             Buf b;
             Value r;
+            if (v.t == T_BIG || v.u.i < 0 || v.u.i > 0x10FFFFL)
+                throw_new(cls_OverflowError, "%%c arg not in range(0x110000)");
             buf_init(&b);
             put_utf8(&b, (unsigned long)v.u.i);
             r = pad_result(&sp, "", "", b.s, b.n, '<');
@@ -251,7 +315,7 @@ static Value format_value(Value v, const char *spec, long speclen)
             return r;
         }
         if (t == 0 || t == 'd' || t == 'n' || t == 'x' || t == 'X' || t == 'o' || t == 'b') {
-            if (sp.prec >= 0)
+            if (sp.prec >= 0 && !sp.pct)
                 throw_new(cls_ValueError, "Precision not allowed in integer format specifier");
             return format_int_spec(v, &sp);
         }
@@ -261,7 +325,9 @@ static Value format_value(Value v, const char *spec, long speclen)
     if (v.t == T_COMPLEX) return format_complex_spec(v, &sp);
     if (v.t == T_FLOAT) {
         int t = sp.type;
-        if (t == 0 || strchr("eEfFgG%", t)) return format_float_spec(v.u.d, &sp);
+        if (sp.under && t == 'n') throw_new(cls_ValueError, "Cannot specify '_' with 'n'.");
+        if (sp.comma && t == 'n') throw_new(cls_ValueError, "Cannot specify ',' with 'n'.");
+        if (t == 0 || t == 'n' || strchr("eEfFgG%", t)) return format_float_spec(v.u.d, &sp);
         throw_new(cls_ValueError, "Unknown format code '%c' for object of type 'float'", t);
     }
     throw_new(cls_TypeError, "unsupported format string passed to %.60s.__format__", type_name(v));
@@ -383,6 +449,7 @@ static Value py_format_percent(Value fmt, Value args)
         spec[sl++] = (char)t;
         spec[sl] = 0;
         if (t == 'd' && arg.t == T_BOOL) arg = mkint(arg.u.i);
+        fmt_pct_mode = 1;
         res = format_value(arg, spec, sl);
         buf_addn(&out, AS_STR(res)->s, AS_STR(res)->len);
     }

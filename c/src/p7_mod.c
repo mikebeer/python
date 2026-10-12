@@ -58,8 +58,52 @@ MATH1(m_sinh, sinh(v), 1)
 MATH1(m_cosh, cosh(v), 1)
 MATH1(m_tanh, tanh(v), 1)
 MATH1(m_exp, exp(v), 1)
-MATH1(m_log10, log10(v), v > 0)
-MATH1(m_log2, log(v) / log(2.0), v > 0)
+static double log2_d(double v)
+{
+    int e;
+    double m;
+    if (v >= 0.5 && v <= 2.0) return log(v) / log(2.0);
+    m = frexp(v, &e);                    /* exact for powers of two */
+    return (double)e + log(m) / log(2.0);
+}
+static double ln_d(double v) { return log(v); }
+static double log10_d(double v) { return log10(v); }
+/* log of a number that may be an integer too big for a double: f(m) + e * f(2) for x = m * 2**e
+   (CPython's loghelper); kind selects f */
+static double log_any(Value v, double (*f)(double))
+{
+    if (v.t == T_BIG && AS_BIG(v)->sign > 0) {
+        long bl = int_bitlen(v), sh = bl - 64;
+        double m;
+        Value top = sh > 0 ? int_floordiv(v, int_pow2(sh)) : v;
+        m = ldexp(int_todouble(top), (int)(-(sh > 0 ? 64 : bl)));
+        if (m >= 1.0) { m = 0.5; bl++; }
+        return f(m) + (double)bl * f(2.0);
+    }
+    if (v.t == T_BIG) domain_check(0);
+    {
+        double d = to_dbl(v);
+        domain_check(d > 0);
+        return f(d);
+    }
+}
+static Value log_arg(Args *x, int i)
+{
+    Value v = A(i);
+    if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET) v = AS_INST(v)->pay;
+    if (is_num(v)) return v;
+    return mkfloat(dbl_arg(x, i));
+}
+BI(m_log2)
+{
+    need(x, 1, 1, "log2");
+    return mkfloat(log_any(log_arg(x, 0), log2_d));
+}
+BI(m_log10)
+{
+    need(x, 1, 1, "log10");
+    return mkfloat(log_any(log_arg(x, 0), log10_d));
+}
 MATH1(m_fabs, fabs(v), 1)
 MATH1(m_degrees, v * 180.0 / 3.14159265358979323846, 1)
 MATH1(m_radians, v * 3.14159265358979323846 / 180.0, 1)
@@ -67,14 +111,13 @@ BI(m_log)
 {
     double v;
     need(x, 1, 2, "log");
-    v = dbl_arg(x, 0);
-    domain_check(v > 0);
+    v = log_any(log_arg(x, 0), ln_d);
     if (x->n == 2) {
-        double b = dbl_arg(x, 1);
-        domain_check(b > 0);
-        return mkfloat(log(v) / log(b));
+        double b = log_any(log_arg(x, 1), ln_d);
+        if (b == 0.0) throw_new(cls_ZeroDivisionError, "float division by zero");
+        return mkfloat(v / b);
     }
-    return mkfloat(log(v));
+    return mkfloat(v);
 }
 BI(m_pow)
 {
@@ -103,6 +146,34 @@ BI(m_copysign)
     a = fabs(dbl_arg(x, 0));
     b = dbl_arg(x, 1);
     return mkfloat((b < 0 || (b == 0 && 1.0 / b < 0)) ? -a : a);
+}
+static double next_after(double x, double y)
+{
+    int e;
+    double m, step, r;
+    if (x != x || y != y) return x != x ? x : y;
+    if (x == y) return y;
+    if (x == 0) return y > 0 ? ldexp(1.0, -1074) : -ldexp(1.0, -1074);
+    m = frexp(x, &e);
+    step = ldexp(1.0, e - 53);
+    if (step < ldexp(1.0, -1074)) step = ldexp(1.0, -1074);
+    if (((y > x) != (x > 0)) && fabs(m) == 0.5 && e - 54 >= -1074) step = ldexp(1.0, e - 54);
+    r = y > x ? x + step : x - step;
+    return r;
+}
+BI(m_nextafter)
+{
+    need(x, 2, 2, "nextafter");
+    return mkfloat(next_after(dbl_arg(x, 0), dbl_arg(x, 1)));
+}
+BI(m_ulp)
+{
+    double v;
+    need(x, 1, 1, "ulp");
+    v = fabs(dbl_arg(x, 0));
+    if (v != v || v > DBL_MAX) return mkfloat(v);
+    if (v == DBL_MAX) return mkfloat(v - next_after(v, 0.0));
+    return mkfloat(next_after(v, HUGE_VAL) - v);
 }
 static Value dbl_to_int(double d)
 {
@@ -208,16 +279,12 @@ BI(m_isqrt)
         while ((s + 1) * (s + 1) <= n.u.i) s++;
         return mkint(s);
     }
-    r = int_from_double(sqrt(int_todouble(n)));
+    r = int_pow2((int_bitlen(n) + 1) / 2);          /* at least sqrt(n); Newton from above */
     for (;;) {
         nr = int_floordiv(int_add(r, int_floordiv(n, r)), mkint(2));
-        if (int_cmp(nr, r) == 0) break;
-        if (int_cmp(int_sub(nr, r), mkint(1)) == 0 && int_cmp(int_mul(nr, nr), n) > 0) break;
+        if (int_cmp(nr, r) >= 0) break;
         r = nr;
     }
-    while (int_cmp(int_mul(r, r), n) > 0) r = int_sub(r, mkint(1));
-    while (int_cmp(int_mul(int_add(r, mkint(1)), int_add(r, mkint(1))), n) <= 0)
-        r = int_add(r, mkint(1));
     return r;
 }
 BI(m_comb)
@@ -263,6 +330,7 @@ BI(m_isclose)
 BI(m_fsum)
 {
     double *p = (double *)xmalloc(sizeof(double) * 64), xv, y, hi, lo = 0.0, yr;
+    double special = 0.0, inf_sum = 0.0;
     long np = 0, cap = 64, i, j, n;
     Value it, v;
     need(x, 1, 1, "fsum");
@@ -270,10 +338,19 @@ BI(m_fsum)
     VPUSH(it);
     while (iter_next(it, &v)) {
         xv = to_dbl(v);
+        if (xv - xv != 0.0) {                    /* infinity or NaN */
+            special += xv;
+            if (xv == xv) inf_sum += xv;
+            continue;
+        }
         for (i = j = 0; j < np; j++) {
             y = p[j];
             if (fabs(xv) < fabs(y)) { double t = xv; xv = y; y = t; }
             hi = xv + y;
+            if (hi - hi != 0.0) {
+                free(p);
+                throw_new(cls_OverflowError, "intermediate overflow in fsum");
+            }
             yr = hi - xv;
             lo = y - yr;
             if (lo != 0.0) p[i++] = lo;
@@ -284,6 +361,11 @@ BI(m_fsum)
         p[np++] = xv;
     }
     vsp--;
+    if (special != 0.0 || special != special) {
+        free(p);
+        if (inf_sum != inf_sum) throw_new(cls_ValueError, "-inf + inf in fsum");
+        return mkfloat(special);
+    }
     n = np;
     hi = 0.0;
     if (n > 0) {
@@ -561,26 +643,151 @@ BI(r_seed)
     return NONE_V;
 }
 BI(r_random) { (void)x; return mkfloat(rng_double()); }
+/* k random bits as an integer (any k) */
+static Value rng_bits_v(long k)
+{
+    Value r = mkint(0);
+    while (k > 0) {
+        long take = k > 24 ? 24 : k;
+        unsigned long w = (rng_next() >> 8) & 0xffffffUL;
+        w >>= 24 - take;
+        r = int_add(int_mul(r, mkint(1L << take)), mkint((long)w));
+        k -= take;
+    }
+    return r;
+}
+/* a random integer in [0, n) for n > 0 of any size */
+static Value rng_below_v(Value n)
+{
+    if (n.t == T_INT && n.u.i < 1073741824L) return mkint(rng_below(n.u.i));
+    {
+        long bits = int_bitlen(int_sub(n, mkint(1)));
+        Value r;
+        do r = rng_bits_v(bits); while (int_cmp(r, n) >= 0);
+        return r;
+    }
+}
 BI(r_randint)
 {
-    long a, b;
+    Value a, b;
     need(x, 2, 2, "randint");
-    a = to_index(A(0)); b = to_index(A(1));
-    if (b < a)
-        throw_new(cls_ValueError, "empty range for randrange() (%ld, %ld, %ld)", a, b + 1,
-        b + 1 - a);
-    return mkint(a + rng_below(b - a + 1));
+    a = need_intv(A(0), "randint"); b = need_intv(A(1), "randint");
+    if (int_cmp(b, a) < 0) {
+        Buf bf;
+        buf_init(&bf);
+        int_str(a, &bf); buf_add(&bf, ", "); int_str(int_add(b, mkint(1)), &bf);
+        throw_new(cls_ValueError, "empty range in randrange(%.200s)", bf.s);
+    }
+    return int_add(a, rng_below_v(int_add(int_sub(b, a), mkint(1))));
 }
 BI(r_randrange)
 {
-    long a = 0, b, s = 1, n;
+    Value a = mkint(0), b, s = mkint(1), n, w;
     need(x, 1, 3, "randrange");
-    if (x->n == 1) b = to_index(A(0));
-    else { a = to_index(A(0)); b = to_index(A(1)); if (x->n == 3) s = to_index(A(2)); }
-    if (s == 0) throw_new(cls_ValueError, "zero step for randrange()");
-    n = s > 0 ? (b - a + s - 1) / s : (a - b - s - 1) / (-s);
-    if (n <= 0) throw_new(cls_ValueError, "empty range for randrange()");
-    return mkint(a + s * rng_below(n));
+    if (x->n == 1) {
+        b = need_intv(A(0), "randrange");
+        if (int_sign(b) <= 0) throw_new(cls_ValueError, "empty range for randrange()");
+        return rng_below_v(b);
+    }
+    a = need_intv(A(0), "randrange"); b = need_intv(A(1), "randrange");
+    if (x->n == 3) s = need_intv(A(2), "randrange");
+    if (int_sign(s) == 0) throw_new(cls_ValueError, "zero step for randrange()");
+    w = int_sub(b, a);
+    if (int_sign(s) > 0) n = int_floordiv(int_add(w, int_sub(s, mkint(1))), s);
+    else n = int_floordiv(int_add(w, int_add(s, mkint(1))), s);
+    if (int_sign(n) <= 0) {
+        Buf bf;
+        buf_init(&bf);
+        int_str(a, &bf); buf_add(&bf, ", "); int_str(b, &bf);
+        if (!(s.t == T_INT && s.u.i == 1)) { buf_add(&bf, ", "); int_str(s, &bf); }
+        throw_new(cls_ValueError, "empty range in randrange(%.300s)", bf.s);
+    }
+    return int_add(a, int_mul(s, rng_below_v(n)));
+}
+BI(r_getrandbits)
+{
+    long k;
+    need(x, 1, 1, "getrandbits");
+    k = need_long(A(0), "k");
+    if (k < 0) throw_new(cls_ValueError, "number of bits must be non-negative");
+    return rng_bits_v(k);
+}
+BI(r_randbytes)
+{
+    long n, i;
+    char *buf;
+    Value r;
+    need(x, 1, 1, "randbytes");
+    n = need_long(A(0), "n");
+    if (n < 0) throw_new(cls_ValueError, "negative argument not allowed");
+    if (n > 400000000L) throw_new(cls_MemoryError, "");
+    buf = (char *)xmalloc((size_t)n + 1);
+    for (i = 0; i < n; i++) buf[i] = (char)((rng_next() >> 12) & 255UL);
+    r = mkbytes(buf, n);
+    free(buf);
+    return r;
+}
+/* normal deviate with the polar method (two uniforms) */
+static double rng_gauss(void)
+{
+    double u, v, q;
+    do {
+        u = 2.0 * rng_double() - 1.0;
+        v = 2.0 * rng_double() - 1.0;
+        q = u * u + v * v;
+    } while (q >= 1.0 || q == 0.0);
+    return u * sqrt(-2.0 * log(q) / q);
+}
+BI(r_gauss)
+{
+    double mu = 0.0, sigma = 1.0;
+    need(x, 0, 2, "gauss");
+    if (x->n > 0) mu = dbl_arg(x, 0);
+    if (x->n > 1) sigma = dbl_arg(x, 1);
+    return mkfloat(mu + sigma * rng_gauss());
+}
+BI(r_expovariate)
+{
+    double lambd;
+    need(x, 1, 1, "expovariate");
+    lambd = dbl_arg(x, 0);
+    if (lambd == 0.0) throw_new(cls_ZeroDivisionError, "float division by zero");
+    return mkfloat(-log(1.0 - rng_double()) / lambd);
+}
+BI(r_choices)
+{
+    Value l, kv = kwget(x, "k"), wv = kwget(x, "weights"), res;
+    long n, k = 1, i;
+    List *out;
+    need(x, 1, 3, "choices");
+    if (x->n > 1) wv = A(1);
+    if (x->n > 2) kv = A(2);
+    if (kv.t != T_UNSET) k = need_long(kv, "k");
+    l = iter_to_list(A(0));
+    VPUSH(l);
+    n = AS_LIST(l)->n;
+    if (n == 0 && k > 0) throw_new(cls_IndexError, "Cannot choose from an empty sequence");
+    out = list_new(k > 0 ? k : 0);
+    res = mklist(out);
+    VPUSH(res);
+    if (wv.t != T_UNSET && wv.t != T_NONE) {
+        Value wl = iter_to_list(wv);
+        double total = 0.0;
+        VPUSH(wl);
+        if (AS_LIST(wl)->n != n)
+            throw_new(cls_ValueError, "The number of weights does not match the population");
+        for (i = 0; i < n; i++) total += to_dbl(AS_LIST(wl)->a[i]);
+        for (i = 0; i < k; i++) {
+            double t = rng_double() * total, c = 0.0;
+            long j;
+            for (j = 0; j < n - 1; j++) { c += to_dbl(AS_LIST(wl)->a[j]); if (t < c) break; }
+            list_push(out, AS_LIST(l)->a[j]);
+        }
+    } else {
+        for (i = 0; i < k; i++) list_push(out, AS_LIST(l)->a[rng_below(n)]);
+    }
+    vsp = vsp - 2 - (wv.t != T_UNSET && wv.t != T_NONE ? 1 : 0);
+    return res;
 }
 BI(r_uniform)
 {
@@ -657,6 +864,23 @@ BI(t_clock)
     (void)x;
     return mkfloat(host_clock());
 }
+/* nanoseconds as an exact integer: whole seconds * 10**9 + the fraction */
+static Value ns_value(double t)
+{
+    double secs = floor(t);
+    return int_add(int_mul(int_from_double(secs), mkint(1000000000L)),
+                   mkint((long)((t - secs) * 1e9)));
+}
+BI(t_time_ns)
+{
+    (void)x;
+    return ns_value(host_time());
+}
+BI(t_clock_ns)
+{
+    (void)x;
+    return ns_value(host_clock());
+}
 BI(t_sleep)
 {
     double d = dbl_arg(x, 0);
@@ -709,7 +933,7 @@ static struct { const char *name; Class **var; Class **base; } exc_table[] = {
     { "UnicodeError", &cls_dummy_exc[1], &cls_ValueError },
     { "UnicodeDecodeError", &cls_UnicodeDecodeError, &cls_dummy_exc[1] },
     { "UnicodeEncodeError", &cls_dummy_exc[3], &cls_dummy_exc[1] },
-    { "MemoryError", &cls_dummy_exc[4], &cls_Exception },
+    { "MemoryError", &cls_MemoryError, &cls_Exception },
     { "ReferenceError", &cls_dummy_exc[5], &cls_Exception },
     { "BufferError", &cls_dummy_exc[6], &cls_Exception },
     { "SystemError", &cls_dummy_exc[7], &cls_Exception },
@@ -864,7 +1088,9 @@ static void init_runtime(int argc, char **argv)
     /* str */
     def_bi(cls_str, "upper", s_upper); def_bi(cls_str, "lower", s_lower);
     def_bi(cls_str, "capitalize", s_capitalize); def_bi(cls_str, "title", s_title);
-    def_bi(cls_str, "swapcase", s_swapcase); def_bi(cls_str, "strip", s_strip);
+    def_bi(cls_str, "swapcase", s_swapcase);
+    def_bi(cls_str, "translate", s_translate); def_bi(cls_str, "maketrans", s_maketrans);
+    def_bi(NULL, "ascii", bi_ascii); def_bi(cls_str, "strip", s_strip);
     def_bi(cls_str, "lstrip", s_lstrip); def_bi(cls_str, "rstrip", s_rstrip);
     def_bi(cls_str, "split", s_split); def_bi(cls_str, "rsplit", s_rsplit);
     def_bi(cls_str, "splitlines", s_splitlines); def_bi(cls_str, "join", s_join);
@@ -972,8 +1198,14 @@ static void init_runtime(int argc, char **argv)
     }
     complex_methods();
     /* numbers */
-    def_bi(cls_int, "bit_length", i_bit_length);
+    def_bi(cls_int, "bit_length", i_bit_length); def_bi(cls_int, "__index__", i_index);
     def_bi(cls_float, "is_integer", f_is_integer);
+    def_bi(cls_float, "as_integer_ratio", f_as_integer_ratio);
+    def_bi(cls_float, "hex", f_hex); def_bi(cls_float, "fromhex", f_fromhex);
+    def_bi(cls_int, "bit_count", i_bit_count);
+    def_bi(cls_int, "as_integer_ratio", i_as_integer_ratio);
+    def_bi(cls_int, "is_integer", i_is_integer);
+    def_bi(cls_range, "count", rg_count); def_bi(cls_range, "index", rg_index);
     /* generators / iterators */
     def_bi(cls_gen, "__next__", g_next); def_bi(cls_gen, "__iter__", g_iter);
     def_bi(cls_gen, "close", g_close); def_bi(cls_gen, "send", g_send);
@@ -1040,7 +1272,8 @@ static void init_runtime(int argc, char **argv)
     mod_def(m, "gcd", m_gcd); mod_def(m, "lcm", m_lcm); mod_def(m, "factorial", m_factorial);
     mod_def(m, "isqrt", m_isqrt); mod_def(m, "isnan", m_isnan); mod_def(m, "isinf", m_isinf);
     mod_def(m, "isfinite", m_isfinite); mod_def(m, "fmod", m_fmod);
-    mod_def(m, "copysign", m_copysign); mod_def(m, "degrees", m_degrees);
+    mod_def(m, "copysign", m_copysign); mod_def(m, "nextafter", m_nextafter);
+    mod_def(m, "ulp", m_ulp); mod_def(m, "degrees", m_degrees);
     mod_def(m, "radians", m_radians); mod_def(m, "comb", m_comb); mod_def(m, "prod", m_prod);
     mod_def(m, "isclose", m_isclose); mod_def(m, "fsum", m_fsum); mod_def(m, "log1p", m_log1p);
     mod_def(m, "expm1", m_expm1); mod_def(m, "erf", m_erf); mod_def(m, "erfc", m_erfc);
@@ -1061,6 +1294,9 @@ static void init_runtime(int argc, char **argv)
     mod_def(m, "choice", r_choice);
     mod_def(m, "shuffle", r_shuffle);
     mod_def(m, "sample", r_sample);
+    mod_def(m, "getrandbits", r_getrandbits); mod_def(m, "randbytes", r_randbytes);
+    mod_def(m, "gauss", r_gauss); mod_def(m, "normalvariate", r_gauss);
+    mod_def(m, "expovariate", r_expovariate); mod_def(m, "choices", r_choices);
     {
         Args seedargs;
         seedargs.n = 0; seedargs.a = NULL; seedargs.nk = 0; seedargs.kw = NULL;
@@ -1075,6 +1311,8 @@ static void init_runtime(int argc, char **argv)
     mod_def(m, "time", t_time); mod_def(m, "perf_counter", t_clock);
     mod_def(m, "monotonic", t_clock); mod_def(m, "process_time", t_clock);
     mod_def(m, "sleep", t_sleep);
+    mod_def(m, "time_ns", t_time_ns); mod_def(m, "perf_counter_ns", t_clock_ns);
+    mod_def(m, "monotonic_ns", t_clock_ns); mod_def(m, "process_time_ns", t_clock_ns);
     m = new_module("sys");
     sys_mod = m;
     av = list_new(argc + 1);

@@ -8,6 +8,17 @@ def _gcd(a, b):
     return a
 
 
+def _modinv(a, m):
+    # modular inverse by the extended Euclid algorithm (m is prime); avoids 3-argument pow
+    a = a % m
+    r0, r1, t0, t1 = m, a, 0, 1
+    while r1:
+        q = r0 // r1
+        r0, r1 = r1, r0 - q * r1
+        t0, t1 = t1, t0 - q * t1
+    return t0 % m
+
+
 class Fraction:
     def __init__(self, numerator=0, denominator=None):
         if denominator is None:
@@ -228,9 +239,12 @@ class Fraction:
 
     def _cmp(self, o):
         if isinstance(o, float):
-            a = float(self)
-            return -1 if a < o else (1 if a > o else 0)
-        b = Fraction._coerce(o)
+            if o != o or o in (float("inf"), float("-inf")):
+                return None if o != o else (1 if o < 0 else -1)
+            nn, dd = _float_ratio(o)
+            b = Fraction(nn, dd)
+        else:
+            b = Fraction._coerce(o)
         if b is None:
             return None
         x = self.numerator * b.denominator
@@ -270,9 +284,17 @@ class Fraction:
         return c >= 0
 
     def __hash__(self):
-        if self.denominator == 1:
-            return hash(self.numerator)
-        return hash((self.numerator, self.denominator))
+        # CPython's scheme: the value modulo the Mersenne prime 2**61 - 1, so that equal
+        # numbers (1, 1.0, Fraction(1, 1), Fraction(1, 2) and 0.5) hash equal
+        m = 2305843009213693951
+        d = self.denominator
+        if d % m == 0:
+            h = 314159
+        else:
+            h = hash(abs(self.numerator)) * _modinv(d, m) % m
+        if self.numerator < 0:
+            h = -h
+        return -2 if h == -1 else h
 
     def __str__(self):
         if self.denominator == 1:

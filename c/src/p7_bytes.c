@@ -212,11 +212,26 @@ BI(b_hex)
     Buf b;
     Value sepv = x->n > 1 ? A(1) : kwget(x, "sep");
     const char *sep = NULL;
+    char sepc[2] = { 0, 0 };
+    Value gv = x->n > 2 ? A(2) : kwget(x, "bytes_per_sep");
+    long grp = 1;
     bx_self(A(0), &p, &n);
     if (sepv.t == T_STR && AS_STR(sepv)->len > 0) sep = AS_STR(sepv)->s;
+    else if (sepv.t != T_UNSET && sepv.t != T_NONE && sepv.t != T_STR) {
+        const char *bp;
+        long bn;
+        if (bytes_get(sepv, &bp, &bn) && bn == 1) { sepc[0] = bp[0]; sep = sepc; }
+        else throw_new(cls_ValueError, "sep must be length 1.");
+    }
+    if (gv.t != T_UNSET && gv.t != T_NONE) grp = to_index(gv);
     buf_init(&b);
     for (i = 0; i < n; i++) {
-        if (sep && i) buf_add(&b, sep);
+        if (sep && i) {
+            /* positive: groups counted from the right, negative: from the left */
+            long k = grp > 0 ? n - i : i;
+            long g = grp < 0 ? -grp : grp;
+            if (g > 0 && k % g == 0) buf_add(&b, sep);
+        }
         sprintf(t, "%02x", (unsigned char)p[i]);
         buf_add(&b, t);
     }
@@ -292,7 +307,8 @@ static Value via_str(Args *x, BFn fn)
         long bn;
         if (a.t == T_INST && AS_INST(a)->pay.t != T_UNSET) a = AS_INST(a)->pay;
         if (bytes_get(a, &bp, &bn)) av[i] = mkstr(bp, bn);
-        else if (i > 0 && (a.t == T_INT) && a.u.i >= 0 && a.u.i < 256) {
+        else if (i == 1 && (fn == s_find || fn == s_count || fn == s_rfind) && a.t == T_INT &&
+                 a.u.i >= 0 && a.u.i < 256) {
             char ch = (char)a.u.i;
             av[i] = mkstr(&ch, 1);
         } else if (i > 0 && (a.t == T_LIST || a.t == T_TUPLE || a.t == T_GEN || a.t == T_ITER ||
@@ -486,7 +502,7 @@ BI(ba_insert)
     long i;
     int c;
     need(x, 3, 3, "insert");
-    i = to_index(A(1));
+    i = to_ssize(A(1));
     c = byte_arg(A(2));
     if (i < 0) { i += a->n; if (i < 0) i = 0; }
     if (i > a->n) i = a->n;
@@ -534,6 +550,7 @@ static int int_pack_bytes(Value v, long n, int big, int sg, char *out)
 {
     long i;
     if (int_sign(v) < 0 && !sg) return -1;
+    if (n == 0) return int_sign(v) == 0;
     if (v.t == T_INT && n <= 64) {
         unsigned long u = (unsigned long)v.u.i;
         int neg = v.u.i < 0;
@@ -544,7 +561,6 @@ static int int_pack_bytes(Value v, long n, int big, int sg, char *out)
                 if (v.u.i >= lim || v.u.i < -lim) return 0;
             }
         }
-        if (n == 0) return v.u.i == 0;
         for (i = 0; i < n; i++) {
             unsigned c;
             if (i < (long)sizeof(long)) c = (unsigned)((u >> (8 * i)) & 255UL);
@@ -576,7 +592,7 @@ static Value int_unpack_bytes(const char *p, long n, int big, int sg)
 {
     long i;
     int neg = sg && n > 0 && ((unsigned char)p[big ? 0 : n - 1] & 128);
-    if (n <= (long)sizeof(long) - 2 || (n <= 4 && !neg)) {
+    if (n < (long)sizeof(long)) {              /* fits a long, even with the sign */
         unsigned long u = 0;
         for (i = 0; i < n; i++) u = (u << 8) | (unsigned char)p[big ? i : n - 1 - i];
         if (neg) return mkint((long)u - (1L << (8 * n)));
@@ -725,6 +741,7 @@ static void struct_parse(const char *f, long fl, SFmt *sf)
         sf->it[sf->n].off = pos;
         sf->n++;
         pos += (c == 's' || c == 'p') ? cnt : size * cnt;
+        if (pos > 1000000000L) { free(sf->it); struct_err("total struct size too long"); }
     }
     sf->total = pos;
 }

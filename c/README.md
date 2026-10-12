@@ -101,8 +101,8 @@ nested-quote f-strings and `{x=}`, `print(file=)`, `%` with mapping keys, `dict 
 ## Known gaps
 
 Strings are bytes (len/index count UTF-8 bytes, case ops ASCII only); sets iterate in
-insertion order (their repr differs from CPython for mixed hash orders); `& | ^` on huge ints
-unsupported; no match statement, async, metaclass `__call__`; `r = yield from g()` (as an
+insertion order (their repr differs from CPython for mixed hash orders); `frozenset` is an alias
+of `set` (unhashable); no match statement, async, metaclass `__call__`; `r = yield from g()` (as an
 expression) and chained assignment with `yield` are not supported; no generator finalization
 on garbage collection; random does not reproduce CPython's sequence (nor numpy's);
 `math.erf/erfc/gamma/lgamma` are within about 1e-15 of libm, not bit-identical.
@@ -265,9 +265,16 @@ are arbitrary in LAPACK too and are not reproducible. (2) For n > 25 numpy's `ei
 switch to divide and conquer (`dstedc`, `dbdsdc`); this implementation keeps the QL/QR path, so
 vectors can differ in sign for large matrices. (3) `eigvalsh`/`svd(compute_uv=False)` use the
 same QL/QR iteration as with vectors (numpy uses `dsterf`/`dqds`): values agree to rounding.
-(4) `inv`/`solve` raise `LinAlgError` only for an exactly zero pivot, so a rank-deficient integer
-matrix that numpy flags as singular can still return a (meaningless) result here when rounding
-leaves a tiny nonzero pivot, and vice versa. (5) Matrices that are close to singular (condition
+(4) `inv`/`solve`/`det` use a left-looking LU in the operation order of OpenBLAS `getf2` (reciprocal
+pivot scaling, fused multiply-add dot products, gemv in groups of four columns), so they raise
+`LinAlgError: Singular matrix` for an exactly zero pivot exactly where numpy does:
+`inv([[1,2,3],[4,5,6],[7,8,9]])` is singular, as in numpy 2.5, while `[[1,2,3],[4,5,6],[7,8,10]]`
+and `[[.1,.2,.3],[.4,.5,.6],[.7,.8,.9]]` invert. Checked against numpy 2.5.3 on 3,000 random small
+integer matrices (orders 2 to 6): identical verdicts for orders 2 to 5, 7 of 613 differ at order 6
+(OpenBLAS kernel details), and the elements of the result agree to the last digits or a few ulp
+(`*_diff` tools below). The fused multiply-add is a Dekker emulation in C89 (no `fma()`).
+`pylib/numpy/linalg.py` (CREXX) has the same algorithm. Beyond a few dozen rows numpy switches to blocked algorithms and results differ in rounding.
+(5) Matrices that are close to singular (condition
 number above about 1e10) give `pinv`/`lstsq`/`cond` results that agree only to a few digits.
 
 `numpy.random`: `seed rand randn random random_sample randint choice permutation shuffle normal

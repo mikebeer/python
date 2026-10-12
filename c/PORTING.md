@@ -169,6 +169,58 @@ ints limited to +-999999999, 64-bit emulation) passes all 31 tests. This simulat
 testing against `SI_MAX` (that was the bug fixed in commit 6e4a7a5: `int(1e10)`
 and `Fraction(0.25)` saturated at 2147483647 on VM/370plus CMS, GCC 13 `-m31`).
 
+A real 32-bit `long` is available here with `gcc -m32 -msse2 -mfpmath=sse` (multilib; the x87
+default gives `-0.0`/`0.0` differences in tests 16 and 30, that is the x87, not `long`).
+`tests/tools/si32_diff.py` compares thousands of random expressions (ints around every
+boundary, big ints, floats, `str`/`repr`/`format`/`%`/`int()`/`float()`/`round`/`divmod`/`pow`,
+bit operations, `hash`, `struct`, `to_bytes`, `range`, slicing, `sort`, `dict`/`set`, `re`, `json`,
+`random` ranges ...) against CPython 3 in up to three builds:
+`python3 tests/tools/si32_diff.py -n 800 -s SEED /tmp/py64:normal /tmp/pysi:si32 /tmp/py32s:m32`
+(`-c CATS` selects categories, `--self` checks the generator against CPython). The pass that
+introduced it found and fixed (every one of these was wrong with a 32-bit `long`, or beyond
+10^18 on a 64-bit one):
+
+* `mkint` now normalises any `long` outside `+-SI_MAX` to a bigint, so a sum, product, `abs`,
+  `-x`, `int(float)`, `len` or `time_ns()` result can no longer carry a value that is not small;
+* int/float: exact `int -> float` (correct rounding, any size), exact `float -> int`, exact
+  comparison of int and float (`2**53 + 1 > 2.0**53`), correctly rounded true division of huge
+  ints, `float ** int`, `round` (also with negative digits), `math.log/log2/log10/isqrt/fsum` for
+  big ints, `float.hex/fromhex/as_integer_ratio/is_integer`, `int.bit_length/bit_count`;
+* `hash()`: CPython's scheme (value modulo 2**61-1, sign kept, -1 becomes -2, inf 314159,
+  complex `hash(re) + 1000003 * hash(im)`) for int, bool, big int, float and complex, so
+  `hash(1e10) == hash(10**10)` and `{10**10: 1}[1e10]` hold in every build; `Fraction` equality,
+  ordering and hash (`pylib/fractions.py`, also used by CREXX) are exact for floats;
+* `& | ^ ~ << >>` on ints of any size with two's complement semantics (digit arrays of 16 bits),
+  `pow(a, b, m)` for big values and negative exponents (modular inverse), `int.to_bytes`,
+  `from_bytes`, `struct` `q Q` and unsigned 4-byte `I L`, `hex/oct/bin`, `%x %o %d %e %f %g`,
+  `format` (`,` `_` grouping, `n`, `#`, precision of `%` types), `str(int)` / `int(str)` for
+  any base up to 36;
+* `range` with bounds, step and length beyond `long` (len, index, slice, `in`, `count`, `index`,
+  `reversed`, iteration, `enumerate(start=)`), `list` repeat counts, `maxsplit`, `insert`, `re`
+  `count/maxsplit/pos` (huge values clamp; above 2**63 they raise OverflowError as in CPython);
+* `random.randrange/randint/getrandbits/randbytes/choices/gauss/expovariate` with big ranges and
+  seeds, `time.time_ns/monotonic_ns/perf_counter_ns/process_time_ns`;
+* smaller things found on the way: `float('-nan')`, `-0.0 // x` and `%` signs, `1e308 ** 2`
+  (OverflowError), shortest `repr` of a float at a power of two (`2.0**122`), `'{:.3}'.format(x)`,
+  `str.split(None, n)` / `rsplit` remainders, `count('')` past the end, `bytes.split(sep, n)`,
+  `bytes.hex(sep, n)`, `reversed(bytes)`, `int.__index__`, `math.nextafter/ulp`, `repr()` and
+  `isprintable()` of non-printable non-ASCII characters.
+
+Result with `-n 800` per seed, all categories: the normal 64-bit and the `-DPY_SI32` builds
+agree with CPython except for the points listed below; the `-m32` build differs from them only by
+the 32-bit limits in the second list.
+
+Differences that remain (all builds): `frozenset` is a `set` (no hash, no equality with `set`),
+set iteration is insertion ordered, strings are UTF-8 bytes (`len`, indexing, `re` on non-ASCII
+text and case conversion beyond Latin-1/Greek/Cyrillic differ), `float('١٢٣')` (non-ASCII digits)
+fails, `statistics` results can differ from CPython's exact-fraction arithmetic by one ulp,
+`Decimal` hash, `bytearray` repr of a quote.
+
+Differences that are inherent to a 32-bit `long`: `len(range(n))` and `sys.maxsize` stay below
+2**31 (an OverflowError as with CPython on a 32-bit build), `range`-size list/str repeat counts,
+numpy integer arrays are `long` (int64 arithmetic wraps at 32 bits), `-m32` without SSE2 uses the
+x87 (extended precision, `-0.0`).
+
 Sizes and results at this revision (31 tests; measured with `wc -l` and `make`):
 
 | file | lines (cards) | bytes | note |
@@ -186,14 +238,15 @@ Sizes and results at this revision (31 tests; measured with `wc -l` and `make`):
 | `make strict` (gcc and clang syntax matrix, C99 symbol check, sanitizers) | all ok, 31 of 31 under ASan/UBSan |
 | `-DPY_SI32 -DPY_U64_EMUL` | 31 of 31 |
 | `-funsigned-char` | 31 of 31 |
+| `-m32 -msse2 -mfpmath=sse` (real 32-bit `long`) | 31 of 31 |
 | embedded library table absent (bogus `PY_LIBDIR`, empty directory) | 13 of 31 fail, so the table is used |
 
 `py_embed_all.c`, `src/pylib_embed.c`, `deck/py_deck_embed.c` and the `py_embed*` binaries are
 generated and ignored by `c/.gitignore`; `make deck-embed` rebuilds them when anything under
 `pylib/` or `src/` changes (they were regenerated for this revision with `make -B`).
 
-Not available in this environment: clang sanitizer runtime, `-m32`, a
-s390 cross compiler, GCCLIB31 headers; so none of those were run.
+`-m32 -msse2 -mfpmath=sse`: 31 of 31 and no warnings. Not available in this environment: clang
+sanitizer runtime, a s390 cross compiler, GCCLIB31 headers; so none of those were run.
 
 ## 6. Embedded libraries (`-DPY_EMBED_LIBS`)
 
@@ -237,18 +290,21 @@ based, not host-character based:
    (not `A`). Needs a translation at the boundaries (source in, output out,
    `chr`/`ord`, encode/decode) or the decision that strings are ASCII
    internally and `fwrite`/`fputs` translate on output.
-2. Control-character tests use numbers: `repr()` escapes bytes `< 32`,
-   `== 127`, `>= 127` (`p6_obj.c`), `str.isprintable` / `isascii`
-   (`p7_bi.c`), JSON encoder `c >= 32`, `c < 127` (`p7_json.c`).
+2. Control-character tests: `repr()` of `str` and `bytes`, `str.isprintable` and `ascii()` use
+   the literal set `CS_PRINT` plus the letters and digits (`ch_print`, `init_chars`), not the
+   numbers 32 and 127; non-ASCII code points are tested with a range table (`uni_nonprint`,
+   `p6_obj.c`). Still numeric: the JSON encoder (`c >= 32`, `c < 127`, `p7_json.c`, where the
+   numbers are Unicode code points, as in the JSON standard) and `\b`, `\f` there use the C
+   escapes.
 3. Sorting and comparison of `str` is `memcmp` of the bytes: EBCDIC collation
    (lower < upper < digits) differs from Python's (digits < upper < lower).
 4. `re`: ranges such as `[a-z]` compare code points; on EBCDIC they would
-   include non-letters between `i`/`j`, `r`/`s`. Case folding loops
-   `for (c = 'a'; c <= 'z'; ...)` are harmless there (unused gaps map to
-   themselves). Classes `\w \d \s` use the tables and the Unicode path
+   include non-letters between `i`/`j`, `r`/`s`. Case folding loops over the
+   literal alphabet. Classes `\w \d \s` use the tables and the Unicode path
    only for bytes >= 128.
-5. Hex digit values (`p7_json.c`, `p7_re.c`) use `'0'..'9'`, `'a'..'f'`,
-   `'A'..'F'`, which are contiguous in ASCII and EBCDIC.
+5. Hex and decimal digit values come from `digit_val` (a literal-set lookup) in `json`, `re`,
+   the lexer, `int()` and `bytes.fromhex`; the case-insensitive `re` loop runs over the literal
+   alphabet.
 6. Source files are read as bytes; UTF-8 string literals in `.py` files are
    not translated (the embedded libraries are plain ASCII except where
    noted in point 1).
@@ -268,8 +324,8 @@ based, not host-character based:
    (limit +-7e75, domain errors) is not applied here.
 9. Integers: small ints are `long` (`+-10^18` with 64-bit `long`,
    `+-999999999` with 32-bit, chosen from `LONG_MAX`; larger values are
-   bigints), `hash()` values differ from CPython on 32-bit hosts,
-   `numpy` integer arrays use `long`.
+   bigints; `mkint` converts any other `long` to a bigint), `hash()` follows CPython's
+   modular scheme in every build, `numpy` integer arrays use `long` (32 bits wide there).
 10. `sprintf`/`vsprintf` (C89 has no `snprintf`) write into fixed buffers
     with `%.Ns` precision limits; do not widen those formats.
 11. Memory: the value stack is allocated at start (`VSTACK_SIZE`), the
