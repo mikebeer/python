@@ -34,7 +34,7 @@ Uncaught exceptions print a traceback and exit with status 1.
     src/p7_bytes.c  bytes/bytearray, int.to_bytes/from_bytes, struct module
     src/p7_cplx.c   complex type, cmath module, shared libm replacements (hypot, log1p ...)
     src/p7_np.c     numpy subset: native ndarray, ufuncs, reductions, indexing, printing
-    src/p7_la.c     numpy.linalg (LU, Jacobi eigen/SVD, Householder QR, lstsq, norm ...)
+    src/p7_la.c     numpy.linalg (LU, LAPACK-style eig/eigh/svd/qr ports, lstsq, norm ...)
     src/p7_np2.c    more numpy: diff/gradient/percentile/histogram/cov/polyfit/convolve/...
     src/p7_rnd.c    numpy.random (xoshiro256**; legacy functions, default_rng, RandomState)
     src/p7_imp.c    import system (files, packages, relative imports), exec/eval/globals, os
@@ -152,9 +152,8 @@ numpy `complex128` (`ND_COMPLEX`, interleaved doubles): inference from complex l
 .imag .conj()`, `np.abs angle sqrt exp log sin cos ... real imag conj iscomplex isreal
 iscomplexobj round`, `sum mean prod cumsum cumprod std var min max any all`, indexing, `dot`/`@`,
 `polyval`, `np.roots` (real coefficients) and `np.linalg.eigvals/eig`, which return complex
-arrays when an eigenvalue is complex (eigenvalue order follows LAPACK's Schur-form positions;
-eigenvectors are unit norm with the largest component real, from inverse iteration, so they can
-differ from LAPACK in the last digits). Printing follows numpy's `ComplexFloatingFormat`.
+arrays when an eigenvalue is complex (a port of LAPACK dgeev, see numpy.linalg below, so eigenvalue
+order and eigenvector normalisation follow numpy). Printing follows numpy's `ComplexFloatingFormat`.
 Gaps: `sort argsort unique allclose array_equal count_nonzero diag trace` and `linalg.*` (other
 than `eig/eigvals`) raise `TypeError` for complex input; `complex64` is an alias of `complex128`;
 the struct half-float format `e` is not supported.
@@ -239,10 +238,37 @@ real types.
 
 `numpy.linalg`: `inv det slogdet solve cholesky eigvalsh eigh eigvals eig svd matrix_rank qr
 lstsq pinv norm cond matrix_power`, `LinAlgError`. Real double matrices only (2-d, no stacked
-matrices). `eigvals`/`eig` return complex arrays when an eigenvalue is complex (conjugate pairs
-positive imaginary part first); eigenvector signs are normalised, not LAPACK's. `svd`
-uses one-sided Jacobi (`full_matrices`, `compute_uv` supported); `qr` follows the LAPACK
-Householder sign convention (`reduced`, `complete`, `r`).
+matrices). `eigvals`/`eig` return complex arrays when an eigenvalue is complex.
+
+The decompositions are ports of the LAPACK reference algorithms numpy calls, not generic
+solvers, so that eigenvalue order and eigenvector/singular vector signs agree with numpy:
+
+| function | LAPACK path ported | notes |
+|---|---|---|
+| `eigvals`, `eig` | `dgeev`: `dgebal`, `dgehd2`/`dorghr`, `dlahqr`+`dlanv2`, `dtrevc` back-substitution, `dgeev` normalisation | same algorithm as `pylib/numpy/linalg.py` (CREXX) |
+| `eigh`, `eigvalsh` | `dsyevd` for n <= 25: `dsytd2`, `dsteqr` (QL/QR), `dormtr` | `UPLO` honoured |
+| `svd`, `pinv`, `lstsq`, `matrix_rank`, `cond`, `norm(ord=2)` | `dgesdd` small-matrix path: `dgeqr2`/`dgelq2` when `m >= 11n/6` (or `n >= 11m/6`), `dgebd2`, `dbdsqr` through `dbdsdc`, `dormbr` | `full_matrices` / `compute_uv` supported |
+| `qr` | `dgeqr2`/`dorg2r` | `reduced`, `complete`, `r` |
+
+`tests/tools/linalg_diff.py compare ./py N SEED` runs thousands of random matrices (sizes 1..10;
+dense, integer, triangular, symmetric, repeated eigenvalues, defective, permutation, companion,
+rank deficient, badly scaled, rotation blocks) through both this interpreter and real numpy and
+checks values, residuals, orthogonality and, as soft differences, LAPACK order and signs.
+
+Differences that cannot be removed: (1) numpy links an optimised BLAS (FMA kernels, different
+summation order), so a QR sweep or reflector that is decided by the last bit can end with a
+different sign or phase. About 5% of random dense nonsymmetric matrices give an eigenvector
+that differs from numpy by a sign (or a phase, for complex pairs); eigenvalues and residuals
+agree. Exactly degenerate cases (repeated eigenvalues of a defective or rank deficient matrix,
+the null space of a singular matrix, tied singular values, the vectors beyond the rank in `qr`)
+are arbitrary in LAPACK too and are not reproducible. (2) For n > 25 numpy's `eigh` and `svd`
+switch to divide and conquer (`dstedc`, `dbdsdc`); this implementation keeps the QL/QR path, so
+vectors can differ in sign for large matrices. (3) `eigvalsh`/`svd(compute_uv=False)` use the
+same QL/QR iteration as with vectors (numpy uses `dsterf`/`dqds`): values agree to rounding.
+(4) `inv`/`solve` raise `LinAlgError` only for an exactly zero pivot, so a rank-deficient integer
+matrix that numpy flags as singular can still return a (meaningless) result here when rounding
+leaves a tiny nonzero pivot, and vice versa. (5) Matrices that are close to singular (condition
+number above about 1e10) give `pinv`/`lstsq`/`cond` results that agree only to a few digits.
 
 `numpy.random`: `seed rand randn random random_sample randint choice permutation shuffle normal
 uniform standard_normal exponential poisson binomial`, `default_rng(seed)` and `RandomState(seed)`

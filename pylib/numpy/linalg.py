@@ -268,14 +268,14 @@ def _lanv2(a, b, c, d):
             z = p + math.copysign(math.sqrt(scale) * math.sqrt(z), p)
             a = d + z
             d = d - bcmax / z * bcmis
-            tau = math.hypot(c, z)
+            tau = _lapy2(c, z)
             cs = z / tau
             sn = c / tau
             b = b - c
             c = 0.0
         else:
             sigma = b + c
-            tau = math.hypot(sigma, temp)
+            tau = _lapy2(sigma, temp)
             cs = math.sqrt(0.5 * (1.0 + abs(sigma) / tau))
             sn = -(p / (tau * cs)) * _sgn(sigma)
             aa = a * cs + b * sn
@@ -322,6 +322,19 @@ def _lanv2(a, b, c, d):
     return a, b, c, d, rt1r, rt1i, rt2r, rt2i, cs, sn
 
 
+def _lapy2(x, y):
+    """LAPACK dlapy2: w * sqrt(1 + (z/w)^2); this rounding (not math.hypot) is what dlahqr's
+    sign-sensitive QR sweeps reproduce bit for bit"""
+    w = abs(x)
+    z = abs(y)
+    if z > w:
+        w, z = z, w
+    if z == 0.0 or w > 1.797693134862315708e308:
+        return w
+    q = z / w
+    return w * math.sqrt(1.0 + q * q)
+
+
 def _larfg(alpha, x):
     """LAPACK dlarfg: returns (beta, tau, v) with H = I - tau [1 v][1 v]^T"""
     xn = 0.0
@@ -329,7 +342,7 @@ def _larfg(alpha, x):
         xn = math.hypot(xn, t)
     if xn == 0.0:
         return alpha, 0.0, x
-    beta = -math.copysign(math.hypot(alpha, xn), alpha)
+    beta = -math.copysign(_lapy2(alpha, xn), alpha)
     tau = (beta - alpha) / beta
     sc = 1.0 / (alpha - beta)
     return beta, tau, [t * sc for t in x]
@@ -887,7 +900,7 @@ def _geev(m, vectors):
             for r in _range(n):
                 n1 = math.hypot(n1, vr[r][i])
                 n2 = math.hypot(n2, vr[r][i + 1])
-            sc = 1.0 / math.hypot(n1, n2)
+            sc = 1.0 / _lapy2(n1, n2)
             big = 0
             bv = -1.0
             for r in _range(n):
