@@ -827,6 +827,9 @@ typedef struct Class {
 #define CF_PROPS 2
 #define CF_BUILTIN 4
 #define CF_SETATTR 8
+/* numpy abstract scalar type (np.floating ...): isinstance by value
+   type */
+#define CF_NPABS 16
 
 typedef struct Inst { Hdr h; Class *cls; AMap a; Value pay; } Inst;
 
@@ -1118,6 +1121,7 @@ static int py_truthy(Value v);
 static Class *class_of(Value v);
 static Value *class_find(Class *c, Str *nm);
 static int class_isa(Class *c, Class *base);
+static int npabs_has(Class *abs, Class *k);
 static Value new_exc(Class *c, const char *msg);
 
 /* numpy subset (p7_np.c) hooks */
@@ -10819,8 +10823,12 @@ BI(bi_sorted)
 /* ---- objects ---------------------------------------------------- */
 static int isinst(Value v, Value c)
 {
-    if (c.t == T_CLASS) return class_isa(class_of(v), AS_CLASS(c))
-        || AS_CLASS(c) == cls_object;
+    if (c.t == T_CLASS) {
+        if (AS_CLASS(c)->flags & CF_NPABS)
+            return npabs_has(AS_CLASS(c), class_of(v));
+        return class_isa(class_of(v), AS_CLASS(c))
+            || AS_CLASS(c) == cls_object;
+    }
     if (c.t == T_TUPLE) {
         long i;
         for (i = 0; i < AS_LIST(c)->n; i++)
@@ -10842,6 +10850,8 @@ BI(bi_issubclass)
     need(x, 2, 2, "issubclass");
     if (A(0).t != T_CLASS)
         throw_new(cls_TypeError, "issubclass() arg 1 must be a class");
+    if (A(1).t == T_CLASS && (AS_CLASS(A(1))->flags & CF_NPABS))
+        return mkbool(npabs_has(AS_CLASS(A(1)), AS_CLASS(A(0))));
     if (A(1).t == T_CLASS)
         return mkbool(class_isa(AS_CLASS(A(0)), AS_CLASS(A(1))));
     if (A(1).t == T_TUPLE) {
@@ -14941,9 +14951,18 @@ static void nd_fill(Nd *r, Value v, long *pos)
         : (v.t == T_BIG ? 0 : v.u.i);
     (*pos)++;
 }
-static int parse_dtype(Value v)
+/* dtype objects (instances of numpy.dtype, one per ND_* code) */
+static Class *cls_dtype;
+static Value dt_inst[4];
+/* ND_* code for a dtype object, type, or name; -1 if not understood */
+static int dtype_lookup(Value v)
 {
-    if (v.t == T_CLASS) {
+    if (v.t == T_INST && AS_INST(v)->cls == cls_dtype) {
+        int k;
+        for (k = 0; k < 4; k++)
+            if (dt_inst[k].t == T_INST && dt_inst[k].u.o == v.u.o)
+            return k;
+    } else if (v.t == T_CLASS) {
         if (AS_CLASS(v) == cls_float) return ND_FLOAT;
         if (AS_CLASS(v) == cls_int) return ND_INT;
         if (AS_CLASS(v) == cls_bool) return ND_BOOL;
@@ -14958,23 +14977,151 @@ static int parse_dtype(Value v)
         if (!strcmp(s, "float64") || !strcmp(s, "float")
             || !strcmp(s, "f8") ||
             !strcmp(s, "float32") || !strcmp(s, "d")
-                || !strcmp(s, "f4")) return ND_FLOAT;
+                || !strcmp(s, "f4") ||
+            !strcmp(s, "float16") || !strcmp(s, "f2")
+                || !strcmp(s, "f") ||
+            !strcmp(s, "float_")
+                || !strcmp(s, "double")) return ND_FLOAT;
         if (!strcmp(s, "int64") || !strcmp(s, "int")
             || !strcmp(s, "i8") ||
             !strcmp(s, "int32") || !strcmp(s, "i4")
                 || !strcmp(s, "int16") ||
-            !strcmp(s, "int8") || !strcmp(s, "uint8")) return ND_INT;
+            !strcmp(s, "int8") || !strcmp(s, "uint8")
+                || !strcmp(s, "i") ||
+            !strcmp(s, "uint16") || !strcmp(s, "uint32")
+                || !strcmp(s, "uint64") ||
+            !strcmp(s, "uint") || !strcmp(s, "int_")
+                || !strcmp(s, "i2") ||
+            !strcmp(s, "i1") || !strcmp(s, "u1") || !strcmp(s, "u2")
+                || !strcmp(s, "u4") ||
+            !strcmp(s, "u8") || !strcmp(s, "l")) return ND_INT;
         if (!strcmp(s, "bool") || !strcmp(s, "?")
             || !strcmp(s, "bool_")) return ND_BOOL;
     }
-    throw_new(cls_TypeError, "data type not understood");
-    return 0;
+    return -1;
+}
+static int parse_dtype(Value v)
+{
+    int d = dtype_lookup(v);
+    if (d < 0) throw_new(cls_TypeError, "data type not understood");
+    return d;
 }
 static const char *dt_name(int dt)
 {
     return dt == ND_FLOAT ? "float64" : (dt == ND_INT ? "int64" :
            (dt == ND_COMPLEX ? "complex128" : "bool"));
 }
+/* dtype methods: ==  !=  hash  repr  str */
+static int dt_self(Args *x)
+{
+    int d = x->n > 0 ? dtype_lookup(A(0)) : -1;
+    if (d < 0)
+        throw_new(cls_TypeError,
+        "descriptor requires a 'numpy.dtype' object");
+    return d;
+}
+BI(dt_eq)
+{
+    int d = dt_self(x), o = x->n > 1 ? dtype_lookup(A(1)) : -1;
+    return mkbool(o >= 0 && o == d);
+}
+BI(dt_ne)
+{
+    int d = dt_self(x), o = x->n > 1 ? dtype_lookup(A(1)) : -1;
+    return mkbool(!(o >= 0 && o == d));
+}
+BI(dt_hash)
+{
+    return mkint
+        ((long)(py_hash(mkcstr(dt_name(dt_self(x)))) & 0x3fffffffUL));
+}
+BI(dt_repr)
+{
+    char t[64];
+    sprintf(t, "dtype('%s')", dt_name(dt_self(x)));
+    return mkcstr(t);
+}
+BI(dt_str)
+{
+    return mkcstr(dt_name(dt_self(x)));
+}
+BI(dt_new)
+{
+    if (x->n < 1)
+        throw_new(cls_TypeError,
+        "dtype() missing required argument 'dtype'");
+    if (A(0).t == T_NONE) return dt_inst[ND_FLOAT];
+    return dt_inst[parse_dtype(A(0))];
+}
+static void dtype_init(Module *m)
+{
+    static const char *kind[4] = { "b", "i", "f", "c" };
+    static const char *chr[4] = { "?", "l", "d", "D" };
+    static const char *str[4] = { "|b1", "<i8", "<f8", "<c16" };
+    static const int isz[4] = { 1, 8, 8, 16 };
+    Class *c = mod_class("dtype", cls_object, "numpy");
+    Class *types[4];
+    List *all = tuple_new(4);
+    Value allv = mkobj(all, T_TUPLE);
+    int k;
+    types[0] = cls_bool;
+    types[1] = cls_int;
+    types[2] = cls_float;
+    types[3] = cls_complex;
+    c->ctor = dt_new;
+    cls_dtype = c;
+    mod_val(m, "dtype", mkobj(c, T_CLASS));
+    def_bi(c, "__eq__", dt_eq);
+    def_bi(c, "__ne__", dt_ne);
+    def_bi(c, "__hash__", dt_hash);
+    def_bi(c, "__repr__", dt_repr); def_bi(c, "__str__", dt_str);
+    for (k = 0; k < 4; k++) {
+        Inst *in = new_inst(c);
+        dt_inst[k] = mkobj(in, T_INST);
+        all->a[k] = dt_inst[k];
+    }
+    amap_set(&c->ns, intern_c("_all"), allv);
+    for (k = 0; k < 4; k++) {
+        Inst *in = AS_INST(dt_inst[k]);
+        amap_set(&in->a, intern_c("name"), mkcstr(dt_name(k)));
+        amap_set(&in->a, intern_c("kind"), mkcstr(kind[k]));
+        amap_set(&in->a, intern_c("char"), mkcstr(chr[k]));
+        amap_set(&in->a, intern_c("str"), mkcstr(str[k]));
+        amap_set(&in->a, intern_c("itemsize"), mkint(isz[k]));
+        amap_set(&in->a, intern_c("type"), mkobj(types[k], T_CLASS));
+        amap_set(&in->a, intern_c("byteorder"),
+            mkcstr(k == 0 ? "|" : "="));
+    }
+}
+
+/* abstract scalar types: np.generic np.number np.integer ...; Python
+   int/float/complex/bool values are their instances (np.float64 etc.
+   are the builtin types) */
+enum {
+    NA_GENERIC, NA_NUMBER, NA_INTEGER, NA_SIGNED, NA_UNSIGNED,
+    NA_INEXACT, NA_FLOATING,
+       NA_COMPLEXF, NA_N };
+static Class *cls_npabs[NA_N];
+static int npabs_has(Class *abs, Class *k)
+{
+    int i, id = -1;
+    for (i = 0; i < NA_N; i++) if (cls_npabs[i] == abs) id = i;
+    if (id < 0) return 0;
+    if (id == NA_GENERIC)
+        return k == cls_bool || k == cls_int || k == cls_float ||
+                                k == cls_complex
+                                    || k == cls_npabs[NA_GENERIC];
+    if (k == cls_int)
+        return id == NA_NUMBER || id == NA_INTEGER || id == NA_SIGNED;
+    if (k == cls_float)
+        return id == NA_NUMBER || id == NA_INEXACT
+        || id == NA_FLOATING;
+    if (k == cls_complex)
+        return id == NA_NUMBER || id == NA_INEXACT
+        || id == NA_COMPLEXF;
+    return 0;
+}
+
 /* build an array from a python scalar / nested sequence / array
    (always a fresh copy) */
 static Nd *nd_from_value(Value v, int force)
@@ -17701,9 +17848,7 @@ static int nd_getattr(Value o, Str *nm, Value *out)
     }
     if (!strcmp(s, "ndim")) { *out = mkint(a->nd); return 1; }
     if (!strcmp(s, "size")) { *out = mkint(a->size); return 1; }
-    if (!strcmp(s, "dtype")) { *out = mkcstr(dt_name(a->dt));
-        return 1;
-    }
+    if (!strcmp(s, "dtype")) { *out = dt_inst[a->dt]; return 1; }
     if (!strcmp(s, "itemsize")) {
         *out
             = mkint(a->dt == ND_BOOL ? 1 : a->dt == ND_COMPLEX ? 16
@@ -17873,6 +18018,40 @@ static void np_init(void)
     mod_val(m, "float64", mkobj(cls_float, T_CLASS));
     mod_val(m, "int64", mkobj(cls_int, T_CLASS));
     mod_val(m, "bool_", mkobj(cls_bool, T_CLASS));
+    dtype_init(m);
+    {
+        static const char *an[NA_N] = {
+            "generic", "number", "integer", "signedinteger",
+            "unsignedinteger", "inexact", "floating",
+                "complexfloating" };
+        int i;
+        for (i = 0; i < NA_N; i++) {
+            cls_npabs[i] = mod_class(an[i], cls_object, "numpy");
+            cls_npabs[i]->flags |= CF_NPABS;
+            mod_val(m, an[i], mkobj(cls_npabs[i], T_CLASS));
+        }
+    }
+    {
+        static const char *ia[] = {
+            "int8", "int16", "uint8", "uint16", "uint32", "uint64",
+            "uint",
+                                "intp", "uintp", "intc", "short",
+                                    "ushort", "byte", "ubyte",
+                                "longlong", "ulonglong", "long", NULL }
+                                    ;
+        static const char *fa[] = {
+            "float16", "half", "single", "double", "longdouble",
+                                    "float128", NULL };
+        static const char *ca[] = {
+            "csingle", "cdouble", "clongdouble", "complex256", NULL };
+        int i;
+        for (i = 0; ia[i]; i++)
+            mod_val(m, ia[i], mkobj(cls_int, T_CLASS));
+        for (i = 0; fa[i]; i++)
+            mod_val(m, fa[i], mkobj(cls_float, T_CLASS));
+        for (i = 0; ca[i]; i++)
+            mod_val(m, ca[i], mkobj(cls_complex, T_CLASS));
+    }
     np_init2(m);
     la_init(m);
     rnd_init(m);
@@ -21910,6 +22089,24 @@ static int module_overlay(Module *md, Str *nm, Value *out)
     Value r, full;
     if (md->gp || md->name->len != 5
         || memcmp(md->name->s, "numpy", 5) != 0) return 0;
+    if (nm->len == 8 && memcmp(nm->s, "__path__", 8) == 0) {
+        /* the native numpy behaves as a package: file submodules
+           (numpy.fft ...) are looked up in <sys.path entry>/numpy;
+           native submodules (linalg, random) are found in sys.modules
+           */
+        List *pl = list_new(4);
+        Value plv = mklist(pl), sp;
+        long k;
+        VPUSH(plv);
+        for (k = 0; k < AS_LIST(sys_path_v)->n; k++) {
+            sp = AS_LIST(sys_path_v)->a[k];
+            if (sp.t == T_STR) list_push(pl, path_join_v(sp, "numpy"));
+        }
+        amap_set(&md->ns, nm, plv);
+        vsp--;
+        *out = plv;
+        return 1;
+    }
     if (nm->len >= 2 && nm->s[0] == '_' && nm->s[1] == '_') return 0;
     if (overlay_state == 1 || overlay_state == 3) return 0;
     if (overlay_state == 0) {

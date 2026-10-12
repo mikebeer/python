@@ -59,7 +59,9 @@ numpy's pairwise summation so results agree to the last digit.
   Supports arithmetic with broadcasting, `.real .imag .conj() .T`, `np.abs angle sqrt exp log sin cos ... sum mean
   prod dot`, indexing / assignment / iteration / `tolist`, numpy style printing (`[1.+2.j 3.-1.j]`, exponent form,
   wrapping). `np.roots`, `np.linalg.eigvals` / `eig` return complex results when needed (2x2 blocks ordered like
-  LAPACK's `dlanv2`). Not supported: complex `cumsum`/`sort`/`linspace` and most other helpers (TypeError).
+  LAPACK's `dlanv2`). Also `cumsum sort argsort unique diag trace count_nonzero allclose array_equal`, `isinstance(a, np.ndarray)` and `a.dtype == complex`. Not supported: complex `linspace` and most other helpers (TypeError).
+  `a.dtype` is a `str` subclass (`pylib/numpy/_dt.py`) that also compares equal to `float` / `int` / `complex` / `bool` and to dtype names.
+  `np.fft` is a lazy proxy that loads `numpy.fft` (`pylib/numpy/fft.py`), `numpy._overlay.fft` on the C interpreter.
 - Subclassing built-in types: `class X(list | dict | set | frozenset | tuple | str | int | float | bytes | bytearray |
   Exception | object)`. An instance is a native object (`K_LIST`, ...) whose `ob_c` holds the class id; instance
   attributes live in a `K_INST` holder (stem `nat_at`). Operators, `len`, `in`, iteration, `x[i]`, `repr`, `str`,
@@ -75,7 +77,8 @@ numpy's pairwise summation so results agree to the last digit.
   `create_connection create_server socketpair gethostname gethostbyname inet_aton inet_ntoa htons ntohs htonl`,
   constants, `socket.error = OSError`, `socket.timeout = TimeoutError`, `ConnectionRefusedError` and friends,
   `OSError(errno, msg)` with `.errno`, `.strerror` and `[Errno N] msg`. No UDP / IPv6 / DNS; `select.select` polls the
-  pending byte count (listening sockets always count as readable).
+  pending byte count; a listening socket is readable when a connection is waiting (it is accepted with a short
+  timeout and kept for the next `accept()`). `time.sleep` really sleeps (`rxplatform..sleep`).
 
 ## Modules and libraries
 

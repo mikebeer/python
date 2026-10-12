@@ -789,7 +789,10 @@ BI(bi_sorted)
 /* ---- objects ---------------------------------------------------------- */
 static int isinst(Value v, Value c)
 {
-    if (c.t == T_CLASS) return class_isa(class_of(v), AS_CLASS(c)) || AS_CLASS(c) == cls_object;
+    if (c.t == T_CLASS) {
+        if (AS_CLASS(c)->flags & CF_NPABS) return npabs_has(AS_CLASS(c), class_of(v));
+        return class_isa(class_of(v), AS_CLASS(c)) || AS_CLASS(c) == cls_object;
+    }
     if (c.t == T_TUPLE) {
         long i;
         for (i = 0; i < AS_LIST(c)->n; i++) if (isinst(v, AS_LIST(c)->a[i])) return 1;
@@ -807,6 +810,8 @@ BI(bi_issubclass)
 {
     need(x, 2, 2, "issubclass");
     if (A(0).t != T_CLASS) throw_new(cls_TypeError, "issubclass() arg 1 must be a class");
+    if (A(1).t == T_CLASS && (AS_CLASS(A(1))->flags & CF_NPABS))
+        return mkbool(npabs_has(AS_CLASS(A(1)), AS_CLASS(A(0))));
     if (A(1).t == T_CLASS) return mkbool(class_isa(AS_CLASS(A(0)), AS_CLASS(A(1))));
     if (A(1).t == T_TUPLE) {
         long i;

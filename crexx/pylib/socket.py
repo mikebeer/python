@@ -134,6 +134,7 @@ class socket:
         self._closed = False
         self._listening = False
         self._bound = False
+        self._pending = 0
 
     def _check(self):
         if self._closed:
@@ -196,8 +197,28 @@ class socket:
             _raise_status(st, _sock(11, self._h))
         self._listening = True
 
+    def _probe(self, ms):
+        """select(): wait up to ms milliseconds for a connection on a listening socket and keep it for accept()"""
+        if self._pending:
+            return True
+        _sock(9, self._h, ms if ms > 0 else 1)
+        h = _sock(6, self._h)
+        st = _sock(10, self._h)
+        t = self._timeout
+        _sock(9, self._h, 0 if t is None else max(1, int(t * 1000)))
+        if h > 0 and st == 0:
+            self._pending = h
+            return True
+        return False
+
     def accept(self):
         self._check()
+        if self._pending:
+            h = self._pending
+            self._pending = 0
+            s = socket(AF_INET, SOCK_STREAM, 0, h)
+            s._timeout = None
+            return (s, _split(_sock(12, h)))
         h = _sock(6, self._h)
         st = _sock(10, self._h)
         if h <= 0 or st != 0:
@@ -283,6 +304,9 @@ class socket:
     def close(self):
         if not self._closed:
             self._closed = True
+            if self._pending:
+                _sock(2, self._pending)
+                self._pending = 0
             _sock(2, self._h)
 
     def detach(self):

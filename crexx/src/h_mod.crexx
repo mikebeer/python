@@ -766,7 +766,15 @@ bcall_mod: procedure = .int
       z = ((time("US") as .int) as .float) / 1000000.0
       return mkfloat(z)
     end
-    when bid = BI_TIME_SLEEP then return NONE_OOP
+    when bid = BI_TIME_SLEEP then do
+      if na \= 1 then return nargs_err("sleep", na, 1, 1)
+      if numkind(ast[base + 1]) = 0 then return raise_exc(C_TYPEERROR, "'" || type_name(ast[base + 1]) || "' object cannot be interpreted as an integer")
+      z = tofloat(ast[base + 1])
+      if z < 0.0 then return raise_exc(C_VALUEERROR, "sleep length must be non-negative")
+      n = ival(float_to_int(z * 1000.0 + 0.5))
+      if n > 0 then st = rxplatform..sleep(n)
+      return NONE_OOP
+    end
     when bid = BI_ITERTOOLS_CHAIN then do
       o = mkiter(IT_CHAIN, 0, 0)
       ob_c[o % 2] = tup_from_ast(base + 1, base + na)

@@ -1,0 +1,8 @@
+True False True True
+True True False False True
+True True
+dtype('float64') float64 float64 f 8
+True int64
+True True False True True 3.5 7
+[(1+0j), (1+0j), (1+0j), (1+0j)] True [(1+0j), 0j]
+1.0

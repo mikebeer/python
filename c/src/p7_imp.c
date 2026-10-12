@@ -263,6 +263,22 @@ static int module_overlay(Module *md, Str *nm, Value *out)
 {
     Value r, full;
     if (md->gp || md->name->len != 5 || memcmp(md->name->s, "numpy", 5) != 0) return 0;
+    if (nm->len == 8 && memcmp(nm->s, "__path__", 8) == 0) {
+        /* the native numpy behaves as a package: file submodules (numpy.fft ...) are looked up in
+           <sys.path entry>/numpy; native submodules (linalg, random) are found in sys.modules */
+        List *pl = list_new(4);
+        Value plv = mklist(pl), sp;
+        long k;
+        VPUSH(plv);
+        for (k = 0; k < AS_LIST(sys_path_v)->n; k++) {
+            sp = AS_LIST(sys_path_v)->a[k];
+            if (sp.t == T_STR) list_push(pl, path_join_v(sp, "numpy"));
+        }
+        amap_set(&md->ns, nm, plv);
+        vsp--;
+        *out = plv;
+        return 1;
+    }
     if (nm->len >= 2 && nm->s[0] == '_' && nm->s[1] == '_') return 0;
     if (overlay_state == 1 || overlay_state == 3) return 0;
     if (overlay_state == 0) {

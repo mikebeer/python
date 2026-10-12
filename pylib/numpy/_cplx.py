@@ -5,6 +5,7 @@
 import math
 import cmath
 import numpy as np
+from numpy._dt import _dt
 
 _range = range
 
@@ -332,7 +333,7 @@ class _CArr:
 
     @property
     def dtype(self):
-        return "complex128"
+        return _dt("complex128")
 
     @property
     def T(self):
@@ -481,6 +482,32 @@ class _CArr:
     def dot(self, o):
         return dot(self, o)
 
+    def cumsum(self, axis=None, **kw):
+        return _cumsum(self, axis)
+
+    def sort(self, axis=-1, **kw):
+        r = _sort(self, axis)
+        self.re[...] = r.re
+        self.im[...] = r.im
+
+    def argsort(self, axis=-1, **kw):
+        return _argsort(self, axis)
+
+    def trace(self, **kw):
+        return _trace(self)
+
+    def diagonal(self, **kw):
+        return _diag(self)
+
+    def any(self, **kw):
+        return bool(self.__bool__())
+
+    def all(self, **kw):
+        return bool(np.all((self.re != 0) | (self.im != 0)))
+
+    def nonzero(self):
+        return np.nonzero((self.re != 0) | (self.im != 0))
+
     # --- printing
     def _words(self):
         return _fmt_all(self.re.flatten().tolist(), self.im.flatten().tolist())
@@ -573,6 +600,73 @@ def dot(a, b):
     ar, ai = _parts(a)
     br, bi = _parts(b)
     return _wrap(np.dot(ar, br) - np.dot(ai, bi), np.dot(ar, bi) + np.dot(ai, br))
+
+
+def _cumsum(a, axis=None):
+    a = a if _is_carr(a) else _from_obj(a)
+    if axis is None:
+        return _CArr(np.cumsum(a.re.flatten()), np.cumsum(a.im.flatten()))
+    return _CArr(np.cumsum(a.re, axis=axis), np.cumsum(a.im, axis=axis))
+
+
+def _key(z):
+    return (z.real, z.imag)
+
+
+def _sorted_rows(a, axis, want_idx):
+    """sort along an axis (1-d and 2-d); complex numbers order lexicographically (real, then imaginary)"""
+    a = a if _is_carr(a) else _from_obj(a)
+    nd = a.re.ndim
+    if nd == 0:
+        return a
+    if axis is None:
+        a = a.flatten()
+        nd = 1
+        axis = -1
+    if axis < 0:
+        axis += nd
+    if nd == 1:
+        z = a.tolist()
+        idx = sorted(_range(len(z)), key=lambda k: _key(z[k]))
+        if want_idx:
+            return np.array(idx)
+        return _from_obj([z[k] for k in idx])
+    if nd == 2:
+        if axis == 0:
+            r = _sorted_rows(a.T, 1, want_idx)
+            return r.T
+        rows = a.tolist()
+        out = [_sorted_rows(_from_obj(row), -1, want_idx) for row in rows]
+        if want_idx:
+            return np.array([o.tolist() for o in out])
+        return _from_obj([o.tolist() for o in out])
+    raise NotImplementedError("complex sort of arrays with more than 2 dimensions")
+
+
+def _sort(a, axis=-1):
+    return _sorted_rows(a, axis, False)
+
+
+def _argsort(a, axis=-1):
+    return _sorted_rows(a, axis, True)
+
+
+def _unique(a):
+    a = a if _is_carr(a) else _from_obj(a)
+    z = sorted(set(a.flatten().tolist()), key=_key)
+    return _from_obj(z)
+
+
+def _diag(a, k=0):
+    a = a if _is_carr(a) else _from_obj(a)
+    return _CArr(np.diag(a.re, k), np.diag(a.im, k))
+
+
+def _trace(a):
+    a = a if _is_carr(a) else _from_obj(a)
+    d = np.diag(a.re)
+    e = np.diag(a.im)
+    return complex(float(d.sum()), float(e.sum()))
 
 
 def _unary(f):
@@ -684,6 +778,20 @@ def _dispatch(name, args, kw):
     if name == "array_equal":
         r = args[0] == args[1]
         return bool(np.all(r)) if isinstance(r, np.ndarray) else bool(r)
+    if name == "cumsum":
+        return _cumsum(a, kw.get("axis", args[1] if len(args) > 1 else None))
+    if name == "sort":
+        return _sort(a, kw.get("axis", args[1] if len(args) > 1 else -1))
+    if name == "argsort":
+        return _argsort(a, kw.get("axis", args[1] if len(args) > 1 else -1))
+    if name == "unique":
+        return _unique(a)
+    if name == "diag":
+        return _diag(a, kw.get("k", args[1] if len(args) > 1 else 0))
+    if name == "trace":
+        return _trace(a)
+    if name == "count_nonzero":
+        return int(np.sum((_parts(a)[0] != 0) | (_parts(a)[1] != 0)))
     if name == "isreal":
         return _parts(a)[1] == 0
     if name == "iscomplex":

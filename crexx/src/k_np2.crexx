@@ -1347,10 +1347,15 @@ np_repr: procedure = .string
    --------------------------------------------------------------------- */
 np_attr: procedure = .int
   arg o = .int, nid = .int
+  r = .int
   if nid = M_SHAPE then return np_shape_tuple(o)
   if nid = M_NDIM then return mkint(ob_x[o % 2])
   if nid = M_SIZE then return mkint(ob_n[o % 2])
-  if nid = M_DTYPE then return mkstr(np_dtname(ob_c[o % 2]))
+  if nid = M_DTYPE then do
+    r = cx_call1_in("numpy._dt", "_dt", mkstr(np_dtname(ob_c[o % 2])))
+    if r = 0 then return 0
+    return r
+  end
   if nid = np_nidT then return np_transpose(o)
   if nid = M_REAL then return o
   return 0
@@ -1475,6 +1480,9 @@ bcall_np: procedure = .int
     do i = 1 to na
       if is_cx(ast[base + i]) = 1 then return cx_dispatch(bid, base, na, nk)
     end
+  end
+  else if na >= 1 then do
+    if is_carr(ast[base + 1]) = 1 then return cx_dispatch(bid, base, na, nk)
   end
   select
     when bid = BI_NUMPY_ARRAY | bid = BI_NUMPY_ASARRAY then do

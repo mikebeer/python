@@ -622,7 +622,11 @@ getattr_call: procedure = .int
       end
       return bind_attr(v, o, c)
     end
-    return getattr_obj(o, nid, 0)
+    v = getattr_obj(o, nid, 0)
+    /* a __getattr__ body may have run calls that left ev_self / ev_bm set */
+    ev_self = 0
+    ev_bm = 0
+    return v
   end
   if k \= K_INST then do
     if o // 2 = 0 then do

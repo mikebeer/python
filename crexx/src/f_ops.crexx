@@ -302,6 +302,7 @@ arith: procedure = .int
   if kx = K_ARRAY & ky = K_COMPLEX then return arith(op, cx_call1("_from_real", x), y)
   if kx = K_COMPLEX & ky = K_ARRAY then return arith(op, x, cx_call1("_from_real", y))
   if (kx = K_ARRAY | ky = K_ARRAY) & kx \= K_INST & ky \= K_INST & kx \= K_STR then return np_binop(op, x, y)
+  if op = O_MOD & kx = K_STR then return fmt_percent(ob_s[x % 2], y)
   if kx = K_INST | ky = K_INST then do
     if kx = K_INST then do
       m = cls_find(ob_c[x % 2], opd[op])

@@ -114,6 +114,7 @@ typedef struct Class {
 #define CF_PROPS 2
 #define CF_BUILTIN 4
 #define CF_SETATTR 8
+#define CF_NPABS 16   /* numpy abstract scalar type (np.floating ...): isinstance by value type */
 
 typedef struct Inst { Hdr h; Class *cls; AMap a; Value pay; } Inst;
 
@@ -360,6 +361,7 @@ static int py_truthy(Value v);
 static Class *class_of(Value v);
 static Value *class_find(Class *c, Str *nm);
 static int class_isa(Class *c, Class *base);
+static int npabs_has(Class *abs, Class *k);
 static Value new_exc(Class *c, const char *msg);
 
 /* numpy subset (p7_np.c) hooks */

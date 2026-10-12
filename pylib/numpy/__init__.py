@@ -315,6 +315,8 @@ def nanmedian(a, axis=None):
 
 def count_nonzero(a, axis=None):
     a = _arr(a)
+    if type(a).__name__ == '_CArr' and axis is None:
+        return sum(1 for v in a.flatten().tolist() if v)
     if axis is None:
         return sum(1 for v in a.flatten().tolist() if v)
     return (a != 0).sum(axis=axis)
@@ -800,6 +802,9 @@ def broadcast_to(a, shape):
 
 def argsort(a, axis=-1, kind=None):
     a = _arr(a)
+    if type(a).__name__ == '_CArr':
+        from numpy._cplx import _argsort
+        return _argsort(a, axis)
     if a.ndim == 1:
         v = a.tolist()
         return np.array(sorted(range(len(v)), key=lambda i: v[i]))
@@ -1142,7 +1147,10 @@ class _LazySub:
     def _load(self):
         if self._mod is None:
             import sys
-            import numpy._overlay.fft as m
+            try:
+                import numpy._overlay.fft as m
+            except ImportError:
+                import numpy.fft as m
             sys.modules['numpy.' + self._name] = m
             self._mod = m
         return self._mod
@@ -1157,6 +1165,19 @@ class _LazySub:
 
 
 fft = _LazySub('fft')
+complex128 = complex
+floating = float
+integer = int
+number = (int, float, complex)
+complexfloating = complex
+
+
+def dtype(x):
+    from numpy._dt import _dt, _canon
+    n = _canon(x)
+    if n not in ('float64', 'int64', 'complex128', 'bool'):
+        raise TypeError("data type '%s' not understood" % (x,))
+    return _dt(n)
 
 
 def roots(p):

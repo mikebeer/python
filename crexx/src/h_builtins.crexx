@@ -626,6 +626,9 @@ bi_isinstance: procedure = .int
   c = .int
   k = kind_of(ty)
   if k = K_CLASS then do
+    if sub = 0 & ob_x[ty % 2] = C_NDARRAY then do
+      if is_carr(x) = 1 then return TRUE_OOP
+    end
     if sub = 1 then c = x
     else c = cls_of(x)
     return mkbool(cls_issub(c, ob_x[ty % 2]))

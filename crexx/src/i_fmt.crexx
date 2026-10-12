@@ -476,6 +476,18 @@ fmt_percent: procedure = .int
       r = r || fmt_pad("", s, " ", ">", width)
     end
     else do
+      if kind_of(v) = K_INST then do
+        vv = 0
+        if pos(ty, "diuxXoc") > 0 then do
+          if pos(ty, "diu") > 0 then vv = cls_find(ob_c[v % 2], M___INT__)
+          if vv = 0 then vv = cls_find(ob_c[v % 2], M___INDEX__)
+        end
+        else vv = cls_find(ob_c[v % 2], M___FLOAT__)
+        if vv > 0 then do
+          v = call1(vv, v)
+          if unw > 0 then return 0
+        end
+      end
       if numkind(v) = 0 then do
         call raise_exc C_TYPEERROR, "%" || ty || " format: a real number is required, not " || type_name(v)
         return 0

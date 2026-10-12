@@ -9,6 +9,7 @@ options levelb numeric_classic
 import rxfnsb
 import rxfloat
 import rxsocket
+import rxplatform
 import _rxsysb
 @@EXPOSE@@
 

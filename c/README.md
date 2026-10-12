@@ -209,11 +209,31 @@ sort/unique/where/concatenate/stack, `dot`/`matmul` (1-d and 2-d), ufuncs, and n
 `print`/`repr` layout (line wrapping at 75 columns, `...` summaries above 1000 elements,
 scientific notation rules). Float sums use numpy's pairwise summation, so they match bit
 for bit. Gaps: slices, `reshape`, `T` and `b[0]` are copies, not views (`b[0][1] = x` does not
-modify `b`); no `dtype` objects (`a.dtype` is a string, `np.float64` is the builtin `float`),
-no float32/int32 (the names alias float64/int64), N-d `matmul` and multi-array fancy indexing
+modify `b`); no float32/int32 (the names alias float64/int64; see dtype objects below), N-d `matmul` and multi-array fancy indexing
 are unsupported, `a.round()` on reduction results works through a `float.round` method that
 is installed on `import numpy`; float matmul does not use BLAS so it can differ in the last
 digits from numpy.
+
+### Package behaviour, dtype objects, scalar types
+
+The native `numpy` module has a `__path__` (`<sys.path entry>/numpy` for every entry), so file
+submodules in `pylib/numpy/` resolve: `import numpy.fft`, `from numpy.fft import fft`, `from numpy
+import fft`, `import scipy.fft`. Native submodules (`linalg`, `random`) are already in
+`sys.modules`; the existing overlay (`numpy._overlay`, module_overlay in p7_imp.c) still supplies
+missing attributes and is untouched.
+
+`a.dtype` is a `numpy.dtype` instance (one singleton per bool/int64/float64/complex128): `repr`
+`dtype('float64')`, `str` `float64`, `.name .kind .char .str .itemsize .type`, `hash`, and `==`
+against another dtype, a type (`float int complex bool np.float64 ...`) or a name string
+(`'complex128'`, `'f8'`, ...); `np.dtype(x)`, and dtype objects are accepted as `dtype=`.
+`np.float64 np.int64 np.complex128 np.bool_` are the builtin `float int complex bool`, so
+`np.float64(3.5)` is a plain `float`, and reductions return plain Python numbers
+(`type(np.array([1.5]).sum())` is `float`, `type(np.array([1]).sum())` is `int`; numpy gives
+`np.float64` / `np.int64`). The abstract classes `np.generic number integer signedinteger
+unsignedinteger inexact floating complexfloating` exist; `isinstance`/`issubclass` answer by value
+type, so `isinstance(1.5, np.floating)` and `isinstance(1, np.integer)` are True (numpy says False
+for Python scalars, True for numpy scalars). Sized names (`int8 uint8 float32 ...`) alias the four
+real types.
 
 ### numpy.linalg and numpy.random (src/p7_la.c, src/p7_rnd.c)
 

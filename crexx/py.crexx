@@ -9,6 +9,7 @@ options levelb numeric_classic
 import rxfnsb
 import rxfloat
 import rxsocket
+import rxplatform
 import _rxsysb
 namespace py expose rc_exit obuf h_out h_err h_in stdin_eof rnd_s nsargs,
    sargs wsch nameboot clsboot bboot aliasboot kwlist ops2 tx tlen tp,
@@ -5118,6 +5119,7 @@ arith: procedure = .int
   if kx = 29 & ky = 32 then return arith(op, cx_call1("_from_real", x), y)
   if kx = 32 & ky = 29 then return arith(op, x, cx_call1("_from_real", y))
   if (kx = 29 | ky = 29) & kx \= 17 & ky \= 17 & kx \= 6 then return np_binop(op, x, y)
+  if op = 6 & kx = 6 then return fmt_percent(ob_s[x % 2], y)
   if kx = 17 | ky = 17 then do
     if kx = 17 then do
       m = cls_find(ob_c[x % 2], opd[op])
@@ -6629,7 +6631,11 @@ getattr_call: procedure = .int
       end
       return bind_attr(v, o, c)
     end
-    return getattr_obj(o, nid, 0)
+    v = getattr_obj(o, nid, 0)
+    /* a __getattr__ body may have run calls that left ev_self / ev_bm set */
+    ev_self = 0
+    ev_bm = 0
+    return v
   end
   if k \= 17 then do
     if o // 2 = 0 then do
@@ -10205,6 +10211,9 @@ bi_isinstance: procedure = .int
   c = .int
   k = kind_of(ty)
   if k = 16 then do
+    if sub = 0 & ob_x[ty % 2] = 95 then do
+      if is_carr(x) = 1 then return 4
+    end
     if sub = 1 then c = x
     else c = cls_of(x)
     return mkbool(cls_issub(c, ob_x[ty % 2]))
@@ -13140,7 +13149,15 @@ bcall_mod: procedure = .int
       z = ((time("US") as .int) as .float) / 1000000.0
       return mkfloat(z)
     end
-    when bid = 103 then return 2
+    when bid = 103 then do
+      if na \= 1 then return nargs_err("sleep", na, 1, 1)
+      if numkind(ast[base + 1]) = 0 then return raise_exc(38, "'" || type_name(ast[base + 1]) || "' object cannot be interpreted as an integer")
+      z = tofloat(ast[base + 1])
+      if z < 0.0 then return raise_exc(36, "sleep length must be non-negative")
+      n = ival(float_to_int(z * 1000.0 + 0.5))
+      if n > 0 then st = rxplatform..sleep(n)
+      return 2
+    end
     when bid = 104 then do
       o = mkiter(15, 0, 0)
       ob_c[o % 2] = tup_from_ast(base + 1, base + na)
@@ -14806,6 +14823,18 @@ fmt_percent: procedure = .int
       r = r || fmt_pad("", s, " ", ">", width)
     end
     else do
+      if kind_of(v) = 17 then do
+        vv = 0
+        if pos(ty, "diuxXoc") > 0 then do
+          if pos(ty, "diu") > 0 then vv = cls_find(ob_c[v % 2], 161)
+          if vv = 0 then vv = cls_find(ob_c[v % 2], 159)
+        end
+        else vv = cls_find(ob_c[v % 2], 149)
+        if vv > 0 then do
+          v = call1(vv, v)
+          if unw > 0 then return 0
+        end
+      end
       if numkind(v) = 0 then do
         call raise_exc 38, "%" || ty || " format: a real number is required, not " || type_name(v)
         return 0
@@ -17949,10 +17978,15 @@ np_repr: procedure = .string
    --------------------------------------------------------------------- */
 np_attr: procedure = .int
   arg o = .int, nid = .int
+  r = .int
   if nid = 104 then return np_shape_tuple(o)
   if nid = 76 then return mkint(ob_x[o % 2])
   if nid = 105 then return mkint(ob_n[o % 2])
-  if nid = 28 then return mkstr(np_dtname(ob_c[o % 2]))
+  if nid = 28 then do
+    r = cx_call1_in("numpy._dt", "_dt", mkstr(np_dtname(ob_c[o % 2])))
+    if r = 0 then return 0
+    return r
+  end
   if nid = np_nidT then return np_transpose(o)
   if nid = 87 then return o
   return 0
@@ -18077,6 +18111,9 @@ bcall_np: procedure = .int
     do i = 1 to na
       if is_cx(ast[base + i]) = 1 then return cx_dispatch(bid, base, na, nk)
     end
+  end
+  else if na >= 1 then do
+    if is_carr(ast[base + 1]) = 1 then return cx_dispatch(bid, base, na, nk)
   end
   select
     when bid = 136 | bid = 137 then do
@@ -19951,12 +19988,32 @@ is_cx: procedure = .int
   end
   return 0
 
+/* a _CArr instance (complex128 array) */
+is_carr: procedure = .int
+  arg v = .int
+  if v // 2 \= 0 then return 0
+  if ob_k[v % 2] = 17 then do
+    if cl_name[ob_c[v % 2]] == "_CArr" then return 1
+  end
+  return 0
+
 cx_func: procedure = .int
   arg fname = .string
   m = .int
   m = import_mod("numpy._cplx")
   if m = 0 then return 0
   return getattr_obj(m, nameid(fname), 0)
+
+/* call function fname of module mname with one argument */
+cx_call1_in: procedure = .int
+  arg mname = .string, fname = .string, a = .int
+  m = .int
+  f = .int
+  m = import_mod(mname)
+  if m = 0 then return 0
+  f = getattr_obj(m, nameid(fname), 0)
+  if f = 0 then return 0
+  return call1(f, a)
 
 cx_call1: procedure = .int
   arg fname = .string, a = .int
