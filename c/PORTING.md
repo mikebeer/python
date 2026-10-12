@@ -25,7 +25,7 @@ On the build host (needs `python3` only for the generator tools; the C
 sources need nothing):
 
     make posix            # development build, ./py (uses pylib/ on disk)
-    make test             # 31 tests
+    make test             # 32 tests
     make embed            # ./py_embed with pylib/ compiled in (-DPY_EMBED_LIBS)
     make embed-test       # runs the tests from an EMPTY directory, PYLIB unset, bogus PY_LIBDIR
     make deck             # deck/py_deck.c, every line <= 71 columns
@@ -164,7 +164,7 @@ with `-DPY_U64_EMUL`, and the emulation checked against 64-bit arithmetic on
 made overridable.
 
 Simulating a 32-bit `long` on a 64-bit host: `-DPY_SI32 -DPY_U64_EMUL` (small
-ints limited to +-999999999, 64-bit emulation) passes all 31 tests. This simulation limits the small-int range but the host
+ints limited to +-999999999, 64-bit emulation) passes all 32 tests. This simulation limits the small-int range but the host
 `long` stays 64 bits, so it does not catch code that casts a double to `long` without
 testing against `SI_MAX` (that was the bug fixed in commit 6e4a7a5: `int(1e10)`
 and `Fraction(0.25)` saturated at 2147483647 on VM/370plus CMS, GCC 13 `-m31`).
@@ -221,31 +221,31 @@ Differences that are inherent to a 32-bit `long`: `len(range(n))` and `sys.maxsi
 numpy integer arrays are `long` (int64 arithmetic wraps at 32 bits), `-m32` without SSE2 uses the
 x87 (extended precision, `-0.0`).
 
-Sizes and results at this revision (31 tests; measured with `wc -l` and `make`):
+Sizes and results at this revision (32 tests; measured with `wc -l` and `make`):
 
 | file | lines (cards) | bytes | note |
 |---|---|---|---|
-| `src/*.c` without `pylib_embed.c` | 27,766 | | 23 files, longest line 100 |
-| `py_all.c` | 27,766 | | amalgamation |
-| `deck/py_deck.c` | 31,708 | 995,683 | the deck, checked in |
-| `src/pylib_embed.c` | 57,490 | | `pylib/` as byte arrays, 68 files, 1.15 MB of Python |
-| `deck/py_deck_embed.c` | 89,198 | 5,037,787 | deck with the library, made by `make deck-embed` |
+| `src/*.c` without `pylib_embed.c` | 29,708 | | 23 files, longest line 100 |
+| `py_all.c` | 29,708 | | amalgamation |
+| `deck/py_deck.c` | 33,960 | 1,070,050 | the deck, checked in |
+| `src/pylib_embed.c` | 57,760 | | `pylib/` as byte arrays, 68 files, 1.15 MB of Python |
+| `deck/py_deck_embed.c` | 91,720 | 5,131,323 | deck with the library, made by `make deck-embed` |
 
 | check | result |
 |---|---|
-| `make test`, `deck-test`, `embed-test`, `deck-embed-test` | 31 of 31 each |
+| `make test`, `deck-test`, `embed-test`, `deck-embed-test` | 32 of 32 each |
 | `make deckcheck`, `make linecheck` | ok |
-| `make strict` (gcc and clang syntax matrix, C99 symbol check, sanitizers) | all ok, 31 of 31 under ASan/UBSan |
-| `-DPY_SI32 -DPY_U64_EMUL` | 31 of 31 |
-| `-funsigned-char` | 31 of 31 |
-| `-m32 -msse2 -mfpmath=sse` (real 32-bit `long`) | 31 of 31 |
-| embedded library table absent (bogus `PY_LIBDIR`, empty directory) | 13 of 31 fail, so the table is used |
+| `make strict` (gcc and clang syntax matrix, C99 symbol check, sanitizers) | all ok, 32 of 32 under ASan/UBSan |
+| `-DPY_SI32 -DPY_U64_EMUL` | 32 of 32 |
+| `-funsigned-char` | 32 of 32 |
+| `-m32 -msse2 -mfpmath=sse` (real 32-bit `long`) | 32 of 32 |
+| embedded library table absent (bogus `PY_LIBDIR`, empty directory) | 13 of 32 fail, so the table is used |
 
 `py_embed_all.c`, `src/pylib_embed.c`, `deck/py_deck_embed.c` and the `py_embed*` binaries are
 generated and ignored by `c/.gitignore`; `make deck-embed` rebuilds them when anything under
 `pylib/` or `src/` changes (they were regenerated for this revision with `make -B`).
 
-`-m32 -msse2 -mfpmath=sse`: 31 of 31 and no warnings. Not available in this environment: clang
+`-m32 -msse2 -mfpmath=sse`: 32 of 32 and no warnings. Not available in this environment: clang
 sanitizer runtime, a s390 cross compiler, GCCLIB31 headers; so none of those were run.
 
 ## 6. Embedded libraries (`-DPY_EMBED_LIBS`)
@@ -363,3 +363,15 @@ based, not host-character based:
   32-bit `long`): that run found the `SI_MAX` defect above (10_misc, 19_modules), fixed in
   commit 6e4a7a5; its complete result is not recorded here. Otherwise not run on any
   non-x86-64 platform.
+
+## Sets and hashes
+
+`set` / `frozenset` emulate CPython's table (`src/p0_base.c`, section "sets"; the operations are in
+`src/p6_obj.c` and `src/p7_bi.c`) so that the iteration order of sets of ints (and bool, None,
+float, complex, tuples and frozensets of those) equals CPython 3.13's. This needs the CPython
+values of `hash()`: ints, floats, complex and `None` already had them, `tuple` now uses the
+xxHash scheme and `frozenset` the `_shuffle_bits` scheme. Both need a 64-bit `unsigned long`
+(constants are guarded by `ULONG_MAX`); with a 32-bit one (VM/370) they are self-consistent
+32-bit variants, the sets work the same but the iteration order of colliding keys can differ
+from CPython. `Decimal.__hash__` (`pylib/decimal.py`) uses the same modulo-(2**61-1) scheme as
+`Fraction`.

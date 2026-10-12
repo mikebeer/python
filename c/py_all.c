@@ -703,6 +703,13 @@ typedef struct Dict {
     DEnt *e;
     long *idx;       /* hash index, -1 empty, -2 deleted */
     long isz;
+    /* sets only: a set is either a CPython-compatible open-addressing table (idx == NULL: e has
+       cap slots, used == cap, empty and dummy slots have k.t == T_UNSET, dummy has v.t == T_NONE)
+       or, once it holds a key whose CPython hash is not reproducible, insertion ordered like a
+       dict (idx != NULL) */
+    long fill;       /* table mode: active + dummy slots */
+    long finger;     /* table mode: set.pop() search position */
+    int frozen;      /* frozenset */
 } Dict;
 
 typedef struct AMap {
@@ -1342,6 +1349,7 @@ static Dict *dict_new_t(int type)
 {
     Dict *d = (Dict *)gc_alloc(sizeof(Dict), type);
     d->n = 0; d->used = 0; d->cap = 0; d->e = NULL; d->idx = NULL; d->isz = 0;
+    d->fill = 0; d->finger = 0; d->frozen = 0;
     return d;
 }
 static Dict *dict_new(void)
@@ -1400,9 +1408,8 @@ static int dict_get(Dict *d, Value k, Value *out)
     *out = d->e[e].v;
     return 1;
 }
-static void dict_set(Dict *d, Value k, Value v)
+static void dict_set_h(Dict *d, Value k, Value v, unsigned long h)
 {
-    unsigned long h = py_hash(k);
     long e = dict_find(d, k, h);
     long i;
     if (e >= 0) { d->e[e].v = v; return; }
@@ -1419,9 +1426,12 @@ static void dict_set(Dict *d, Value k, Value v)
     d->used++;
     d->n++;
 }
-static int dict_del(Dict *d, Value k)
+static void dict_set(Dict *d, Value k, Value v)
 {
-    unsigned long h = py_hash(k);
+    dict_set_h(d, k, v, py_hash(k));
+}
+static int dict_del_h(Dict *d, Value k, unsigned long h)
+{
     long e = dict_find(d, k, h);
     long i;
     if (e < 0) return 0;
@@ -1433,14 +1443,318 @@ static int dict_del(Dict *d, Value k)
     d->n--;
     return 1;
 }
+static int dict_del(Dict *d, Value k)
+{
+    return dict_del_h(d, k, py_hash(k));
+}
 static void dict_clear(Dict *d)
 {
     free(d->e); free(d->idx);
     d->e = NULL; d->idx = NULL; d->n = d->used = d->cap = d->isz = 0;
+    d->fill = 0;
+}
+
+/* ---- sets ---------------------------------------------------------------
+   A set emulates CPython's setobject.c so that the iteration order of sets of ints (and of
+   anything else with a reproducible hash: bool, None, float, complex, tuples and frozensets of
+   those) is the same as in CPython: open addressing, LINEAR_PROBES = 9, perturb shift 5, dummy
+   slots after a discard, the table grows x4 (x2 above 50000 entries) when fill reaches 3/5 of
+   the slots.  The emulation is exact when unsigned long has 64 bits (the hashes are then the
+   CPython values).  Strings, bytes and objects hash differently in CPython on every run, so a
+   set that receives such a key switches to insertion order (dict mode, idx != NULL). */
+#define SET_MINSIZE 8L
+#define SET_LINEAR 9UL
+#define SET_SHIFT 5
+#define SE_EMPTY(e) ((e)->k.t == T_UNSET && (e)->v.t == T_UNSET)
+#define SE_ACTIVE(e) ((e)->k.t != T_UNSET)
+#define SET_ORDERED(d) ((d)->idx != NULL)
+
+/* is the CPython hash of k reproducible (the same in every run)? */
+static int key_det(Value k)
+{
+    switch (k.t) {
+    case T_NONE: case T_BOOL: case T_INT: case T_BIG: case T_FLOAT: case T_COMPLEX: return 1;
+    case T_TUPLE: {
+        List *l = (List *)k.u.o;
+        long i;
+        for (i = 0; i < l->n; i++) if (!key_det(l->a[i])) return 0;
+        return 1; }
+    case T_SET: {
+        Dict *d = (Dict *)k.u.o;
+        long i;
+        if (!d->frozen) return 0;
+        for (i = 0; i < d->used; i++)
+            if (d->e[i].k.t != T_UNSET && !key_det(d->e[i].k)) return 0;
+        return 1; }
+    default: return 0;
+    }
+}
+static int set_keyeq(Value ek, Value k)
+{
+    if (ek.t == T_INT && k.t == T_INT) return ek.u.i == k.u.i;
+    if (IS_HEAP(ek.t) && ek.t == k.t && ek.u.o == k.u.o) return 1;
+    if (ek.t == T_STR && k.t == T_STR)
+        return AS_STR(ek)->len == AS_STR(k)->len &&
+               memcmp(AS_STR(ek)->s, AS_STR(k)->s, (size_t)AS_STR(k)->len) == 0;
+    return py_eq(ek, k);
+}
+static void set_alloc_table(Dict *d, long size)
+{
+    long i;
+    DEnt *t = (DEnt *)xmalloc(sizeof(DEnt) * (size_t)size);
+    for (i = 0; i < size; i++) { t[i].k.t = T_UNSET; t[i].v.t = T_UNSET; t[i].hash = 0; }
+    GC_ACCOUNT(sizeof(DEnt) * (size_t)size);
+    d->e = t;
+    d->cap = d->used = size;
+}
+static unsigned long set_mask(Dict *d)
+{
+    return d->cap ? (unsigned long)d->cap - 1UL : (unsigned long)SET_MINSIZE - 1UL;
+}
+static void set_insert_clean(DEnt *tab, unsigned long mask, Value k, unsigned long h)
+{
+    unsigned long perturb = h, i = h & mask, j;
+    DEnt *e;
+    for (;;) {
+        e = tab + i;
+        if (SE_EMPTY(e)) break;
+        if (i + SET_LINEAR <= mask) {
+            for (j = 0; j < SET_LINEAR; j++) {
+                e++;
+                if (SE_EMPTY(e)) break;
+            }
+            if (j < SET_LINEAR) break;
+        }
+        perturb >>= SET_SHIFT;
+        i = (i * 5UL + 1UL + perturb) & mask;
+    }
+    e->k = k; e->v = NONE_V; e->hash = h;
+}
+/* CPython's set_table_resize: the smallest power of two > minused (at least 8) */
+static void set_resize(Dict *d, long minused)
+{
+    long newsize = SET_MINSIZE, i, oldsize = d->cap;
+    DEnt *old = d->e;
+    while (newsize <= minused) newsize <<= 1;
+    if (newsize == SET_MINSIZE && oldsize <= SET_MINSIZE && d->fill == d->n) return;
+    set_alloc_table(d, newsize);
+    for (i = 0; i < oldsize; i++)
+        if (SE_ACTIVE(old + i))
+            set_insert_clean(d->e, (unsigned long)newsize - 1UL, old[i].k, old[i].hash);
+    free(old);
+    d->fill = d->n;
+}
+/* a table mode set becomes insertion ordered (keeps the entries in table order) */
+static void set_to_ordered(Dict *d)
+{
+    DEnt *old = d->e;
+    long i, oldsize = d->cap;
+    d->e = NULL; d->idx = NULL; d->n = d->used = d->cap = d->isz = 0; d->fill = 0;
+    for (i = 0; i < oldsize; i++)
+        if (SE_ACTIVE(old + i)) dict_set_h(d, old[i].k, NONE_V, old[i].hash);
+    free(old);
+    if (!d->idx) dict_rebuild(d, 4);        /* an empty set that switched: stay in dict mode */
+}
+/* index of the entry holding k, -1 if absent (table mode and dict mode) */
+static long set_find(Dict *d, Value k, unsigned long h)
+{
+    unsigned long mask, perturb = h, i, probes;
+    DEnt *e, *tab;
+    if (SET_ORDERED(d)) return dict_find(d, k, h);
+    if (!d->e) return -1;
+    mask = (unsigned long)d->cap - 1UL;
+restart:
+    tab = d->e;
+    i = h & mask;
+    perturb = h;
+    for (;;) {
+        e = tab + i;
+        probes = (i + SET_LINEAR <= mask) ? SET_LINEAR : 0;
+        do {
+            if (SE_EMPTY(e)) return -1;
+            if (SE_ACTIVE(e) && e->hash == h) {
+                Value ek = e->k;
+                if (set_keyeq(ek, k)) return (long)(e - tab);
+                if (d->e != tab || !SE_ACTIVE(e)) goto restart;
+            }
+            e++;
+        } while (probes--);
+        perturb >>= SET_SHIFT;
+        i = (i * 5UL + 1UL + perturb) & mask;
+    }
+}
+static int set_has_h(Dict *d, Value k, unsigned long h)
+{
+    return set_find(d, k, h) >= 0;
+}
+/* CPython's set_add_entry */
+static void set_add_h(Dict *d, Value k, unsigned long h)
+{
+    unsigned long mask, perturb, i, probes;
+    DEnt *e, *freeslot, *tab;
+    if (SET_ORDERED(d)) { dict_set_h(d, k, NONE_V, h); return; }
+    if (!key_det(k)) {
+        if (set_find(d, k, h) >= 0) return;
+        set_to_ordered(d);
+        dict_set_h(d, k, NONE_V, h);
+        return;
+    }
+    if (!d->e) set_alloc_table(d, SET_MINSIZE);
+restart:
+    tab = d->e;
+    mask = (unsigned long)d->cap - 1UL;
+    i = h & mask;
+    freeslot = NULL;
+    perturb = h;
+    for (;;) {
+        e = tab + i;
+        probes = (i + SET_LINEAR <= mask) ? SET_LINEAR : 0;
+        do {
+            if (SE_EMPTY(e)) goto unused;
+            if (SE_ACTIVE(e)) {
+                if (e->hash == h) {
+                    if (set_keyeq(e->k, k)) return;
+                    if (d->e != tab || !SE_ACTIVE(e)) goto restart;
+                }
+            } else freeslot = e;       /* CPython 3.13: the last dummy seen, not the first */
+            e++;
+        } while (probes--);
+        perturb >>= SET_SHIFT;
+        i = (i * 5UL + 1UL + perturb) & mask;
+    }
+unused:
+    if (freeslot) {
+        d->n++;
+        freeslot->k = k; freeslot->v = NONE_V; freeslot->hash = h;
+        return;
+    }
+    d->fill++;
+    d->n++;
+    e->k = k; e->v = NONE_V; e->hash = h;
+    if ((unsigned long)d->fill * 5UL < mask * 3UL) return;
+    set_resize(d, d->n > 50000L ? d->n * 2 : d->n * 4);
+}
+/* hash used for membership tests: a (non frozen) set is looked up by its frozenset hash */
+static unsigned long fset_hash(Dict *d);
+static unsigned long set_key_hash(Value k)
+{
+    if (k.t == T_SET) return fset_hash(AS_DICT(k));
+    return py_hash(k);
 }
 static void set_add(Dict *d, Value k)
 {
-    dict_set(d, k, NONE_V);
+    set_add_h(d, k, py_hash(k));
+}
+static int set_has(Dict *d, Value k)
+{
+    return set_find(d, k, set_key_hash(k)) >= 0;
+}
+/* remove k; 1 if it was there */
+static int set_discard_h(Dict *d, Value k, unsigned long h)
+{
+    long i = set_find(d, k, h);
+    if (i < 0) return 0;
+    if (SET_ORDERED(d)) return dict_del_h(d, d->e[i].k, h);
+    d->e[i].k = UNSET_V;
+    d->e[i].v = NONE_V;         /* dummy */
+    d->n--;
+    return 1;
+}
+static int set_discard(Dict *d, Value k)
+{
+    return set_discard_h(d, k, set_key_hash(k));
+}
+/* CPython's frozenset hash: xor of the shuffled entry hashes, then mixed with the size */
+static unsigned long set_shuffle(unsigned long h)
+{
+    return ((h ^ 89869747UL) ^ (h << 16)) * 3644798167UL;
+}
+static unsigned long fset_hash(Dict *d)
+{
+    unsigned long h = 0;
+    long i;
+    for (i = 0; i < d->used; i++)
+        if (SE_ACTIVE(d->e + i)) h ^= set_shuffle(d->e[i].hash);
+    h ^= ((unsigned long)d->n + 1UL) * 1927868237UL;
+    h ^= (h >> 11) ^ (h >> 25);
+    h = h * 69069UL + 907133923UL;
+    if (h == (unsigned long)-1L) h = 590923713UL;
+    return h;
+}
+/* empty the set and give back its table (CPython: the table shrinks to the minimum) */
+static void set_clear(Dict *d)
+{
+    dict_clear(d);
+}
+/* exchange the contents of two sets (set_swap_bodies) */
+static void set_swap(Dict *a, Dict *b)
+{
+    Dict t;
+    t.n = a->n; t.used = a->used; t.cap = a->cap; t.e = a->e; t.idx = a->idx; t.isz = a->isz;
+    t.fill = a->fill;
+    a->n = b->n; a->used = b->used; a->cap = b->cap; a->e = b->e; a->idx = b->idx; a->isz = b->isz;
+    a->fill = b->fill;
+    b->n = t.n; b->used = t.used; b->cap = t.cap; b->e = t.e; b->idx = t.idx; b->isz = t.isz;
+    b->fill = t.fill;
+}
+/* CPython's set_merge: add every element of other to so */
+static void set_merge(Dict *so, Dict *other)
+{
+    long i;
+    unsigned long mask;
+    if (so == other || other->n == 0) return;
+    if (SET_ORDERED(so) || SET_ORDERED(other)) {
+        for (i = 0; i < other->used; i++)
+            if (SE_ACTIVE(other->e + i)) set_add_h(so, other->e[i].k, other->e[i].hash);
+        return;
+    }
+    mask = set_mask(so);
+    if ((unsigned long)(so->fill + other->n) * 5UL >= mask * 3UL)
+        set_resize(so, (so->n + other->n) * 2);
+    if (!so->e) set_alloc_table(so, SET_MINSIZE);
+    mask = set_mask(so);
+    if (so->fill == 0 && mask == set_mask(other) && other->fill == other->n) {
+        for (i = 0; i < other->used; i++) so->e[i] = other->e[i];
+        so->fill = other->fill;
+        so->n = other->n;
+        return;
+    }
+    if (so->fill == 0) {
+        so->fill = other->n;
+        so->n = other->n;
+        for (i = 0; i < other->used; i++)
+            if (SE_ACTIVE(other->e + i))
+                set_insert_clean(so->e, mask, other->e[i].k, other->e[i].hash);
+        return;
+    }
+    for (i = 0; i < other->used; i++)
+        if (SE_ACTIVE(other->e + i)) set_add_h(so, other->e[i].k, other->e[i].hash);
+}
+/* CPython's set.pop: the search starts where the last pop stopped */
+static int set_pop(Dict *d, Value *out)
+{
+    long i;
+    if (d->n == 0) return 0;
+    if (SET_ORDERED(d)) {
+        for (i = 0; i < d->used; i++)
+            if (SE_ACTIVE(d->e + i)) {
+                *out = d->e[i].k;
+                dict_del_h(d, *out, d->e[i].hash);
+                return 1;
+            }
+        return 0;
+    }
+    i = d->finger & (d->cap - 1);
+    while (!SE_ACTIVE(d->e + i)) {
+        i++;
+        if (i >= d->cap) i = 0;
+    }
+    *out = d->e[i].k;
+    d->e[i].k = UNSET_V;
+    d->e[i].v = NONE_V;
+    d->n--;
+    d->finger = i + 1;
+    return 1;
 }
 
 /* ---- garbage collector (mark and sweep) ------------------------------- */
@@ -2395,9 +2709,9 @@ static unsigned long hash_fold(Value h)
     if (h.t != T_BIG) return (unsigned long)h.u.i;
     {
         Big *g = AS_BIG(h);
-        unsigned long x = 7;
+        unsigned long x = 0;
         int i;
-        for (i = 0; i < g->n; i++) x = x * 10007UL + g->d[i];
+        for (i = g->n - 1; i >= 0; i--) x = x * 10000UL + g->d[i];   /* exact on a 64 bit long */
         return g->sign < 0 ? 0UL - x : x;
     }
 }
@@ -3703,10 +4017,12 @@ static Node *parse_comprehension(int ckind, int closer)
             if (nc == 0) {
                 cur_scope = outer;
                 iter0 = parse_or();
+                if (iter0->kind == N_SET) iter0->op = 1;    /* folded into a frozenset */
                 cur_scope = sc;
                 f->b = mk_name(s0, line);
             } else {
                 f->b = parse_or();
+                if (f->b->kind == N_SET) f->b->op = 1;
             }
             f->sidx = sc->nstate;
             sc->nstate += 2;
@@ -4360,6 +4676,7 @@ static Node *parse_stmt(void)
             n->a = parse_targets();
             expect_kw(KW_IN, "in");
             n->b = parse_testlist(1);
+            if (n->b->kind == N_SET) n->b->op = 1;      /* for x in {..}: a frozenset constant */
             expect(':', ":");
             n->c = parse_block();
             if (accept_kw(KW_ELSE)) { expect(':', ":"); n->d = parse_block(); }
@@ -4668,7 +4985,7 @@ static Class *class_of(Value v)
     case T_LIST: return cls_list;
     case T_TUPLE: return cls_tuple;
     case T_DICT: return cls_dict;
-    case T_SET: return cls_set;
+    case T_SET: return ((Dict *)v.u.o)->frozen ? cls_frozenset : cls_set;
     case T_RANGE: return cls_range;
     case T_FUNC: return cls_func;
     case T_BUILTIN: return cls_builtin;
@@ -5099,10 +5416,11 @@ static int py_eq(Value a, Value b)
         Dict *x = AS_DICT(a), *y = AS_DICT(b);
         long i;
         Value o;
+        (void)o;
         if (x->n != y->n) return 0;
         for (i = 0; i < x->used; i++) {
             if (x->e[i].k.t == T_UNSET) continue;
-            if (!dict_get(y, x->e[i].k, &o)) return 0;
+            if (!set_has_h(y, x->e[i].k, x->e[i].hash)) return 0;
         }
         return 1; }
     case T_RANGE: {
@@ -5133,21 +5451,46 @@ inst:
     return a.t == b.t && a.u.o == b.u.o;
 }
 
+/* CPython's tuple hash (xxHash based since 3.8): exact when unsigned long has 64 bits */
+#if ULONG_MAX > 0xffffffffUL
+#define XXP1 0x9E3779B185EBCA87UL
+#define XXP2 0xC2B2AE3D27D4EB4FUL
+#define XXP5 0x27D4EB2F165667C5UL
+#define XXROT(x) (((x) << 31) | ((x) >> 33))
+#else
+#define XXP1 0x9E3779B1UL
+#define XXP2 0x85EBCA77UL
+#define XXP5 0x165667B1UL
+#define XXROT(x) (((x) << 13) | ((x) >> 19))
+#endif
+static unsigned long tuple_hash(List *l)
+{
+    unsigned long acc = XXP5, lane;
+    long i;
+    for (i = 0; i < l->n; i++) {
+        lane = py_hash(l->a[i]);
+        acc += lane * XXP2;
+        acc = XXROT(acc);
+        acc *= XXP1;
+    }
+    acc += (unsigned long)l->n ^ (XXP5 ^ 3527539UL);
+    if (acc == (unsigned long)-1L) return 1546275796UL;
+    return acc;
+}
 static unsigned long py_hash(Value v)
 {
     switch (v.t) {
-    case T_NONE: return 1234567UL;
+    case T_NONE: return 4238894112UL;
     case T_BOOL: case T_INT: case T_BIG: return int_hash(v);
     case T_FLOAT: return hash_fold(float_hash_exact(v.u.d));
     case T_STR: case T_BYTES: return str_hash(AS_STR(v));
-    case T_TUPLE: {
-        List *l = AS_LIST(v);
-        unsigned long h = 0x345678UL;
-        long i;
-        for (i = 0; i < l->n; i++) h = (h * 1000003UL) ^ py_hash(l->a[i]);
-        return h; }
+    case T_TUPLE: return tuple_hash(AS_LIST(v));
     case T_COMPLEX: return hash_fold(complex_hash_exact(AS_CPLX(v)->re, AS_CPLX(v)->im));
-    case T_LIST: case T_DICT: case T_SET: case T_BARR:
+    case T_SET:
+        if (AS_DICT(v)->frozen) return fset_hash(AS_DICT(v));
+        throw_new(cls_TypeError, "unhashable type: '%.40s'", type_name(v));
+        return 0;
+    case T_LIST: case T_DICT: case T_BARR:
         throw_new(cls_TypeError, "unhashable type: '%.40s'", type_name(v));
         return 0;
     case T_INST: {
@@ -5287,10 +5630,11 @@ static int rich_cmp(int op, Value a, Value b)
         long i;
         Value o;
         int sub = 1, sup = 1;
+        (void)o;
         for (i = 0; i < x->used; i++)
-            if (x->e[i].k.t != T_UNSET && !dict_get(y, x->e[i].k, &o)) sub = 0;
+            if (x->e[i].k.t != T_UNSET && !set_has_h(y, x->e[i].k, x->e[i].hash)) sub = 0;
         for (i = 0; i < y->used; i++)
-            if (y->e[i].k.t != T_UNSET && !dict_get(x, y->e[i].k, &o)) sup = 0;
+            if (y->e[i].k.t != T_UNSET && !set_has_h(x, y->e[i].k, y->e[i].hash)) sup = 0;
         switch (op) {
         case C_LE: return sub;
         case C_LT: return sub && x->n < y->n;
@@ -5498,7 +5842,8 @@ static void repr_buf(Value v, Buf *b, int depth)
     case T_SET: {
         Dict *d = AS_DICT(v);
         int first = 1;
-        if (d->n == 0) { buf_add(b, "set()"); break; }
+        if (d->n == 0) { buf_add(b, d->frozen ? "frozenset()" : "set()"); break; }
+        if (d->frozen) buf_add(b, "frozenset(");
         buf_addc(b, '{');
         for (i = 0; i < d->used; i++) {
             if (d->e[i].k.t == T_UNSET) continue;
@@ -5507,6 +5852,7 @@ static void repr_buf(Value v, Buf *b, int depth)
             repr_buf(d->e[i].k, b, depth + 1);
         }
         buf_addc(b, '}');
+        if (d->frozen) buf_addc(b, ')');
         break; }
     case T_RANGE: {
         Range *r = (Range *)v.u.o;
@@ -6562,7 +6908,7 @@ static Value get_iter(Value o)
     case T_STR: it = iter_new(IK_STR); it->a = o; return mkobj(it, T_ITER);
     case T_BYTES: case T_BARR: it = iter_new(IK_BYTES); it->a = o; return mkobj(it, T_ITER);
     case T_DICT: it = iter_new(IK_DICT); it->a = o; return mkobj(it, T_ITER);
-    case T_SET: it = iter_new(IK_SET); it->a = o; return mkobj(it, T_ITER);
+    case T_SET: it = iter_new(IK_SET); it->a = o; it->n = AS_DICT(o)->n; return mkobj(it, T_ITER);
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
         if (r->big) {
@@ -6655,7 +7001,17 @@ static int iter_next(Value it, Value *out)
         *out = t->a;
         t->a = int_add(t->a, t->c);
         return 1; }
-    case IK_DICT: case IK_DVALS: case IK_DITEMS: case IK_SET: {
+    case IK_SET: {
+        Dict *d = AS_DICT(t->a);
+        if (!t->step) return 0;                 /* exhausted */
+        if (t->n != d->n)
+            throw_new(cls_RuntimeError, "Set changed size during iteration");
+        while (t->i < d->used && d->e[t->i].k.t == T_UNSET) t->i++;
+        if (t->i >= d->used) { t->step = 0; return 0; }
+        *out = d->e[t->i].k;
+        t->i++;
+        return 1; }
+    case IK_DICT: case IK_DVALS: case IK_DITEMS: {
         Dict *d = AS_DICT(t->a);
         while (t->i < d->used && d->e[t->i].k.t == T_UNSET) t->i++;
         if (t->i >= d->used) return 0;
@@ -6783,9 +7139,10 @@ static int contains(Value c, Value x)
         long i;
         for (i = 0; i < l->n; i++) if (py_eq(l->a[i], x)) return 1;
         return 0; }
-    case T_DICT: case T_SET: {
+    case T_DICT: {
         Value o;
         return dict_get(AS_DICT(c), x, &o); }
+    case T_SET: return set_has(AS_DICT(c), x);
     case T_STR: {
         Str *s = AS_STR(c), *u;
         long i;
@@ -6896,19 +7253,6 @@ static Str *idunder(int op)
         tab[op] = intern_c(b);
     }
     return tab[op];
-}
-static Value to_set_any(Value v)
-{
-    Dict *d = dict_new_t(T_SET);
-    Value dv = mkobj(d, T_SET), it, y;
-    Value *base = vsp;
-    VPUSH(dv);
-    VPUSH(v);
-    it = get_iter(v);
-    VPUSH(it);
-    while (iter_next(it, &y)) set_add(d, y);
-    vsp = base;
-    return dv;
 }
 static void dict_update_from(Dict *d, Value src);
 #define dict_update_from_hook dict_update_from
@@ -7033,32 +7377,196 @@ static Value seq_repeat(Value s, Value nv)
     }
 }
 static Value py_format_percent(Value fmt, Value args);
-static Value set_op(int op, Value a, Value b)
+/* ---- set operations: the algorithms of CPython's setobject.c (same iteration order) ----- */
+static Value set_new_v(int frozen)
 {
-    Dict *x = AS_DICT(a), *y = AS_DICT(b), *r = dict_new_t(T_SET);
-    Value rv = mkobj(r, T_SET), o;
+    Dict *d = dict_new_t(T_SET);
+    d->frozen = frozen;
+    return mkobj(d, T_SET);
+}
+/* the set behind v (a set, or an instance of a set subclass), else NULL */
+static Dict *as_anyset(Value v)
+{
+    if (v.t == T_INST && AS_INST(v)->pay.t == T_SET) v = AS_INST(v)->pay;
+    return v.t == T_SET ? AS_DICT(v) : NULL;
+}
+/* set_update_internal: add the elements of any iterable (sets are merged, dicts add their keys) */
+static void set_update_value(Dict *so, Value other)
+{
+    Dict *os = as_anyset(other);
+    Value *base = vsp, it, y;
     long i;
+    if (os) { set_merge(so, os); return; }
+    if (other.t == T_DICT) {
+        Dict *od = AS_DICT(other);
+        if (!SET_ORDERED(so) && (unsigned long)(so->fill + od->n) * 5UL >= set_mask(so) * 3UL)
+            set_resize(so, (so->n + od->n) * 2);
+        for (i = 0; i < od->used; i++)
+            if (od->e[i].k.t != T_UNSET) set_add_h(so, od->e[i].k, od->e[i].hash);
+        return;
+    }
+    VPUSH(other);
+    it = get_iter(other);
+    VPUSH(it);
+    while (iter_next(it, &y)) set_add(so, y);
+    vsp = base;
+}
+static Value set_copy_v(Dict *so, int frozen)
+{
+    Value rv = set_new_v(frozen);
+    set_merge(AS_DICT(rv), so);
+    return rv;
+}
+/* set_intersection: a new set with the type of so */
+static Value set_intersection_v(Dict *so, Value other)
+{
+    Dict *os = as_anyset(other);
+    Value rv = set_new_v(so->frozen), it, y;
+    Dict *r = AS_DICT(rv);
+    Value *base = vsp;
+    long i;
+    if (os == so) { set_merge(r, so); return rv; }
     VPUSH(rv);
-    if (op == B_OR) {
-        for (i = 0; i < x->used; i++) if (x->e[i].k.t != T_UNSET) set_add(r, x->e[i].k);
-        for (i = 0; i < y->used; i++) if (y->e[i].k.t != T_UNSET) set_add(r, y->e[i].k);
-    } else if (op == B_AND) {
-        /* like CPython: walk the smaller set (the right one when sizes are equal) and keep
-           its elements, which matters for 1 and 1.0 */
-        Dict *w = x->n < y->n ? x : y, *o2 = x->n < y->n ? y : x;
-        for (i = 0; i < w->used; i++)
-            if (w->e[i].k.t != T_UNSET && dict_get(o2, w->e[i].k, &o)) set_add(r, w->e[i].k);
-    } else if (op == B_SUB) {
-        for (i = 0; i < x->used; i++)
-            if (x->e[i].k.t != T_UNSET && !dict_get(y, x->e[i].k, &o)) set_add(r, x->e[i].k);
+    if (os) {
+        Dict *a = so, *b = os;
+        if (b->n > a->n) { a = os; b = so; }
+        for (i = 0; i < b->used; i++)
+            if (b->e[i].k.t != T_UNSET && set_has_h(a, b->e[i].k, b->e[i].hash))
+                set_add_h(r, b->e[i].k, b->e[i].hash);
+        vsp = base;
+        return rv;
+    }
+    VPUSH(other);
+    it = get_iter(other);
+    VPUSH(it);
+    while (iter_next(it, &y)) {
+        unsigned long h = py_hash(y);
+        if (set_has_h(so, y, h)) {
+            set_add_h(r, y, h);
+            if (r->n >= so->n) break;
+        }
+    }
+    vsp = base;
+    return rv;
+}
+/* set_difference_update_internal */
+static void set_diff_update(Dict *so, Value other)
+{
+    Dict *os = as_anyset(other);
+    Value *base = vsp, it, y;
+    long i;
+    if (os == so) { set_clear(so); return; }
+    if (os) {
+        Dict *od = os;
+        if ((os->n >> 3) > so->n) {
+            Value tmp = set_intersection_v(so, other);
+            VPUSH(tmp);
+            od = AS_DICT(tmp);
+        }
+        for (i = 0; i < od->used; i++)
+            if (od->e[i].k.t != T_UNSET) set_discard_h(so, od->e[i].k, od->e[i].hash);
     } else {
-        for (i = 0; i < x->used; i++)
-            if (x->e[i].k.t != T_UNSET && !dict_get(y, x->e[i].k, &o)) set_add(r, x->e[i].k);
-        for (i = 0; i < y->used; i++)
-            if (y->e[i].k.t != T_UNSET && !dict_get(x, y->e[i].k, &o)) set_add(r, y->e[i].k);
+        VPUSH(other);
+        it = get_iter(other);
+        VPUSH(it);
+        while (iter_next(it, &y)) set_discard(so, y);
+    }
+    vsp = base;
+    if (SET_ORDERED(so)) return;
+    if ((unsigned long)(so->fill - so->n) <= set_mask(so) / 4UL) return;
+    set_resize(so, so->n > 50000L ? so->n * 2 : so->n * 4);
+}
+static Value set_difference_v(Dict *so, Value other)
+{
+    Dict *os = as_anyset(other);
+    Value rv;
+    Dict *r;
+    long i, osz = -1;
+    if (os) osz = os->n;
+    else if (other.t == T_DICT) osz = AS_DICT(other)->n;
+    if (osz < 0 || (so->n >> 2) > osz) {
+        rv = set_copy_v(so, so->frozen);
+        VPUSH(rv);
+        set_diff_update(AS_DICT(rv), other);
+        vsp--;
+        return rv;
+    }
+    rv = set_new_v(so->frozen);
+    r = AS_DICT(rv);
+    VPUSH(rv);
+    for (i = 0; i < so->used; i++) {
+        DEnt *e = so->e + i;
+        if (e->k.t == T_UNSET) continue;
+        if (os ? !set_has_h(os, e->k, e->hash) : dict_find(AS_DICT(other), e->k, e->hash) < 0)
+            set_add_h(r, e->k, e->hash);
     }
     vsp--;
     return rv;
+}
+static void set_symdiff_loop(Dict *so, Dict *other)
+{
+    long i;
+    for (i = 0; i < other->used; i++)
+        if (other->e[i].k.t != T_UNSET && !set_discard_h(so, other->e[i].k, other->e[i].hash))
+            set_add_h(so, other->e[i].k, other->e[i].hash);
+}
+/* set_symmetric_difference_update */
+static void set_symdiff_update(Dict *so, Value other)
+{
+    Dict *os = as_anyset(other);
+    Value *base = vsp;
+    if (os == so) { set_clear(so); return; }
+    if (other.t == T_DICT) {
+        Dict *od = AS_DICT(other);
+        long i;
+        for (i = 0; i < od->used; i++)
+            if (od->e[i].k.t != T_UNSET && !set_discard_h(so, od->e[i].k, od->e[i].hash))
+                set_add_h(so, od->e[i].k, od->e[i].hash);
+    } else if (os) set_symdiff_loop(so, os);
+    else {
+        Value tmp = set_new_v(0);
+        VPUSH(tmp);
+        set_update_value(AS_DICT(tmp), other);
+        set_symdiff_loop(so, AS_DICT(tmp));
+    }
+    vsp = base;
+}
+static Value set_symdiff_v(Dict *so, Value other)
+{
+    Value rv = set_new_v(so->frozen);
+    VPUSH(rv);
+    set_update_value(AS_DICT(rv), other);
+    set_symdiff_loop(AS_DICT(rv), so);
+    vsp--;
+    return rv;
+}
+static Value set_op(int op, Value a, Value b)
+{
+    Dict *x = AS_DICT(a);
+    Value r;
+    switch (op) {
+    case B_OR:
+        r = set_copy_v(x, x->frozen);
+        if (as_anyset(b) != x) {
+            VPUSH(r);
+            set_update_value(AS_DICT(r), b);
+            vsp--;
+        }
+        return r;
+    case B_AND: return set_intersection_v(x, b);
+    case B_SUB: return set_difference_v(x, b);
+    default: return set_symdiff_v(x, b);
+    }
+}
+static Value to_set_any(Value v)
+{
+    Value dv = set_new_v(0);
+    Value *base = vsp;
+    VPUSH(dv);
+    VPUSH(v);
+    set_update_value(AS_DICT(dv), v);
+    vsp = base;
+    return dv;
 }
 static Value binop(int op, Value a, Value b)
 {
@@ -7134,8 +7642,10 @@ static Value binop(int op, Value a, Value b)
         vsp--;
         return nv;
     }
-    if (a.t == T_SET && b.t == T_SET && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR))
-        return set_op(op, a, b);
+    if (a.t == T_SET && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR)) {
+        Dict *ob = as_anyset(b);
+        if (ob) return set_op(op, a, mkobj(ob, T_SET));
+    }
     if ((a.t == T_DVIEW || b.t == T_DVIEW)
         && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR)) {
         Value x = a, y = b, r;
@@ -7212,6 +7722,21 @@ static Value inplace_binop(int op, Value a, Value b)
         for (i = 1; i < b.u.i; i++) memcpy(ba->s + i * n0, ba->s, (size_t)n0);
         ba->n = n0 * b.u.i;
         return a;
+    }
+    if (a.t == T_SET && !AS_DICT(a)->frozen &&
+        (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR)) {
+        Dict *x = AS_DICT(a), *ob = as_anyset(b);
+        if (ob) {
+            Value ov = mkobj(ob, T_SET);
+            if (op == B_OR) set_update_value(x, ov);
+            else if (op == B_SUB) set_diff_update(x, ov);
+            else if (op == B_XOR) set_symdiff_update(x, ov);
+            else {
+                Value tmp = set_intersection_v(x, ov);
+                set_swap(x, AS_DICT(tmp));
+            }
+            return a;
+        }
     }
     if (a.t == T_INST) {
         Str *dn = idunder(op);
@@ -7636,6 +8161,22 @@ static int gen_resume(Gen *g, Value *out)
     return 0;
 }
 
+/* a constant (or a tuple of constants) with a reproducible hash */
+static int lit_const_det(Node *c)
+{
+    int i;
+    if (c->kind == N_CONST) return c->val.t != T_UNSET && key_det(c->val);
+    if (c->kind != N_TUPLE) return 0;
+    for (i = 0; i < c->n; i++) if (!lit_const_det(c->list[i])) return 0;
+    return 1;
+}
+/* a set display of such constants only (CPython compiles it to a frozenset constant) */
+static int set_lit_const(Node *n)
+{
+    int i;
+    for (i = 0; i < n->n; i++) if (!lit_const_det(n->list[i])) return 0;
+    return 1;
+}
 /* list, dict and set payloads start empty and are filled by __init__; the others take the args */
 static int pay_takes_args(Class *pc)
 {
@@ -8234,15 +8775,28 @@ static Value eval(Frame *f, Node *n)
         Value dv = mkobj(d, T_SET);
         int i;
         VPUSH(dv);
+        if (((n->op == 0 && n->n > 2) || (n->op == 1 && n->n > 0)) && set_lit_const(n)) {
+            /* CPython folds a display of constants into a frozenset constant: built from the
+               items, then rebuilt from its own iteration order by the constant cache; a plain
+               display merges it into the new set, a for loop iterates it */
+            Value t1 = set_new_v(0), t2 = set_new_v(1);
+            Dict *a = AS_DICT(t1), *b = AS_DICT(t2);
+            VPUSH(t1); VPUSH(t2);
+            for (i = 0; i < n->n; i++) set_add(a, eval(f, n->list[i]));
+            for (i = 0; i < a->used; i++)
+                if (a->e[i].k.t != T_UNSET) set_add(b, a->e[i].k);
+            if (n->op == 1) { vsp -= 3; return t2; }
+            set_merge(d, b);
+            vsp -= 3;
+            return dv;
+        }
         for (i = 0; i < n->n; i++) {
             Node *c = n->list[i];
             if (c->kind == N_STAR) {
-                Value sv = eval(f, c->a), it, x;
+                Value sv = eval(f, c->a);
                 VPUSH(sv);
-                it = get_iter(sv);
-                VPUSH(it);
-                while (iter_next(it, &x)) set_add(d, x);
-                vsp -= 2;
+                set_update_value(d, sv);
+                vsp--;
             } else set_add(d, eval(f, c));
         }
         vsp--;
@@ -8512,7 +9066,7 @@ static Class *make_class(Str *name, Class **bl, int nb, Str *modname)
         Class *k = c->mro[i];
         if (k == cls_list || k == cls_dict || k == cls_set || k == cls_tuple || k == cls_str ||
             k == cls_int || k == cls_float || k == cls_bytes || k == cls_bytearray ||
-            k == cls_complex)
+            k == cls_complex || k == cls_frozenset)
             c->paycls = k;
     }
     return c;
@@ -10112,17 +10666,26 @@ BI(bi_dict)
 }
 BI(bi_set)
 {
-    Dict *d = dict_new_t(T_SET);
-    Value dv = mkobj(d, T_SET), it, y;
-    Value *base = vsp;
-    VPUSH(dv);
+    Value dv = set_new_v(0);
+    need(x, 0, 1, "set");
     if (x->n > 0) {
-        VPUSH(A(0));
-        it = get_iter(A(0));
-        VPUSH(it);
-        while (iter_next(it, &y)) set_add(d, y);
+        VPUSH(dv);
+        set_update_value(AS_DICT(dv), A(0));
+        vsp--;
     }
-    vsp = base;
+    return dv;
+}
+BI(bi_frozenset)
+{
+    Value dv;
+    need(x, 0, 1, "frozenset");
+    if (x->n > 0 && A(0).t == T_SET && AS_DICT(A(0))->frozen) return A(0);   /* idempotent */
+    dv = set_new_v(1);
+    if (x->n > 0) {
+        VPUSH(dv);
+        set_update_value(AS_DICT(dv), A(0));
+        vsp--;
+    }
     return dv;
 }
 BI(bi_range)
@@ -10609,6 +11172,7 @@ BI(bi_hash)
     case T_FLOAT: return float_hash_exact(v.u.d);
     case T_COMPLEX: return complex_hash_exact(AS_CPLX(v)->re, AS_CPLX(v)->im);
     case T_NONE: return int_add(int_mul(mkint(42388L), mkint(100000L)), mkint(94112L));
+    case T_TUPLE: case T_SET: return mkint((long)py_hash(v));
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_hash);
         if (m) {
@@ -11615,97 +12179,177 @@ static Dict *self_set(Args *x)
         type_name(A(0)));
     return AS_DICT(A(0));
 }
-BI(st_add) { need(x, 2, 2, "add"); set_add(self_set(x), A(1)); return NONE_V; }
-BI(st_discard) { need(x, 2, 2, "discard"); dict_del(self_set(x), A(1)); return NONE_V; }
+static Dict *self_mset(Args *x, const char *nm)
+{
+    Dict *d = self_set(x);
+    if (d->frozen)
+        throw_new(cls_TypeError,
+                  "descriptor '%s' for 'set' objects doesn't apply to a 'frozenset' object", nm);
+    return d;
+}
+BI(st_add) { need(x, 2, 2, "add"); set_add(self_mset(x, "add"), A(1)); return NONE_V; }
+BI(st_discard)
+{
+    need(x, 2, 2, "discard");
+    set_discard(self_mset(x, "discard"), A(1));
+    return NONE_V;
+}
 BI(st_remove)
 {
     need(x, 2, 2, "remove");
-    if (!dict_del(self_set(x), A(1))) throw_key(A(1));
+    if (!set_discard(self_mset(x, "remove"), A(1))) throw_key(A(1));
     return NONE_V;
 }
 BI(st_pop)
 {
-    Dict *d = self_set(x);
-    long i;
-    for (i = 0; i < d->used; i++) {
-        if (d->e[i].k.t != T_UNSET) {
-            Value k = d->e[i].k;
-            dict_del(d, k);
-            return k;
-        }
-    }
+    Dict *d = self_mset(x, "pop");
+    Value k;
+    if (set_pop(d, &k)) return k;
     throw_new(cls_KeyError, "pop from an empty set");
     return NONE_V;
 }
-static Value to_set(Value v)
-{
-    Args a;
-    Value arg = v;
-    if (v.t == T_SET) return v;
-    a.n = 1; a.a = &arg; a.nk = 0; a.kw = NULL;
-    return bi_set(&a);
-}
-static Value set_method_op(Args *x, int op)
-{
-    Value r = A(0), o;
-    int i;
-    for (i = 1; i < x->n; i++) {
-        VPUSH(r);
-        o = to_set(A(i));
-        VPUSH(o);
-        r = set_op(op, r, o);
-        vsp -= 2;
-    }
-    if (x->n == 1) r = set_op(B_OR, A(0), A(0));
-    return r;
-}
-BI(st_union) { self_set(x); return set_method_op(x, B_OR); }
-BI(st_intersection) { self_set(x); return set_method_op(x, B_AND); }
-BI(st_difference) { self_set(x); return set_method_op(x, B_SUB); }
-BI(st_symdiff) { self_set(x); return set_method_op(x, B_XOR); }
-BI(st_update)
+BI(st_union)
 {
     Dict *d = self_set(x);
+    Value r = set_copy_v(d, d->frozen);
     int i;
+    VPUSH(r);
+    for (i = 1; i < x->n; i++)
+        if (as_anyset(A(i)) != d) set_update_value(AS_DICT(r), A(i));
+    vsp--;
+    return r;
+}
+static Value set_intersection_multi(Args *x, Dict *d)
+{
+    Value r = A(0);
+    int i;
+    if (x->n == 1) return set_copy_v(d, d->frozen);
     for (i = 1; i < x->n; i++) {
-        Value it, y;
-        VPUSH(A(i));
-        it = get_iter(A(i));
-        VPUSH(it);
-        while (iter_next(it, &y)) set_add(d, y);
-        vsp -= 2;
+        VPUSH(r);
+        r = set_intersection_v(AS_DICT(r), A(i));
+        vsp--;
     }
+    return r;
+}
+BI(st_intersection) { return set_intersection_multi(x, self_set(x)); }
+BI(st_difference)
+{
+    Dict *d = self_set(x);
+    Value r;
+    int i;
+    if (x->n == 1) return set_copy_v(d, d->frozen);
+    r = set_difference_v(d, A(1));
+    VPUSH(r);
+    for (i = 2; i < x->n; i++) set_diff_update(AS_DICT(r), A(i));
+    vsp--;
+    return r;
+}
+BI(st_symdiff)
+{
+    Dict *d = self_set(x);
+    need(x, 2, 2, "symmetric_difference");
+    return set_symdiff_v(d, A(1));
+}
+BI(st_update)
+{
+    Dict *d = self_mset(x, "update");
+    int i;
+    for (i = 1; i < x->n; i++) set_update_value(d, A(i));
     return NONE_V;
+}
+BI(st_intersection_update)
+{
+    Dict *d = self_mset(x, "intersection_update");
+    Value r = set_intersection_multi(x, d);
+    set_swap(d, AS_DICT(r));
+    return NONE_V;
+}
+BI(st_difference_update)
+{
+    Dict *d = self_mset(x, "difference_update");
+    int i;
+    for (i = 1; i < x->n; i++) set_diff_update(d, A(i));
+    return NONE_V;
+}
+BI(st_symdiff_update)
+{
+    Dict *d = self_mset(x, "symmetric_difference_update");
+    need(x, 2, 2, "symmetric_difference_update");
+    set_symdiff_update(d, A(1));
+    return NONE_V;
+}
+/* a <= b for two sets */
+static int set_subset(Dict *a, Dict *b)
+{
+    long i;
+    if (a->n > b->n) return 0;
+    for (i = 0; i < a->used; i++)
+        if (a->e[i].k.t != T_UNSET && !set_has_h(b, a->e[i].k, a->e[i].hash)) return 0;
+    return 1;
 }
 BI(st_issubset)
 {
-    Value o = to_set(A(1));
-    self_set(x);
-    return mkbool(rich_cmp(C_LE, A(0), o));
+    Dict *d = self_set(x), *o;
+    Value tmp;
+    int r;
+    need(x, 2, 2, "issubset");
+    o = as_anyset(A(1));
+    if (o) return mkbool(set_subset(d, o));
+    tmp = set_intersection_v(d, A(1));
+    r = AS_DICT(tmp)->n == d->n;
+    return mkbool(r);
 }
 BI(st_issuperset)
 {
-    Value o = to_set(A(1));
-    self_set(x);
-    return mkbool(rich_cmp(C_GE, A(0), o));
+    Dict *d = self_set(x), *o;
+    Value it, y;
+    Value *base = vsp;
+    need(x, 2, 2, "issuperset");
+    o = as_anyset(A(1));
+    if (o) return mkbool(set_subset(o, d));
+    VPUSH(A(1));
+    it = get_iter(A(1));
+    VPUSH(it);
+    while (iter_next(it, &y)) {
+        if (!set_has(d, y)) { vsp = base; return FALSE_V; }
+    }
+    vsp = base;
+    return TRUE_V;
 }
 BI(st_isdisjoint)
 {
-    Value o = to_set(A(1)), r;
-    self_set(x);
-    VPUSH(o);
-    r = set_op(B_AND, A(0), o);
-    vsp--;
-    return mkbool(AS_DICT(r)->n == 0);
+    Dict *d = self_set(x), *o;
+    Value it, y;
+    Value *base = vsp;
+    long i;
+    need(x, 2, 2, "isdisjoint");
+    o = as_anyset(A(1));
+    if (o == d) return mkbool(d->n == 0);
+    if (o) {
+        Dict *a = d, *b = o;
+        if (b->n > a->n) { a = o; b = d; }
+        for (i = 0; i < b->used; i++)
+            if (b->e[i].k.t != T_UNSET && set_has_h(a, b->e[i].k, b->e[i].hash)) return FALSE_V;
+        return TRUE_V;
+    }
+    VPUSH(A(1));
+    it = get_iter(A(1));
+    VPUSH(it);
+    while (iter_next(it, &y)) {
+        if (set_has(d, y)) { vsp = base; return FALSE_V; }
+    }
+    vsp = base;
+    return TRUE_V;
 }
 BI(st_copy)
 {
-    self_set(x);
-    return set_op(B_OR, A(0), A(0));
+    Dict *d = self_set(x);
+    if (d->frozen) return A(0);            /* frozenset.copy() returns the object itself */
+    return set_copy_v(d, 0);
 }
 BI(st_clear)
 {
-    dict_clear(self_set(x));
+    set_clear(self_mset(x, "clear"));
     return NONE_V;
 }
 
@@ -12109,11 +12753,25 @@ BI(nat_set_repr)
     buf_add(&b, AS_INST(self)->cls->name->s);
     buf_addc(&b, '(');
     if (pay.t == T_BARR) buf_addn(&b, rs->s + 10, rs->len - 11);   /* inside bytearray(...) */
+    else if (AS_DICT(pay)->n > 0 && AS_DICT(pay)->frozen)
+        buf_addn(&b, rs->s + 10, rs->len - 11);        /* inside frozenset(...) */
     else if (AS_DICT(pay)->n > 0) buf_addn(&b, rs->s, rs->len);
     buf_addc(&b, ')');
     r = buf_value(&b);
     return r;
 }
+/* in-place operators of set subclass instances: no selfpay, the instance itself is returned */
+static Value nat_iop(Args *x, int op)
+{
+    Value self = A(0), r;
+    need(x, 2, 2, "__ior__");
+    r = inplace_binop(op, unpay(self), unpay(A(1)));
+    return r.t == T_SET && r.u.o == unpay(self).u.o ? self : r;
+}
+BI(nat_ior) { return nat_iop(x, B_OR); }
+BI(nat_iand) { return nat_iop(x, B_AND); }
+BI(nat_isub) { return nat_iop(x, B_SUB); }
+BI(nat_ixor) { return nat_iop(x, B_XOR); }
 BI(nat_hash) { return mkint((long)py_hash(A(0))); }
 BI(nat_add) { need(x, 2, 2, "__add__"); return binop(B_ADD, A(0), unpay(A(1))); }
 BI(nat_mul) { need(x, 2, 2, "__mul__"); return binop(B_MUL, A(0), A(1)); }
@@ -12178,17 +12836,10 @@ BI(list_init)
 }
 BI(set_init)
 {
-    Dict *d = self_set(x);
+    Dict *d = self_mset(x, "__init__");
     need(x, 1, 2, "__init__");
-    dict_clear(d);
-    if (x->n > 1) {
-        Value it, y;
-        VPUSH(A(1));
-        it = get_iter(A(1));
-        VPUSH(it);
-        while (iter_next(it, &y)) set_add(d, y);
-        vsp -= 2;
-    }
+    set_clear(d);
+    if (x->n > 1) set_update_value(d, A(1));
     return NONE_V;
 }
 BI(obj_setattr)
@@ -23477,6 +24128,7 @@ static void init_runtime(int argc, char **argv)
     cls_tuple = mk_type("tuple", cls_object, bi_tuple);
     cls_dict = mk_type("dict", cls_object, bi_dict);
     cls_set = mk_type("set", cls_object, bi_set);
+    cls_frozenset = mk_type("frozenset", cls_object, bi_frozenset);
     cls_range = mk_type("range", cls_object, bi_range);
     cls_none = mk_type("NoneType", cls_object, NULL);
     cls_func = mk_type("function", cls_object, NULL);
@@ -23492,7 +24144,6 @@ static void init_runtime(int argc, char **argv)
     cls_cmeth = mk_type("classmethod", cls_object, bi_classmethod);
     cls_super = mk_type("super", cls_object, bi_super);
     complex_init();
-    { long si = global_index(intern_c("set")); set_global(intern_c("frozenset"), G[si]); }
     cls_object->ctor = bi_object;
     for (i = 0; exc_table[i].name; i++) {
         Class *base = exc_table[i].base ? *exc_table[i].base : cls_object;
@@ -23569,14 +24220,15 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_str, "isprintable", s_isprintable); def_bi(cls_str, "isascii", s_isascii);
     /* protocol methods of the native base types (also used by subclasses) */
     {
-        Class *nc[5];
+        Class *nc[6];
         int k;
         nc[0] = cls_str; nc[1] = cls_list; nc[2] = cls_tuple; nc[3] = cls_dict; nc[4] = cls_set;
-        for (k = 0; k < 5; k++) {
+        nc[5] = cls_frozenset;
+        for (k = 0; k < 6; k++) {
             def_bi(nc[k], "__len__", nat_len); def_bi(nc[k], "__iter__", nat_iter);
             def_bi(nc[k], "__contains__", nat_contains); def_bi(nc[k], "__repr__", nat_repr);
             def_bi(nc[k], "__eq__", nat_eq); def_bi(nc[k], "__ne__", nat_ne);
-            if (nc[k] != cls_set && nc[k] != cls_dict) {
+            if (nc[k] != cls_set && nc[k] != cls_frozenset && nc[k] != cls_dict) {
                 def_bi(nc[k], "__getitem__", nat_getitem);
                 def_bi(nc[k], "__add__", nat_add); def_bi(nc[k], "__mul__", nat_mul);
                 def_bi(nc[k], "__rmul__", nat_mul);
@@ -23585,7 +24237,8 @@ static void init_runtime(int argc, char **argv)
                 def_bi(nc[k], "__lt__", nat_lt); def_bi(nc[k], "__le__", nat_le);
                 def_bi(nc[k], "__gt__", nat_gt); def_bi(nc[k], "__ge__", nat_ge);
             }
-            if (nc[k] == cls_str || nc[k] == cls_tuple) def_bi(nc[k], "__hash__", nat_hash);
+            if (nc[k] == cls_str || nc[k] == cls_tuple || nc[k] == cls_frozenset)
+                def_bi(nc[k], "__hash__", nat_hash);
         }
         def_bi(cls_str, "__str__", nat_str); def_bi(cls_str, "__mod__", nat_mod);
         def_bi(cls_str, "__format__", nat_format);
@@ -23593,12 +24246,18 @@ static void init_runtime(int argc, char **argv)
         def_bi(cls_dict, "__getitem__", nat_getitem);
         def_bi(cls_dict, "__setitem__", nat_setitem); def_bi(cls_dict, "__delitem__", nat_delitem);
         def_bi(cls_dict, "__or__", nat_or);
-        def_bi(cls_set, "__or__", nat_or); def_bi(cls_set, "__and__", nat_and);
-        def_bi(cls_set, "__sub__", nat_sub); def_bi(cls_set, "__xor__", nat_xor);
+        for (k = 4; k < 6; k++) {
+            def_bi(nc[k], "__or__", nat_or); def_bi(nc[k], "__and__", nat_and);
+            def_bi(nc[k], "__sub__", nat_sub); def_bi(nc[k], "__xor__", nat_xor);
+            amap_set(&nc[k]->ns, S_repr, mkbuiltin("__repr__", nat_set_repr));
+        }
         def_bi(cls_dict, "__init__", d_update);
         def_bi(cls_list, "__init__", list_init);
         def_bi(cls_set, "__init__", set_init);
-        amap_set(&cls_set->ns, S_repr, mkbuiltin("__repr__", nat_set_repr));
+        amap_set(&cls_set->ns, intern_c("__ior__"), mkbuiltin("__ior__", nat_ior));
+        amap_set(&cls_set->ns, intern_c("__iand__"), mkbuiltin("__iand__", nat_iand));
+        amap_set(&cls_set->ns, intern_c("__isub__"), mkbuiltin("__isub__", nat_isub));
+        amap_set(&cls_set->ns, intern_c("__ixor__"), mkbuiltin("__ixor__", nat_ixor));
     }
     /* list, tuple */
     def_bi(cls_list, "append", l_append); def_bi(cls_list, "extend", l_extend);
@@ -23624,6 +24283,17 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_set, "update", st_update); def_bi(cls_set, "issubset", st_issubset);
     def_bi(cls_set, "issuperset", st_issuperset); def_bi(cls_set, "isdisjoint", st_isdisjoint);
     def_bi(cls_set, "copy", st_copy); def_bi(cls_set, "clear", st_clear);
+    def_bi(cls_set, "intersection_update", st_intersection_update);
+    def_bi(cls_set, "difference_update", st_difference_update);
+    def_bi(cls_set, "symmetric_difference_update", st_symdiff_update);
+    def_bi(cls_frozenset, "union", st_union);
+    def_bi(cls_frozenset, "intersection", st_intersection);
+    def_bi(cls_frozenset, "difference", st_difference);
+    def_bi(cls_frozenset, "symmetric_difference", st_symdiff);
+    def_bi(cls_frozenset, "issubset", st_issubset);
+    def_bi(cls_frozenset, "issuperset", st_issuperset);
+    def_bi(cls_frozenset, "isdisjoint", st_isdisjoint);
+    def_bi(cls_frozenset, "copy", st_copy);
     {
         Class *nk[3];
         int k;

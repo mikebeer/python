@@ -65,6 +65,14 @@ build steps and the list of remaining ASCII/IEEE assumptions: `PORTING.md`.
 - Generators have no separate C stack: each compound statement keeps resumable
   state slots in the generator and the executor re-enters along the saved path.
 - Exceptions use setjmp/longjmp; recursion limit 1000 raises RecursionError.
+- Sets and frozensets (`frozenset` is its own type, not a subclass of `set`; operators return the
+  type of the left operand; the hash is CPython's `_shuffle_bits` scheme) emulate CPython's
+  open-addressing table (`setobject.c` of 3.13: linear probes 9, perturb shift 5, dummies, growth
+  x4 / x2 above 50000, fill 3/5, `pop` finger, `set_merge`, `set_table_resize`, the constant
+  folding of set displays), so the iteration order of sets of ints, bools, None, floats,
+  complex numbers, tuples and frozensets of those is the same as in CPython (exact where
+  `unsigned long` has 64 bits; `tuple` hashes use CPython's xxHash scheme). A set that receives a
+  key with a per-run hash in CPython (str, bytes, instances) switches to insertion order.
 - Dicts are insertion-ordered; floats print with the shortest repr that
   round-trips; `sum` uses compensated summation like CPython 3.12.
 

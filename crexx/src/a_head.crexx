@@ -770,5 +770,5 @@ boot: procedure = .void
   bimap["EnvironmentError"] = cl_obj[C_OSERROR] as .string
   bimap["NotImplemented"] = NOTIMPL_OOP as .string
   bimap["Ellipsis"] = ELLIPSIS_OOP as .string
-  bimap["frozenset"] = cl_obj[C_SET] as .string
+  bimap["frozenset"] = cl_obj[C_FROZENSET] as .string
   return

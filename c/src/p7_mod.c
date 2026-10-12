@@ -1021,6 +1021,7 @@ static void init_runtime(int argc, char **argv)
     cls_tuple = mk_type("tuple", cls_object, bi_tuple);
     cls_dict = mk_type("dict", cls_object, bi_dict);
     cls_set = mk_type("set", cls_object, bi_set);
+    cls_frozenset = mk_type("frozenset", cls_object, bi_frozenset);
     cls_range = mk_type("range", cls_object, bi_range);
     cls_none = mk_type("NoneType", cls_object, NULL);
     cls_func = mk_type("function", cls_object, NULL);
@@ -1036,7 +1037,6 @@ static void init_runtime(int argc, char **argv)
     cls_cmeth = mk_type("classmethod", cls_object, bi_classmethod);
     cls_super = mk_type("super", cls_object, bi_super);
     complex_init();
-    { long si = global_index(intern_c("set")); set_global(intern_c("frozenset"), G[si]); }
     cls_object->ctor = bi_object;
     for (i = 0; exc_table[i].name; i++) {
         Class *base = exc_table[i].base ? *exc_table[i].base : cls_object;
@@ -1113,14 +1113,15 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_str, "isprintable", s_isprintable); def_bi(cls_str, "isascii", s_isascii);
     /* protocol methods of the native base types (also used by subclasses) */
     {
-        Class *nc[5];
+        Class *nc[6];
         int k;
         nc[0] = cls_str; nc[1] = cls_list; nc[2] = cls_tuple; nc[3] = cls_dict; nc[4] = cls_set;
-        for (k = 0; k < 5; k++) {
+        nc[5] = cls_frozenset;
+        for (k = 0; k < 6; k++) {
             def_bi(nc[k], "__len__", nat_len); def_bi(nc[k], "__iter__", nat_iter);
             def_bi(nc[k], "__contains__", nat_contains); def_bi(nc[k], "__repr__", nat_repr);
             def_bi(nc[k], "__eq__", nat_eq); def_bi(nc[k], "__ne__", nat_ne);
-            if (nc[k] != cls_set && nc[k] != cls_dict) {
+            if (nc[k] != cls_set && nc[k] != cls_frozenset && nc[k] != cls_dict) {
                 def_bi(nc[k], "__getitem__", nat_getitem);
                 def_bi(nc[k], "__add__", nat_add); def_bi(nc[k], "__mul__", nat_mul);
                 def_bi(nc[k], "__rmul__", nat_mul);
@@ -1129,7 +1130,8 @@ static void init_runtime(int argc, char **argv)
                 def_bi(nc[k], "__lt__", nat_lt); def_bi(nc[k], "__le__", nat_le);
                 def_bi(nc[k], "__gt__", nat_gt); def_bi(nc[k], "__ge__", nat_ge);
             }
-            if (nc[k] == cls_str || nc[k] == cls_tuple) def_bi(nc[k], "__hash__", nat_hash);
+            if (nc[k] == cls_str || nc[k] == cls_tuple || nc[k] == cls_frozenset)
+                def_bi(nc[k], "__hash__", nat_hash);
         }
         def_bi(cls_str, "__str__", nat_str); def_bi(cls_str, "__mod__", nat_mod);
         def_bi(cls_str, "__format__", nat_format);
@@ -1137,12 +1139,18 @@ static void init_runtime(int argc, char **argv)
         def_bi(cls_dict, "__getitem__", nat_getitem);
         def_bi(cls_dict, "__setitem__", nat_setitem); def_bi(cls_dict, "__delitem__", nat_delitem);
         def_bi(cls_dict, "__or__", nat_or);
-        def_bi(cls_set, "__or__", nat_or); def_bi(cls_set, "__and__", nat_and);
-        def_bi(cls_set, "__sub__", nat_sub); def_bi(cls_set, "__xor__", nat_xor);
+        for (k = 4; k < 6; k++) {
+            def_bi(nc[k], "__or__", nat_or); def_bi(nc[k], "__and__", nat_and);
+            def_bi(nc[k], "__sub__", nat_sub); def_bi(nc[k], "__xor__", nat_xor);
+            amap_set(&nc[k]->ns, S_repr, mkbuiltin("__repr__", nat_set_repr));
+        }
         def_bi(cls_dict, "__init__", d_update);
         def_bi(cls_list, "__init__", list_init);
         def_bi(cls_set, "__init__", set_init);
-        amap_set(&cls_set->ns, S_repr, mkbuiltin("__repr__", nat_set_repr));
+        amap_set(&cls_set->ns, intern_c("__ior__"), mkbuiltin("__ior__", nat_ior));
+        amap_set(&cls_set->ns, intern_c("__iand__"), mkbuiltin("__iand__", nat_iand));
+        amap_set(&cls_set->ns, intern_c("__isub__"), mkbuiltin("__isub__", nat_isub));
+        amap_set(&cls_set->ns, intern_c("__ixor__"), mkbuiltin("__ixor__", nat_ixor));
     }
     /* list, tuple */
     def_bi(cls_list, "append", l_append); def_bi(cls_list, "extend", l_extend);
@@ -1168,6 +1176,17 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_set, "update", st_update); def_bi(cls_set, "issubset", st_issubset);
     def_bi(cls_set, "issuperset", st_issuperset); def_bi(cls_set, "isdisjoint", st_isdisjoint);
     def_bi(cls_set, "copy", st_copy); def_bi(cls_set, "clear", st_clear);
+    def_bi(cls_set, "intersection_update", st_intersection_update);
+    def_bi(cls_set, "difference_update", st_difference_update);
+    def_bi(cls_set, "symmetric_difference_update", st_symdiff_update);
+    def_bi(cls_frozenset, "union", st_union);
+    def_bi(cls_frozenset, "intersection", st_intersection);
+    def_bi(cls_frozenset, "difference", st_difference);
+    def_bi(cls_frozenset, "symmetric_difference", st_symdiff);
+    def_bi(cls_frozenset, "issubset", st_issubset);
+    def_bi(cls_frozenset, "issuperset", st_issuperset);
+    def_bi(cls_frozenset, "isdisjoint", st_isdisjoint);
+    def_bi(cls_frozenset, "copy", st_copy);
     {
         Class *nk[3];
         int k;

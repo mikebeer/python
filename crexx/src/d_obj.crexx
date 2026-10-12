@@ -405,7 +405,7 @@ set_btype: procedure = .void
   cl_bt[c] = 0
   do i = 1 to cl_mn[c] - 1
     k = mro_a[cl_ms[c] + i - 1]
-    if k = C_DICT | k = C_LIST | k = C_TUPLE | k = C_SET | k = C_STR | k = C_INT | k = C_FLOAT | k = C_BYTES | k = C_BYTEARRAY then do
+    if k = C_DICT | k = C_LIST | k = C_TUPLE | k = C_SET | k = C_FROZENSET | k = C_STR | k = C_INT | k = C_FLOAT | k = C_BYTES | k = C_BYTEARRAY then do
       cl_bt[c] = k
       return
     end

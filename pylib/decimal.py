@@ -107,6 +107,17 @@ def localcontext(ctx=None, **kw):
     return _LocalCtx(ctx, kw)
 
 
+def _modinv(a, m):
+    # modular inverse by the extended Euclid algorithm (m is prime); no 3-argument pow
+    a = a % m
+    r0, r1, t0, t1 = m, a, 0, 1
+    while r1:
+        q = r0 // r1
+        r0, r1 = r1, r0 - q * r1
+        t0, t1 = t1, t0 - q * t1
+    return t0 % m
+
+
 def _ndig(n):
     return len(str(n))
 
@@ -482,13 +493,18 @@ class Decimal:
         return self._sp != "" or self._c != 0
 
     def __hash__(self):
+        # CPython's scheme: the value modulo the Mersenne prime 2**61 - 1, so that equal
+        # numbers (Decimal(1), 1, 1.0, Decimal('0.5'), 0.5, Fraction(1, 2)) hash equal
+        if self._sp == "F":
+            return -314159 if self._s else 314159
         if self._sp:
             return hash(str(self))
         n, d = self._ratio()
-        if d == 1:
-            return hash(n)
-        return hash(float(self)) if float(Decimal(float(self))) == float(self) and Decimal(float(self)) == self \
-            else hash((n, d))
+        m = 2305843009213693951
+        h = abs(n) % m * _modinv(d, m) % m
+        if n < 0:
+            h = -h
+        return -2 if h == -1 else h
 
     def __floor__(self):
         n, d = self._ratio()

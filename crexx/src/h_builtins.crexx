@@ -867,7 +867,9 @@ bi_hash: procedure = .int
     end
     when k = K_NONE then return mkint(1)
     when k = K_SET then do
-      /* frozenset: order independent combination of the element hashes */
+      /* frozenset: CPython's algorithm (_shuffle_bits); set is unhashable */
+      if is_fs(x) = 0 then return raise_exc(C_TYPEERROR, "unhashable type: 'set'")
+      return fs_hash(x)
       h = 0
       e = dd_head[ob_x[x % 2]]
       do while e > 0
@@ -1375,6 +1377,15 @@ bcall_type: procedure = .int
     end
     when c = C_DICT then return ctor_dict(base, na, nk)
     when c = C_SET then return ctor_set(base, na)
+    when c = C_FROZENSET then do
+      if na > 0 then do
+        if kind_of(ast[base + 1]) = K_SET & ob_c[ast[base + 1] % 2] = C_FROZENSET then return ast[base + 1]
+      end
+      o = ctor_set(base, na)
+      if o = 0 then return 0
+      ob_c[o % 2] = C_FROZENSET
+      return o
+    end
     when c = C_OBJECT then return inst_new(C_OBJECT)
     when c = C_TYPE then do
       if na = 1 then return cl_obj[cls_of(ast[base + 1])]

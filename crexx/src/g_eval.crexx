@@ -624,6 +624,7 @@ aug_op_apply: procedure = .int
     return cur
   end
   if k = K_SET & kind_of(v) = K_SET & (op = O_BITOR | op = O_BITAND | op = O_SUB | op = O_BITXOR) then do
+    if is_fs(cur) = 1 then return set_op(op, cur, v)
     l = set_op(op, cur, v)
     ob_x[cur % 2] = ob_x[l % 2]
     ob_x[l % 2] = 0

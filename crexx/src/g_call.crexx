@@ -516,6 +516,9 @@ getattr_obj: procedure = .int
   if k = K_NONE then return no_attr(o, nid)
   if k = K_STR | k = K_LIST | k = K_DICT | k = K_SET | k = K_TUPLE | k = K_INT | k = K_BIG | k = K_BOOL | k = K_FLOAT then do
     if known_meth(k, nid_name[nid]) = 0 then return no_attr(o, nid)
+    if k = K_SET then do
+      if fs_mut(nid_name[nid]) = 1 & is_fs(o) = 1 then return no_attr(o, nid)
+    end
   end
   return mkbmethb(o, nid)
 

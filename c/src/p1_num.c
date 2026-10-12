@@ -758,9 +758,9 @@ static unsigned long hash_fold(Value h)
     if (h.t != T_BIG) return (unsigned long)h.u.i;
     {
         Big *g = AS_BIG(h);
-        unsigned long x = 7;
+        unsigned long x = 0;
         int i;
-        for (i = 0; i < g->n; i++) x = x * 10007UL + g->d[i];
+        for (i = g->n - 1; i >= 0; i--) x = x * 10000UL + g->d[i];   /* exact on a 64 bit long */
         return g->sign < 0 ? 0UL - x : x;
     }
 }

@@ -95,3 +95,4 @@ ProcessLookupError OSError 3 1
 ChildProcessError OSError 3 1
 ndarray object 1 0
 AxisError ValueError 3 0
+frozenset object 1 1

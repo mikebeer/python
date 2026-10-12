@@ -79,6 +79,13 @@ typedef struct Dict {
     DEnt *e;
     long *idx;       /* hash index, -1 empty, -2 deleted */
     long isz;
+    /* sets only: a set is either a CPython-compatible open-addressing table (idx == NULL: e has
+       cap slots, used == cap, empty and dummy slots have k.t == T_UNSET, dummy has v.t == T_NONE)
+       or, once it holds a key whose CPython hash is not reproducible, insertion ordered like a
+       dict (idx != NULL) */
+    long fill;       /* table mode: active + dummy slots */
+    long finger;     /* table mode: set.pop() search position */
+    int frozen;      /* frozenset */
 } Dict;
 
 typedef struct AMap {
@@ -718,6 +725,7 @@ static Dict *dict_new_t(int type)
 {
     Dict *d = (Dict *)gc_alloc(sizeof(Dict), type);
     d->n = 0; d->used = 0; d->cap = 0; d->e = NULL; d->idx = NULL; d->isz = 0;
+    d->fill = 0; d->finger = 0; d->frozen = 0;
     return d;
 }
 static Dict *dict_new(void)
@@ -776,9 +784,8 @@ static int dict_get(Dict *d, Value k, Value *out)
     *out = d->e[e].v;
     return 1;
 }
-static void dict_set(Dict *d, Value k, Value v)
+static void dict_set_h(Dict *d, Value k, Value v, unsigned long h)
 {
-    unsigned long h = py_hash(k);
     long e = dict_find(d, k, h);
     long i;
     if (e >= 0) { d->e[e].v = v; return; }
@@ -795,9 +802,12 @@ static void dict_set(Dict *d, Value k, Value v)
     d->used++;
     d->n++;
 }
-static int dict_del(Dict *d, Value k)
+static void dict_set(Dict *d, Value k, Value v)
 {
-    unsigned long h = py_hash(k);
+    dict_set_h(d, k, v, py_hash(k));
+}
+static int dict_del_h(Dict *d, Value k, unsigned long h)
+{
     long e = dict_find(d, k, h);
     long i;
     if (e < 0) return 0;
@@ -809,14 +819,318 @@ static int dict_del(Dict *d, Value k)
     d->n--;
     return 1;
 }
+static int dict_del(Dict *d, Value k)
+{
+    return dict_del_h(d, k, py_hash(k));
+}
 static void dict_clear(Dict *d)
 {
     free(d->e); free(d->idx);
     d->e = NULL; d->idx = NULL; d->n = d->used = d->cap = d->isz = 0;
+    d->fill = 0;
+}
+
+/* ---- sets ---------------------------------------------------------------
+   A set emulates CPython's setobject.c so that the iteration order of sets of ints (and of
+   anything else with a reproducible hash: bool, None, float, complex, tuples and frozensets of
+   those) is the same as in CPython: open addressing, LINEAR_PROBES = 9, perturb shift 5, dummy
+   slots after a discard, the table grows x4 (x2 above 50000 entries) when fill reaches 3/5 of
+   the slots.  The emulation is exact when unsigned long has 64 bits (the hashes are then the
+   CPython values).  Strings, bytes and objects hash differently in CPython on every run, so a
+   set that receives such a key switches to insertion order (dict mode, idx != NULL). */
+#define SET_MINSIZE 8L
+#define SET_LINEAR 9UL
+#define SET_SHIFT 5
+#define SE_EMPTY(e) ((e)->k.t == T_UNSET && (e)->v.t == T_UNSET)
+#define SE_ACTIVE(e) ((e)->k.t != T_UNSET)
+#define SET_ORDERED(d) ((d)->idx != NULL)
+
+/* is the CPython hash of k reproducible (the same in every run)? */
+static int key_det(Value k)
+{
+    switch (k.t) {
+    case T_NONE: case T_BOOL: case T_INT: case T_BIG: case T_FLOAT: case T_COMPLEX: return 1;
+    case T_TUPLE: {
+        List *l = (List *)k.u.o;
+        long i;
+        for (i = 0; i < l->n; i++) if (!key_det(l->a[i])) return 0;
+        return 1; }
+    case T_SET: {
+        Dict *d = (Dict *)k.u.o;
+        long i;
+        if (!d->frozen) return 0;
+        for (i = 0; i < d->used; i++)
+            if (d->e[i].k.t != T_UNSET && !key_det(d->e[i].k)) return 0;
+        return 1; }
+    default: return 0;
+    }
+}
+static int set_keyeq(Value ek, Value k)
+{
+    if (ek.t == T_INT && k.t == T_INT) return ek.u.i == k.u.i;
+    if (IS_HEAP(ek.t) && ek.t == k.t && ek.u.o == k.u.o) return 1;
+    if (ek.t == T_STR && k.t == T_STR)
+        return AS_STR(ek)->len == AS_STR(k)->len &&
+               memcmp(AS_STR(ek)->s, AS_STR(k)->s, (size_t)AS_STR(k)->len) == 0;
+    return py_eq(ek, k);
+}
+static void set_alloc_table(Dict *d, long size)
+{
+    long i;
+    DEnt *t = (DEnt *)xmalloc(sizeof(DEnt) * (size_t)size);
+    for (i = 0; i < size; i++) { t[i].k.t = T_UNSET; t[i].v.t = T_UNSET; t[i].hash = 0; }
+    GC_ACCOUNT(sizeof(DEnt) * (size_t)size);
+    d->e = t;
+    d->cap = d->used = size;
+}
+static unsigned long set_mask(Dict *d)
+{
+    return d->cap ? (unsigned long)d->cap - 1UL : (unsigned long)SET_MINSIZE - 1UL;
+}
+static void set_insert_clean(DEnt *tab, unsigned long mask, Value k, unsigned long h)
+{
+    unsigned long perturb = h, i = h & mask, j;
+    DEnt *e;
+    for (;;) {
+        e = tab + i;
+        if (SE_EMPTY(e)) break;
+        if (i + SET_LINEAR <= mask) {
+            for (j = 0; j < SET_LINEAR; j++) {
+                e++;
+                if (SE_EMPTY(e)) break;
+            }
+            if (j < SET_LINEAR) break;
+        }
+        perturb >>= SET_SHIFT;
+        i = (i * 5UL + 1UL + perturb) & mask;
+    }
+    e->k = k; e->v = NONE_V; e->hash = h;
+}
+/* CPython's set_table_resize: the smallest power of two > minused (at least 8) */
+static void set_resize(Dict *d, long minused)
+{
+    long newsize = SET_MINSIZE, i, oldsize = d->cap;
+    DEnt *old = d->e;
+    while (newsize <= minused) newsize <<= 1;
+    if (newsize == SET_MINSIZE && oldsize <= SET_MINSIZE && d->fill == d->n) return;
+    set_alloc_table(d, newsize);
+    for (i = 0; i < oldsize; i++)
+        if (SE_ACTIVE(old + i))
+            set_insert_clean(d->e, (unsigned long)newsize - 1UL, old[i].k, old[i].hash);
+    free(old);
+    d->fill = d->n;
+}
+/* a table mode set becomes insertion ordered (keeps the entries in table order) */
+static void set_to_ordered(Dict *d)
+{
+    DEnt *old = d->e;
+    long i, oldsize = d->cap;
+    d->e = NULL; d->idx = NULL; d->n = d->used = d->cap = d->isz = 0; d->fill = 0;
+    for (i = 0; i < oldsize; i++)
+        if (SE_ACTIVE(old + i)) dict_set_h(d, old[i].k, NONE_V, old[i].hash);
+    free(old);
+    if (!d->idx) dict_rebuild(d, 4);        /* an empty set that switched: stay in dict mode */
+}
+/* index of the entry holding k, -1 if absent (table mode and dict mode) */
+static long set_find(Dict *d, Value k, unsigned long h)
+{
+    unsigned long mask, perturb = h, i, probes;
+    DEnt *e, *tab;
+    if (SET_ORDERED(d)) return dict_find(d, k, h);
+    if (!d->e) return -1;
+    mask = (unsigned long)d->cap - 1UL;
+restart:
+    tab = d->e;
+    i = h & mask;
+    perturb = h;
+    for (;;) {
+        e = tab + i;
+        probes = (i + SET_LINEAR <= mask) ? SET_LINEAR : 0;
+        do {
+            if (SE_EMPTY(e)) return -1;
+            if (SE_ACTIVE(e) && e->hash == h) {
+                Value ek = e->k;
+                if (set_keyeq(ek, k)) return (long)(e - tab);
+                if (d->e != tab || !SE_ACTIVE(e)) goto restart;
+            }
+            e++;
+        } while (probes--);
+        perturb >>= SET_SHIFT;
+        i = (i * 5UL + 1UL + perturb) & mask;
+    }
+}
+static int set_has_h(Dict *d, Value k, unsigned long h)
+{
+    return set_find(d, k, h) >= 0;
+}
+/* CPython's set_add_entry */
+static void set_add_h(Dict *d, Value k, unsigned long h)
+{
+    unsigned long mask, perturb, i, probes;
+    DEnt *e, *freeslot, *tab;
+    if (SET_ORDERED(d)) { dict_set_h(d, k, NONE_V, h); return; }
+    if (!key_det(k)) {
+        if (set_find(d, k, h) >= 0) return;
+        set_to_ordered(d);
+        dict_set_h(d, k, NONE_V, h);
+        return;
+    }
+    if (!d->e) set_alloc_table(d, SET_MINSIZE);
+restart:
+    tab = d->e;
+    mask = (unsigned long)d->cap - 1UL;
+    i = h & mask;
+    freeslot = NULL;
+    perturb = h;
+    for (;;) {
+        e = tab + i;
+        probes = (i + SET_LINEAR <= mask) ? SET_LINEAR : 0;
+        do {
+            if (SE_EMPTY(e)) goto unused;
+            if (SE_ACTIVE(e)) {
+                if (e->hash == h) {
+                    if (set_keyeq(e->k, k)) return;
+                    if (d->e != tab || !SE_ACTIVE(e)) goto restart;
+                }
+            } else freeslot = e;       /* CPython 3.13: the last dummy seen, not the first */
+            e++;
+        } while (probes--);
+        perturb >>= SET_SHIFT;
+        i = (i * 5UL + 1UL + perturb) & mask;
+    }
+unused:
+    if (freeslot) {
+        d->n++;
+        freeslot->k = k; freeslot->v = NONE_V; freeslot->hash = h;
+        return;
+    }
+    d->fill++;
+    d->n++;
+    e->k = k; e->v = NONE_V; e->hash = h;
+    if ((unsigned long)d->fill * 5UL < mask * 3UL) return;
+    set_resize(d, d->n > 50000L ? d->n * 2 : d->n * 4);
+}
+/* hash used for membership tests: a (non frozen) set is looked up by its frozenset hash */
+static unsigned long fset_hash(Dict *d);
+static unsigned long set_key_hash(Value k)
+{
+    if (k.t == T_SET) return fset_hash(AS_DICT(k));
+    return py_hash(k);
 }
 static void set_add(Dict *d, Value k)
 {
-    dict_set(d, k, NONE_V);
+    set_add_h(d, k, py_hash(k));
+}
+static int set_has(Dict *d, Value k)
+{
+    return set_find(d, k, set_key_hash(k)) >= 0;
+}
+/* remove k; 1 if it was there */
+static int set_discard_h(Dict *d, Value k, unsigned long h)
+{
+    long i = set_find(d, k, h);
+    if (i < 0) return 0;
+    if (SET_ORDERED(d)) return dict_del_h(d, d->e[i].k, h);
+    d->e[i].k = UNSET_V;
+    d->e[i].v = NONE_V;         /* dummy */
+    d->n--;
+    return 1;
+}
+static int set_discard(Dict *d, Value k)
+{
+    return set_discard_h(d, k, set_key_hash(k));
+}
+/* CPython's frozenset hash: xor of the shuffled entry hashes, then mixed with the size */
+static unsigned long set_shuffle(unsigned long h)
+{
+    return ((h ^ 89869747UL) ^ (h << 16)) * 3644798167UL;
+}
+static unsigned long fset_hash(Dict *d)
+{
+    unsigned long h = 0;
+    long i;
+    for (i = 0; i < d->used; i++)
+        if (SE_ACTIVE(d->e + i)) h ^= set_shuffle(d->e[i].hash);
+    h ^= ((unsigned long)d->n + 1UL) * 1927868237UL;
+    h ^= (h >> 11) ^ (h >> 25);
+    h = h * 69069UL + 907133923UL;
+    if (h == (unsigned long)-1L) h = 590923713UL;
+    return h;
+}
+/* empty the set and give back its table (CPython: the table shrinks to the minimum) */
+static void set_clear(Dict *d)
+{
+    dict_clear(d);
+}
+/* exchange the contents of two sets (set_swap_bodies) */
+static void set_swap(Dict *a, Dict *b)
+{
+    Dict t;
+    t.n = a->n; t.used = a->used; t.cap = a->cap; t.e = a->e; t.idx = a->idx; t.isz = a->isz;
+    t.fill = a->fill;
+    a->n = b->n; a->used = b->used; a->cap = b->cap; a->e = b->e; a->idx = b->idx; a->isz = b->isz;
+    a->fill = b->fill;
+    b->n = t.n; b->used = t.used; b->cap = t.cap; b->e = t.e; b->idx = t.idx; b->isz = t.isz;
+    b->fill = t.fill;
+}
+/* CPython's set_merge: add every element of other to so */
+static void set_merge(Dict *so, Dict *other)
+{
+    long i;
+    unsigned long mask;
+    if (so == other || other->n == 0) return;
+    if (SET_ORDERED(so) || SET_ORDERED(other)) {
+        for (i = 0; i < other->used; i++)
+            if (SE_ACTIVE(other->e + i)) set_add_h(so, other->e[i].k, other->e[i].hash);
+        return;
+    }
+    mask = set_mask(so);
+    if ((unsigned long)(so->fill + other->n) * 5UL >= mask * 3UL)
+        set_resize(so, (so->n + other->n) * 2);
+    if (!so->e) set_alloc_table(so, SET_MINSIZE);
+    mask = set_mask(so);
+    if (so->fill == 0 && mask == set_mask(other) && other->fill == other->n) {
+        for (i = 0; i < other->used; i++) so->e[i] = other->e[i];
+        so->fill = other->fill;
+        so->n = other->n;
+        return;
+    }
+    if (so->fill == 0) {
+        so->fill = other->n;
+        so->n = other->n;
+        for (i = 0; i < other->used; i++)
+            if (SE_ACTIVE(other->e + i))
+                set_insert_clean(so->e, mask, other->e[i].k, other->e[i].hash);
+        return;
+    }
+    for (i = 0; i < other->used; i++)
+        if (SE_ACTIVE(other->e + i)) set_add_h(so, other->e[i].k, other->e[i].hash);
+}
+/* CPython's set.pop: the search starts where the last pop stopped */
+static int set_pop(Dict *d, Value *out)
+{
+    long i;
+    if (d->n == 0) return 0;
+    if (SET_ORDERED(d)) {
+        for (i = 0; i < d->used; i++)
+            if (SE_ACTIVE(d->e + i)) {
+                *out = d->e[i].k;
+                dict_del_h(d, *out, d->e[i].hash);
+                return 1;
+            }
+        return 0;
+    }
+    i = d->finger & (d->cap - 1);
+    while (!SE_ACTIVE(d->e + i)) {
+        i++;
+        if (i >= d->cap) i = 0;
+    }
+    *out = d->e[i].k;
+    d->e[i].k = UNSET_V;
+    d->e[i].v = NONE_V;
+    d->n--;
+    d->finger = i + 1;
+    return 1;
 }
 
 /* ---- garbage collector (mark and sweep) ------------------------------- */

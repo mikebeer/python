@@ -761,10 +761,12 @@ static Node *parse_comprehension(int ckind, int closer)
             if (nc == 0) {
                 cur_scope = outer;
                 iter0 = parse_or();
+                if (iter0->kind == N_SET) iter0->op = 1;    /* folded into a frozenset */
                 cur_scope = sc;
                 f->b = mk_name(s0, line);
             } else {
                 f->b = parse_or();
+                if (f->b->kind == N_SET) f->b->op = 1;
             }
             f->sidx = sc->nstate;
             sc->nstate += 2;
@@ -1418,6 +1420,7 @@ static Node *parse_stmt(void)
             n->a = parse_targets();
             expect_kw(KW_IN, "in");
             n->b = parse_testlist(1);
+            if (n->b->kind == N_SET) n->b->op = 1;      /* for x in {..}: a frozenset constant */
             expect(':', ":");
             n->c = parse_block();
             if (accept_kw(KW_ELSE)) { expect(':', ":"); n->d = parse_block(); }

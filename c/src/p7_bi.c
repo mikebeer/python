@@ -541,17 +541,26 @@ BI(bi_dict)
 }
 BI(bi_set)
 {
-    Dict *d = dict_new_t(T_SET);
-    Value dv = mkobj(d, T_SET), it, y;
-    Value *base = vsp;
-    VPUSH(dv);
+    Value dv = set_new_v(0);
+    need(x, 0, 1, "set");
     if (x->n > 0) {
-        VPUSH(A(0));
-        it = get_iter(A(0));
-        VPUSH(it);
-        while (iter_next(it, &y)) set_add(d, y);
+        VPUSH(dv);
+        set_update_value(AS_DICT(dv), A(0));
+        vsp--;
     }
-    vsp = base;
+    return dv;
+}
+BI(bi_frozenset)
+{
+    Value dv;
+    need(x, 0, 1, "frozenset");
+    if (x->n > 0 && A(0).t == T_SET && AS_DICT(A(0))->frozen) return A(0);   /* idempotent */
+    dv = set_new_v(1);
+    if (x->n > 0) {
+        VPUSH(dv);
+        set_update_value(AS_DICT(dv), A(0));
+        vsp--;
+    }
     return dv;
 }
 BI(bi_range)
@@ -1038,6 +1047,7 @@ BI(bi_hash)
     case T_FLOAT: return float_hash_exact(v.u.d);
     case T_COMPLEX: return complex_hash_exact(AS_CPLX(v)->re, AS_CPLX(v)->im);
     case T_NONE: return int_add(int_mul(mkint(42388L), mkint(100000L)), mkint(94112L));
+    case T_TUPLE: case T_SET: return mkint((long)py_hash(v));
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_hash);
         if (m) {
@@ -2044,97 +2054,177 @@ static Dict *self_set(Args *x)
         type_name(A(0)));
     return AS_DICT(A(0));
 }
-BI(st_add) { need(x, 2, 2, "add"); set_add(self_set(x), A(1)); return NONE_V; }
-BI(st_discard) { need(x, 2, 2, "discard"); dict_del(self_set(x), A(1)); return NONE_V; }
+static Dict *self_mset(Args *x, const char *nm)
+{
+    Dict *d = self_set(x);
+    if (d->frozen)
+        throw_new(cls_TypeError,
+                  "descriptor '%s' for 'set' objects doesn't apply to a 'frozenset' object", nm);
+    return d;
+}
+BI(st_add) { need(x, 2, 2, "add"); set_add(self_mset(x, "add"), A(1)); return NONE_V; }
+BI(st_discard)
+{
+    need(x, 2, 2, "discard");
+    set_discard(self_mset(x, "discard"), A(1));
+    return NONE_V;
+}
 BI(st_remove)
 {
     need(x, 2, 2, "remove");
-    if (!dict_del(self_set(x), A(1))) throw_key(A(1));
+    if (!set_discard(self_mset(x, "remove"), A(1))) throw_key(A(1));
     return NONE_V;
 }
 BI(st_pop)
 {
-    Dict *d = self_set(x);
-    long i;
-    for (i = 0; i < d->used; i++) {
-        if (d->e[i].k.t != T_UNSET) {
-            Value k = d->e[i].k;
-            dict_del(d, k);
-            return k;
-        }
-    }
+    Dict *d = self_mset(x, "pop");
+    Value k;
+    if (set_pop(d, &k)) return k;
     throw_new(cls_KeyError, "pop from an empty set");
     return NONE_V;
 }
-static Value to_set(Value v)
-{
-    Args a;
-    Value arg = v;
-    if (v.t == T_SET) return v;
-    a.n = 1; a.a = &arg; a.nk = 0; a.kw = NULL;
-    return bi_set(&a);
-}
-static Value set_method_op(Args *x, int op)
-{
-    Value r = A(0), o;
-    int i;
-    for (i = 1; i < x->n; i++) {
-        VPUSH(r);
-        o = to_set(A(i));
-        VPUSH(o);
-        r = set_op(op, r, o);
-        vsp -= 2;
-    }
-    if (x->n == 1) r = set_op(B_OR, A(0), A(0));
-    return r;
-}
-BI(st_union) { self_set(x); return set_method_op(x, B_OR); }
-BI(st_intersection) { self_set(x); return set_method_op(x, B_AND); }
-BI(st_difference) { self_set(x); return set_method_op(x, B_SUB); }
-BI(st_symdiff) { self_set(x); return set_method_op(x, B_XOR); }
-BI(st_update)
+BI(st_union)
 {
     Dict *d = self_set(x);
+    Value r = set_copy_v(d, d->frozen);
     int i;
+    VPUSH(r);
+    for (i = 1; i < x->n; i++)
+        if (as_anyset(A(i)) != d) set_update_value(AS_DICT(r), A(i));
+    vsp--;
+    return r;
+}
+static Value set_intersection_multi(Args *x, Dict *d)
+{
+    Value r = A(0);
+    int i;
+    if (x->n == 1) return set_copy_v(d, d->frozen);
     for (i = 1; i < x->n; i++) {
-        Value it, y;
-        VPUSH(A(i));
-        it = get_iter(A(i));
-        VPUSH(it);
-        while (iter_next(it, &y)) set_add(d, y);
-        vsp -= 2;
+        VPUSH(r);
+        r = set_intersection_v(AS_DICT(r), A(i));
+        vsp--;
     }
+    return r;
+}
+BI(st_intersection) { return set_intersection_multi(x, self_set(x)); }
+BI(st_difference)
+{
+    Dict *d = self_set(x);
+    Value r;
+    int i;
+    if (x->n == 1) return set_copy_v(d, d->frozen);
+    r = set_difference_v(d, A(1));
+    VPUSH(r);
+    for (i = 2; i < x->n; i++) set_diff_update(AS_DICT(r), A(i));
+    vsp--;
+    return r;
+}
+BI(st_symdiff)
+{
+    Dict *d = self_set(x);
+    need(x, 2, 2, "symmetric_difference");
+    return set_symdiff_v(d, A(1));
+}
+BI(st_update)
+{
+    Dict *d = self_mset(x, "update");
+    int i;
+    for (i = 1; i < x->n; i++) set_update_value(d, A(i));
     return NONE_V;
+}
+BI(st_intersection_update)
+{
+    Dict *d = self_mset(x, "intersection_update");
+    Value r = set_intersection_multi(x, d);
+    set_swap(d, AS_DICT(r));
+    return NONE_V;
+}
+BI(st_difference_update)
+{
+    Dict *d = self_mset(x, "difference_update");
+    int i;
+    for (i = 1; i < x->n; i++) set_diff_update(d, A(i));
+    return NONE_V;
+}
+BI(st_symdiff_update)
+{
+    Dict *d = self_mset(x, "symmetric_difference_update");
+    need(x, 2, 2, "symmetric_difference_update");
+    set_symdiff_update(d, A(1));
+    return NONE_V;
+}
+/* a <= b for two sets */
+static int set_subset(Dict *a, Dict *b)
+{
+    long i;
+    if (a->n > b->n) return 0;
+    for (i = 0; i < a->used; i++)
+        if (a->e[i].k.t != T_UNSET && !set_has_h(b, a->e[i].k, a->e[i].hash)) return 0;
+    return 1;
 }
 BI(st_issubset)
 {
-    Value o = to_set(A(1));
-    self_set(x);
-    return mkbool(rich_cmp(C_LE, A(0), o));
+    Dict *d = self_set(x), *o;
+    Value tmp;
+    int r;
+    need(x, 2, 2, "issubset");
+    o = as_anyset(A(1));
+    if (o) return mkbool(set_subset(d, o));
+    tmp = set_intersection_v(d, A(1));
+    r = AS_DICT(tmp)->n == d->n;
+    return mkbool(r);
 }
 BI(st_issuperset)
 {
-    Value o = to_set(A(1));
-    self_set(x);
-    return mkbool(rich_cmp(C_GE, A(0), o));
+    Dict *d = self_set(x), *o;
+    Value it, y;
+    Value *base = vsp;
+    need(x, 2, 2, "issuperset");
+    o = as_anyset(A(1));
+    if (o) return mkbool(set_subset(o, d));
+    VPUSH(A(1));
+    it = get_iter(A(1));
+    VPUSH(it);
+    while (iter_next(it, &y)) {
+        if (!set_has(d, y)) { vsp = base; return FALSE_V; }
+    }
+    vsp = base;
+    return TRUE_V;
 }
 BI(st_isdisjoint)
 {
-    Value o = to_set(A(1)), r;
-    self_set(x);
-    VPUSH(o);
-    r = set_op(B_AND, A(0), o);
-    vsp--;
-    return mkbool(AS_DICT(r)->n == 0);
+    Dict *d = self_set(x), *o;
+    Value it, y;
+    Value *base = vsp;
+    long i;
+    need(x, 2, 2, "isdisjoint");
+    o = as_anyset(A(1));
+    if (o == d) return mkbool(d->n == 0);
+    if (o) {
+        Dict *a = d, *b = o;
+        if (b->n > a->n) { a = o; b = d; }
+        for (i = 0; i < b->used; i++)
+            if (b->e[i].k.t != T_UNSET && set_has_h(a, b->e[i].k, b->e[i].hash)) return FALSE_V;
+        return TRUE_V;
+    }
+    VPUSH(A(1));
+    it = get_iter(A(1));
+    VPUSH(it);
+    while (iter_next(it, &y)) {
+        if (set_has(d, y)) { vsp = base; return FALSE_V; }
+    }
+    vsp = base;
+    return TRUE_V;
 }
 BI(st_copy)
 {
-    self_set(x);
-    return set_op(B_OR, A(0), A(0));
+    Dict *d = self_set(x);
+    if (d->frozen) return A(0);            /* frozenset.copy() returns the object itself */
+    return set_copy_v(d, 0);
 }
 BI(st_clear)
 {
-    dict_clear(self_set(x));
+    set_clear(self_mset(x, "clear"));
     return NONE_V;
 }
 
@@ -2538,11 +2628,25 @@ BI(nat_set_repr)
     buf_add(&b, AS_INST(self)->cls->name->s);
     buf_addc(&b, '(');
     if (pay.t == T_BARR) buf_addn(&b, rs->s + 10, rs->len - 11);   /* inside bytearray(...) */
+    else if (AS_DICT(pay)->n > 0 && AS_DICT(pay)->frozen)
+        buf_addn(&b, rs->s + 10, rs->len - 11);        /* inside frozenset(...) */
     else if (AS_DICT(pay)->n > 0) buf_addn(&b, rs->s, rs->len);
     buf_addc(&b, ')');
     r = buf_value(&b);
     return r;
 }
+/* in-place operators of set subclass instances: no selfpay, the instance itself is returned */
+static Value nat_iop(Args *x, int op)
+{
+    Value self = A(0), r;
+    need(x, 2, 2, "__ior__");
+    r = inplace_binop(op, unpay(self), unpay(A(1)));
+    return r.t == T_SET && r.u.o == unpay(self).u.o ? self : r;
+}
+BI(nat_ior) { return nat_iop(x, B_OR); }
+BI(nat_iand) { return nat_iop(x, B_AND); }
+BI(nat_isub) { return nat_iop(x, B_SUB); }
+BI(nat_ixor) { return nat_iop(x, B_XOR); }
 BI(nat_hash) { return mkint((long)py_hash(A(0))); }
 BI(nat_add) { need(x, 2, 2, "__add__"); return binop(B_ADD, A(0), unpay(A(1))); }
 BI(nat_mul) { need(x, 2, 2, "__mul__"); return binop(B_MUL, A(0), A(1)); }
@@ -2607,17 +2711,10 @@ BI(list_init)
 }
 BI(set_init)
 {
-    Dict *d = self_set(x);
+    Dict *d = self_mset(x, "__init__");
     need(x, 1, 2, "__init__");
-    dict_clear(d);
-    if (x->n > 1) {
-        Value it, y;
-        VPUSH(A(1));
-        it = get_iter(A(1));
-        VPUSH(it);
-        while (iter_next(it, &y)) set_add(d, y);
-        vsp -= 2;
-    }
+    set_clear(d);
+    if (x->n > 1) set_update_value(d, A(1));
     return NONE_V;
 }
 BI(obj_setattr)

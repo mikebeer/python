@@ -111,7 +111,7 @@ nat_empty: procedure = .int
   o = .int
   if bt = C_LIST then o = mklist(4)
   else if bt = C_DICT then o = dict_new(K_DICT)
-  else if bt = C_SET then o = dict_new(K_SET)
+  else if bt = C_SET | bt = C_FROZENSET then o = dict_new(K_SET)
   else if bt = C_BYTEARRAY then o = mkbytearr("")
   else o = mklist(4)
   ob_c[o % 2] = c
@@ -137,7 +137,7 @@ nat_wrap: procedure = .int
     o = mklist(ob_n[v % 2])
     call list_extend_from o, v
   end
-  else if bt = C_DICT | bt = C_SET then do
+  else if bt = C_DICT | bt = C_SET | bt = C_FROZENSET then do
     o = dict_new(ob_k[v % 2])
     call dict_update o, v
     ob_y[o % 2] = ob_y[v % 2]

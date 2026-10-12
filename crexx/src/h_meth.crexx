@@ -1170,6 +1170,16 @@ meth_set: procedure = .int
   x = .int
   ok = .int
   d = ob_x[o % 2]
+  if is_fs(o) = 1 then do
+    if nid = M___INIT__ then return NONE_OOP
+    if fs_mut(nid_name[nid]) = 1 then return no_attr(o, nid)
+    if nid = M_COPY then do
+      if ob_c[o % 2] = C_FROZENSET then return o
+      t = dict_copy(o)
+      ob_c[t % 2] = C_FROZENSET
+      return t
+    end
+  end
   select
     when nid = M___INIT__ then do
       call dict_clear d
@@ -1227,9 +1237,10 @@ meth_set: procedure = .int
         else if nid = M_DIFFERENCE then t = set_op(O_SUB, t, x)
         else t = set_op(O_BITXOR, t, x)
       end
+      if is_fs(o) = 1 then ob_c[t % 2] = C_FROZENSET
       return t
     end
-    when nid = M_UPDATE | nid = M_INTERSECTION_UPDATE | nid = M_DIFFERENCE_UPDATE then do
+    when nid = M_UPDATE | nid = M_INTERSECTION_UPDATE | nid = M_DIFFERENCE_UPDATE | nid = M_SYMMETRIC_DIFFERENCE_UPDATE then do
       do i = 1 to na
         x = ast[base + i]
         if kind_of(x) \= K_SET then do
@@ -1242,7 +1253,8 @@ meth_set: procedure = .int
         end
         if nid = M_UPDATE then t = set_op(O_BITOR, o, x)
         else if nid = M_INTERSECTION_UPDATE then t = set_op(O_BITAND, o, x)
-        else t = set_op(O_SUB, o, x)
+        else if nid = M_DIFFERENCE_UPDATE then t = set_op(O_SUB, o, x)
+        else t = set_op(O_BITXOR, o, x)
         ob_x[o % 2] = ob_x[t % 2]
         ob_x[t % 2] = 0
       end

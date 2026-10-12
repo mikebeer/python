@@ -962,7 +962,10 @@ bcall_mod: procedure = .int
       v = ast[base + 1]
       if kind_of(v) = K_LIST then return iter_list(v)
       if kind_of(v) = K_DICT then return dict_copy(v)
-      if kind_of(v) = K_SET then return dict_copy(v)
+      if kind_of(v) = K_SET then do
+        if is_fs(v) = 1 then return v
+        return dict_copy(v)
+      end
       if kind_of(v) = K_INST then do
         o = deep_copy(v)
         return o

@@ -63,6 +63,11 @@ numpy's pairwise summation so results agree to the last digit.
   LAPACK's `dlanv2`). Also `cumsum sort argsort unique diag trace count_nonzero allclose array_equal`, `isinstance(a, np.ndarray)` and `a.dtype == complex`. Not supported: complex `linspace` and most other helpers (TypeError).
   `a.dtype` is a `str` subclass (`pylib/numpy/_dt.py`) that also compares equal to `float` / `int` / `complex` / `bool` and to dtype names.
   `np.fft` is a lazy proxy that loads `numpy.fft` (`pylib/numpy/fft.py`), `numpy._overlay.fft` on the C interpreter.
+- `frozenset` is its own class (not a subclass of `set`): a `K_SET` object whose `ob_c` is `C_FROZENSET` (or a subclass of it).
+  No mutating methods (`AttributeError`), `hash()` follows CPython's `frozenset_hash` (`fs_hash`, `_shuffle_bits` on 64 bits, so
+  int-only sets hash like CPython), set operators and `union` etc. return the type of the left operand (`frozenset | set` is a
+  `frozenset`), `copy()` returns the same object, `|=` rebinds. `hash(set)` raises `TypeError`; elements and dict keys are
+  still looked up by the order independent key of `hashkey`.
 - Subclassing built-in types: `class X(list | dict | set | frozenset | tuple | str | int | float | bytes | bytearray |
   Exception | object)`. An instance is a native object (`K_LIST`, ...) whose `ob_c` holds the class id; instance
   attributes live in a `K_INST` holder (stem `nat_at`). Operators, `len`, `in`, iteration, `x[i]`, `repr`, `str`,
@@ -70,7 +75,7 @@ numpy's pairwise summation so results agree to the last digit.
   implementation explicitly (`dict.__setitem__(self, k, v)`, `super().append(v)`, `list.append(self, v)`) skips the
   override once (`nat_skip`). `type.__new__` protocol: calling a class runs `__new__` then `__init__` when the result is an
   instance; `object.__new__(cls)`, `super().__new__(cls, ...)`, `tuple.__new__(cls, it)`, `int.__new__`, `float.__new__`,
-  `str.__new__`, `frozenset.__new__` (`frozenset` is the same class as `set`). Unbound built-in methods are values
+  `str.__new__`, `frozenset.__new__`. Unbound built-in methods are values
   (`push = list.append`).
 - `socket` (`crexx/pylib/socket.py`) and `select` (`crexx/pylib/select.py`): blocking IPv4 TCP over the `rxsocket`
   library through the internal builtin `_sock(op, handle, a, b)` (`l_sock.crexx`): `socket bind listen accept connect

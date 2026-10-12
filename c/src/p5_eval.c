@@ -378,6 +378,22 @@ static int gen_resume(Gen *g, Value *out)
     return 0;
 }
 
+/* a constant (or a tuple of constants) with a reproducible hash */
+static int lit_const_det(Node *c)
+{
+    int i;
+    if (c->kind == N_CONST) return c->val.t != T_UNSET && key_det(c->val);
+    if (c->kind != N_TUPLE) return 0;
+    for (i = 0; i < c->n; i++) if (!lit_const_det(c->list[i])) return 0;
+    return 1;
+}
+/* a set display of such constants only (CPython compiles it to a frozenset constant) */
+static int set_lit_const(Node *n)
+{
+    int i;
+    for (i = 0; i < n->n; i++) if (!lit_const_det(n->list[i])) return 0;
+    return 1;
+}
 /* list, dict and set payloads start empty and are filled by __init__; the others take the args */
 static int pay_takes_args(Class *pc)
 {
@@ -976,15 +992,28 @@ static Value eval(Frame *f, Node *n)
         Value dv = mkobj(d, T_SET);
         int i;
         VPUSH(dv);
+        if (((n->op == 0 && n->n > 2) || (n->op == 1 && n->n > 0)) && set_lit_const(n)) {
+            /* CPython folds a display of constants into a frozenset constant: built from the
+               items, then rebuilt from its own iteration order by the constant cache; a plain
+               display merges it into the new set, a for loop iterates it */
+            Value t1 = set_new_v(0), t2 = set_new_v(1);
+            Dict *a = AS_DICT(t1), *b = AS_DICT(t2);
+            VPUSH(t1); VPUSH(t2);
+            for (i = 0; i < n->n; i++) set_add(a, eval(f, n->list[i]));
+            for (i = 0; i < a->used; i++)
+                if (a->e[i].k.t != T_UNSET) set_add(b, a->e[i].k);
+            if (n->op == 1) { vsp -= 3; return t2; }
+            set_merge(d, b);
+            vsp -= 3;
+            return dv;
+        }
         for (i = 0; i < n->n; i++) {
             Node *c = n->list[i];
             if (c->kind == N_STAR) {
-                Value sv = eval(f, c->a), it, x;
+                Value sv = eval(f, c->a);
                 VPUSH(sv);
-                it = get_iter(sv);
-                VPUSH(it);
-                while (iter_next(it, &x)) set_add(d, x);
-                vsp -= 2;
+                set_update_value(d, sv);
+                vsp--;
             } else set_add(d, eval(f, c));
         }
         vsp--;
@@ -1254,7 +1283,7 @@ static Class *make_class(Str *name, Class **bl, int nb, Str *modname)
         Class *k = c->mro[i];
         if (k == cls_list || k == cls_dict || k == cls_set || k == cls_tuple || k == cls_str ||
             k == cls_int || k == cls_float || k == cls_bytes || k == cls_bytearray ||
-            k == cls_complex)
+            k == cls_complex || k == cls_frozenset)
             c->paycls = k;
     }
     return c;
