@@ -1,0 +1,12 @@
+(3, 4) 3 5.0 True 2 True 4 (3, 4) True
+[1, 2, 10] 13 3 True 10 [1, 2, 10, 1] [1, 2, 10] MyList
+{'a': 2, 'b': 1} 0 2 [('a', 2), ('b', 1)] {'a': 2, 'b': 1} True True
+Meters(2.5) 3.5 Meters(1.0) True
+bob BOB! bobx 3 True b True 1
+True 5
+3
+set q
+{'q': 1, 'z': 2} ['q', 'z']
+Pt(a=1, b=2) True
+bad 7 True
+S({10}) True

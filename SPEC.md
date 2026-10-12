@@ -75,3 +75,16 @@ float arrays print like numpy where feasible. Scalars returned by reductions are
   simpson, solve_ivp RK45), `interpolate.interp1d`, `linalg` (inv det solve norm), `numpy.linalg`
   (inv det solve eigvalsh matrix_rank norm), `special` (gamma erf comb factorial beta), `spatial.distance`,
   `numpy.random` (default_rng, seed, rand, randn, randint, choice, permutation, normal - values need not match numpy).
+
+## Stage 3: complex, bytes, __new__/builtin subclassing, sockets, fft, pandas datetime (tests 22-26)
+* `complex` type (literals `3j`, `complex()`, arithmetic incl. `**`, `abs`, `conjugate`, `real/imag`, comparison `==` only,
+  hash, repr/str as CPython, format specs), `cmath` module, numpy `complex128` dtype (printing as numpy), `np.fft.*`
+  and `scipy.fft` (pure Python in pylib on top of complex), `np.roots`, complex `eigvals`.
+* `bytes`/`bytearray` basics (literals `b"..."`, indexing gives ints, slicing, `+`, `*`, `in`, `.decode()`,
+  `str.encode()`, `.split .join .startswith .find .hex`, `bytes.fromhex`, comparison, hash, repr as CPython).
+* `__new__` (incl. `object.__new__`, `super().__new__`), and subclassing of `tuple list dict set str int float
+  object Exception` with overridden methods (`super().append`, `dict.__setitem__(self, ...)`, `__missing__`).
+* `socket` module: TCP over IPv4: `socket() bind listen accept connect send sendall recv close settimeout
+  setsockopt getsockname getpeername gethostname gethostbyname inet_aton inet_ntoa htons`, constants, `OSError`
+  hierarchy (`ConnectionRefusedError`, `TimeoutError`). C: POSIX only under `-DPY_POSIX`; CREXX: via the rxsocket library.
+* pandas datetime: `Timestamp Timedelta DatetimeIndex date_range to_datetime .dt accessor resample(optional) partial string indexing`.

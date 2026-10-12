@@ -1,0 +1,17 @@
+import pandas as pd
+import numpy as np
+d = pd.date_range("2024-01-30", periods=4, freq="D")
+print(d)
+print(d.year.tolist(), d.month.tolist(), d.day.tolist(), d.dayofweek.tolist(), d.strftime("%Y-%m-%d").tolist())
+s = pd.Series([1, 2, 3, 4], index=d)
+print(s)
+print(s["2024-02-01"], s["2024-01-31":"2024-02-01"].tolist(), s.index[0], s.resample("W").sum().tolist() if False else 0)
+df = pd.DataFrame({"when": pd.to_datetime(["2024-03-01", "2024-03-15", "2024-04-02"]), "v": [10, 20, 30]})
+print(df)
+print(df.dtypes.astype(str).tolist(), df["when"].dt.month.tolist(), df["when"].dt.day_name().tolist(), (df["when"] + pd.Timedelta(days=10)).dt.strftime("%m/%d").tolist())
+print((df["when"].iloc[1] - df["when"].iloc[0]).days, df["when"].max(), df["when"].diff().tolist() if False else "ok")
+print(df.groupby(df["when"].dt.month)["v"].sum())
+print(df[df["when"] > "2024-03-10"])
+print(pd.Timestamp("2024-05-06 07:08:09"), pd.Timestamp("2024-05-06").weekday(), pd.Timedelta(hours=36), pd.to_datetime("2024-12-25").year)
+print(pd.date_range("2024-01-31", periods=3, freq="ME").strftime("%Y-%m-%d").tolist(), pd.date_range("2024-01-01", "2024-01-05").shape)
+print(df.set_index("when").loc["2024-04"].shape, df["when"].dt.date.tolist()[0], pd.to_datetime("03/04/2024", format="%d/%m/%Y").month)
