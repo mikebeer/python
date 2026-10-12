@@ -25,7 +25,7 @@ On the build host (needs `python3` only for the generator tools; the C
 sources need nothing):
 
     make posix            # development build, ./py (uses pylib/ on disk)
-    make test             # 21 tests
+    make test             # 31 tests
     make embed            # ./py_embed with pylib/ compiled in (-DPY_EMBED_LIBS)
     make embed-test       # runs the tests from an EMPTY directory, PYLIB unset, bogus PY_LIBDIR
     make deck             # deck/py_deck.c, every line <= 71 columns
@@ -46,8 +46,8 @@ For VM/370 (as in apl's README, cross compiler for the GCCLIB31 headers):
 Values, default 400000 = 6.4 MB) and `MAX_DEPTH` (Python recursion limit,
 default 1000) are `#ifndef`-guarded because the default is too big for a
 16 MB CMS machine; both can be set with `-D`. `deck/py_deck_embed.c` is about
-70,500 card images (3.9 MB; the library data is roughly 3 MB of it). Use
-`deck/py_deck.c` (25,500 cards) plus module files on a minidisk if that is
+89,200 card images (5.0 MB; the library data is roughly 4 MB of it). Use
+`deck/py_deck.c` (31,700 cards, 1.0 MB) plus module files on a minidisk if that is
 too big.
 
 ## 3. The adapter layer (`src/p0_os.c`)
@@ -164,7 +164,33 @@ with `-DPY_U64_EMUL`, and the emulation checked against 64-bit arithmetic on
 made overridable.
 
 Simulating a 32-bit `long` on a 64-bit host: `-DPY_SI32 -DPY_U64_EMUL` (small
-ints limited to +-999999999, 64-bit emulation) passes all 21 tests.
+ints limited to +-999999999, 64-bit emulation) passes all 31 tests. This simulation limits the small-int range but the host
+`long` stays 64 bits, so it does not catch code that casts a double to `long` without
+testing against `SI_MAX` (that was the bug fixed in commit 6e4a7a5: `int(1e10)`
+and `Fraction(0.25)` saturated at 2147483647 on VM/370plus CMS, GCC 13 `-m31`).
+
+Sizes and results at this revision (31 tests; measured with `wc -l` and `make`):
+
+| file | lines (cards) | bytes | note |
+|---|---|---|---|
+| `src/*.c` without `pylib_embed.c` | 27,766 | | 23 files, longest line 100 |
+| `py_all.c` | 27,766 | | amalgamation |
+| `deck/py_deck.c` | 31,708 | 995,683 | the deck, checked in |
+| `src/pylib_embed.c` | 57,490 | | `pylib/` as byte arrays, 68 files, 1.15 MB of Python |
+| `deck/py_deck_embed.c` | 89,198 | 5,037,787 | deck with the library, made by `make deck-embed` |
+
+| check | result |
+|---|---|
+| `make test`, `deck-test`, `embed-test`, `deck-embed-test` | 31 of 31 each |
+| `make deckcheck`, `make linecheck` | ok |
+| `make strict` (gcc and clang syntax matrix, C99 symbol check, sanitizers) | all ok, 31 of 31 under ASan/UBSan |
+| `-DPY_SI32 -DPY_U64_EMUL` | 31 of 31 |
+| `-funsigned-char` | 31 of 31 |
+| embedded library table absent (bogus `PY_LIBDIR`, empty directory) | 13 of 31 fail, so the table is used |
+
+`py_embed_all.c`, `src/pylib_embed.c`, `deck/py_deck_embed.c` and the `py_embed*` binaries are
+generated and ignored by `c/.gitignore`; `make deck-embed` rebuilds them when anything under
+`pylib/` or `src/` changes (they were regenerated for this revision with `make -B`).
 
 Not available in this environment: clang sanitizer runtime, `-m32`, a
 s390 cross compiler, GCCLIB31 headers; so none of those were run.
@@ -191,9 +217,9 @@ Import: `sys.path` is `[script dir, "<pylib>", $PYLIB entries, <exe>/pylib,
 `numpy._overlay` work unchanged (`__file__` is `<pylib>/scipy/stats.py`). The
 script directory comes first (as in Python) so a user module can shadow a
 library module; the embedded table comes before every library directory on
-disk. Tested: all 21 tests pass in an empty directory with no `PYLIB` and
+disk. Tested: all 31 tests pass in an empty directory with no `PYLIB` and
 `PY_LIBDIR=/nonexistent` (`make embed-test`, `make deck-embed-test`); the
-same binary without the table fails 7 tests, so the table is really used.
+same binary without the table fails 13 tests, so the table is really used.
 `make deckcheck` also checks that `pylib_embed.c` itself is <= 71 columns.
 
 ## 7. Known ASCII / host assumptions that remain
@@ -277,4 +303,7 @@ based, not host-character based:
   (`host_isatty_stdin` currently 0 without `PY_POSIX`, so use `-i`).
 * Floating point (point 8) and the 32-bit `long` limits (point 9) need a run
   of the test suite on the target; expect differences in float tests.
-* Test on Hercules. Not yet run on any non-x86-64 platform.
+* Test on Hercules. The test corpus has been run once on VM/370plus CMS (GCC 13, `-m31`,
+  32-bit `long`): that run found the `SI_MAX` defect above (10_misc, 19_modules), fixed in
+  commit 6e4a7a5; its complete result is not recorded here. Otherwise not run on any
+  non-x86-64 platform.
