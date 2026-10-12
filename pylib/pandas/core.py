@@ -622,6 +622,11 @@ class Series:
         return _At(self, 'iloc')
 
     @property
+    def plot(self):
+        from .plotting import PlotAccessor
+        return PlotAccessor(self)
+
+    @property
     def str(self):
         from .strs import StringMethods
         return StringMethods(self)
@@ -2466,6 +2471,11 @@ class DataFrame:
         return DataFrame(_fast=(vals, dts, cols, idx))
 
     # ------------------------------------------------------------ properties
+    @property
+    def plot(self):
+        from .plotting import PlotAccessor
+        return PlotAccessor(self)
+
     @property
     def index(self):
         return self._idx
