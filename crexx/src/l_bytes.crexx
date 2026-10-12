@@ -26,6 +26,7 @@ bytes_like: procedure = .int
 bytes_rep: procedure = .int
   arg o = .int, n = .int
   if n < 0 then n = 0
+  if seq_too_big(length(ob_s[o % 2]), n) = 1 then return 0
   return bytes_like(o, copies(ob_s[o % 2], n))
 
 hex2: procedure = .string
@@ -234,6 +235,7 @@ str_decode: procedure = .string
     else if errs == "backslashreplace" then r = r || "\x" || hex2(b)
     else if errs == "surrogateescape" then r = r || d2c(56320 + b)
     if bad = 2 then i = n + 1
+    else if bad = 1 & need > 0 & j > 1 & (errs == "replace" | errs == "ignore") then i = i + j
     else i = i + 1
   end
   return r
@@ -301,14 +303,23 @@ ctor_bytes: procedure = .int
 
 /* hex string of s with an optional separator */
 bytes_hex: procedure = .string
-  arg s = .string, sep = .string
+  arg s = .string, sep = .string, bps = .int
   r = .string
   i = .int
   n = .int
+  g = .int
+  k = .int
   r = ""
   n = length(s)
+  g = bps
+  if g < 0 then g = 0 - g
+  if g = 0 | sep == "" then g = 1
   do i = 1 to n
-    if i > 1 then r = r || sep
+    if i > 1 then do
+      if bps >= 0 then k = (n - i + 1) // g
+      else k = (i - 1) // g
+      if k = 0 | g = 1 then r = r || sep
+    end
     r = r || hex2(c2d(substr(s, i, 1)))
   end
   return r
@@ -415,7 +426,10 @@ meth_bytes: procedure = .int
         else if kind_of(ast[base + 1]) = K_BYTES then a = ob_s[ast[base + 1] % 2]
       end
       if kwarg(base, na, nk, "sep") \= 0 then a = ob_s[kwarg(base, na, nk, "sep") % 2]
-      return mkstr(bytes_hex(s, a))
+      m = 1
+      if na >= 2 then m = clipint(ast[base + 2])
+      if kwarg(base, na, nk, "bytes_per_sep") \= 0 then m = clipint(kwarg(base, na, nk, "bytes_per_sep"))
+      return mkstr(bytes_hex(s, a, m))
     end
     when nid = M_JOIN then do
       if na \= 1 then return nargs_err("join", na, 1, 1)
@@ -433,7 +447,10 @@ meth_bytes: procedure = .int
     end
     when nid = M_UPPER then return bytes_like(o, upper(s))
     when nid = M_LOWER then return bytes_like(o, lower(s))
-    when nid = M_CAPITALIZE then return bytes_like(o, upper(left(s, 1)) || lower(substr(s, 2)))
+    when nid = M_CAPITALIZE then do
+      if s == "" then return bytes_like(o, "")
+      return bytes_like(o, upper(left(s, 1)) || lower(substr(s, 2)))
+    end
     when nid = M_SWAPCASE then return bytes_like(o, str_swapcase(s))
     when nid = M_TITLE then return bytes_like(o, str_title(s))
     when nid = M_STRIP | nid = M_LSTRIP | nid = M_RSTRIP then do
@@ -747,7 +764,7 @@ bytes_geti: procedure = .int
   i = .int
   n = .int
   s = ob_s[o % 2]
-  if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL then return raise_exc(C_TYPEERROR, "byte indices must be integers or slices, not " || type_name(ix))
+  if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL & ob_k[ix % 2] \= K_BIG then return raise_exc(C_TYPEERROR, "byte indices must be integers or slices, not " || type_name(ix))
   i = idx_int(ix)
   n = length(s)
   if i < 0 then i = i + n

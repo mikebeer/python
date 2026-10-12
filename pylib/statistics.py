@@ -9,6 +9,68 @@ class StatisticsError(ValueError):
 def _fsum(data):
     return _m.fsum(data)
 
+def _ratio(x):
+    if isinstance(x, int):
+        return int(x), 1
+    if isinstance(x, float):
+        if x != x or x in (_m.inf, -_m.inf):
+            return None
+        return x.as_integer_ratio()
+    return None
+
+
+def _exact_ss(data, mu):
+    """exact sum of squared deviations as a reduced (num, den), or None."""
+    n = len(data)
+    rs = []
+    D = 1
+    for x in data:
+        r = _ratio(x)
+        if r is None:
+            return None
+        rs.append(r)
+        if r[1] > D:
+            D = r[1]
+    ns = [a * (D // b) for a, b in rs]
+    if mu is None:
+        cn = sum(ns)
+        cd = D * n
+    else:
+        r = _ratio(mu)
+        if r is None:
+            return None
+        cn = r[0] * D
+        cd = r[1] * D
+    # x_i - c = (ns_i*cd/D ... ) -> (ns_i * cd - cn * D) / (D * cd)  with x_i = ns_i / D
+    num = 0
+    for a in ns:
+        t = a * cd - cn * D
+        num += t * t
+    den = (D * cd) ** 2
+    g = _m.gcd(num, den)
+    if g > 1:
+        num //= g
+        den //= g
+    return num, den
+
+
+def _isqrt_rto(n, m):
+    a = _m.isqrt(n // m)
+    return a | (a * a * m != n)
+
+
+def _float_sqrt_of_frac(n, m):
+    if n == 0:
+        return 0.0
+    q = (n.bit_length() - m.bit_length() - 109) // 2
+    if q >= 0:
+        numerator = _isqrt_rto(n, m << (2 * q)) << q
+        denominator = 1
+    else:
+        numerator = _isqrt_rto(n << (-2 * q), m)
+        denominator = 1 << (-q)
+    return numerator / denominator
+
 
 def mean(data):
     data = list(data)
@@ -24,6 +86,13 @@ def mean(data):
         if t % n == 0:
             return t // n
         return t / n
+    rs = [_ratio(x) for x in data]
+    if None not in rs:
+        D = 1
+        for r in rs:
+            if r[1] > D:
+                D = r[1]
+        return sum([a * (D // b) for a, b in rs]) / (D * n)
     return _fsum(data) / n
 
 
@@ -132,13 +201,14 @@ def variance(data, xbar=None):
     n = len(data)
     if n < 2:
         raise StatisticsError("variance requires at least two data points")
-    if xbar is None and all([isinstance(x, int) for x in data]):
-        t = sum(data)
-        ss = sum([(x * n - t) ** 2 for x in data])
-        d = n * n * (n - 1)
-        if ss % d == 0:
-            return ss // d
-        return ss / d
+    r = _exact_ss(data, xbar)
+    if r is not None:
+        num, den = r
+        if all([isinstance(x, int) for x in data]) and (xbar is None or isinstance(xbar, int)):
+            d = den * (n - 1)
+            if num % d == 0:
+                return num // d
+        return num / (den * (n - 1))
     return _ss(data, xbar) / (n - 1)
 
 
@@ -147,21 +217,42 @@ def pvariance(data, mu=None):
     n = len(data)
     if n < 1:
         raise StatisticsError("pvariance requires at least one data point")
-    if mu is None and all([isinstance(x, int) for x in data]):
-        t = sum(data)
-        ss = sum([(x * n - t) ** 2 for x in data])
-        d = n * n * n
-        if ss % d == 0:
-            return ss // d
-        return ss / d
+    r = _exact_ss(data, mu)
+    if r is not None:
+        num, den = r
+        if all([isinstance(x, int) for x in data]) and (mu is None or isinstance(mu, int)):
+            d = den * n
+            if num % d == 0:
+                return num // d
+        return num / (den * n)
     return _ss(data, mu) / n
 
 
 def stdev(data, xbar=None):
+    data = list(data)
+    n = len(data)
+    if n < 2:
+        raise StatisticsError("stdev requires at least two data points")
+    r = _exact_ss(data, xbar)
+    if r is not None:
+        num, den = r
+        den = den * (n - 1)
+        g = _m.gcd(num, den)
+        return _float_sqrt_of_frac(num // g, den // g)
     return _m.sqrt(variance(data, xbar))
 
 
 def pstdev(data, mu=None):
+    data = list(data)
+    n = len(data)
+    if n < 1:
+        raise StatisticsError("pstdev requires at least one data point")
+    r = _exact_ss(data, mu)
+    if r is not None:
+        num, den = r
+        den = den * n
+        g = _m.gcd(num, den)
+        return _float_sqrt_of_frac(num // g, den // g)
     return _m.sqrt(pvariance(data, mu))
 
 

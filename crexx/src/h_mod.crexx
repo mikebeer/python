@@ -260,6 +260,21 @@ rnd_below: procedure = .int
   if n > 2000000000 then r = r * 2147483647 + rnd_next()
   return r // n
 
+/* random int object in [0, n) for an int object n of any size */
+rnd_below_o: procedure = .int
+  arg n = .int
+  d = .string
+  k = .int
+  i = .int
+  if numkind(n) = 1 then return mkint(rnd_below(ival(n)))
+  d = ""
+  k = length(num_str(n)) + 10
+  do i = 1 to k
+    d = d || (rnd_next() // 10)
+  end
+  call sdivmod "1" || d, num_str(n)
+  return big_norm(sr)
+
 rnd_float: procedure = .float
   a = .int
   b = .int
@@ -473,7 +488,8 @@ bcall_mod: procedure = .int
   if bid <= BI_MATH_PERM & na >= 1 then do
     /* functions of one or two floats */
     if bid <= BI_MATH_TANH | bid = BI_MATH_HYPOT then do
-      x = mf(ast[base + 1])
+      if numkind(ast[base + 1]) = 2 & (bid = BI_MATH_FLOOR | bid = BI_MATH_CEIL | bid = BI_MATH_TRUNC | bid = BI_MATH_LOG | bid = BI_MATH_LOG10 | bid = BI_MATH_LOG2) then x = 0.0
+      else x = mf(ast[base + 1])
       if unw > 0 then return 0
       if na >= 2 then do
         y = mf(ast[base + 2])
@@ -488,7 +504,8 @@ bcall_mod: procedure = .int
     end
     when bid = BI_MATH_FLOOR | bid = BI_MATH_CEIL | bid = BI_MATH_TRUNC then do
       v = ast[base + 1]
-      if numkind(v) = 1 | numkind(v) = 2 then return mkint(ival(v))
+      if numkind(v) = 2 then return v
+      if numkind(v) = 1 then return mkint(ival(v))
       if numkind(v) \= 3 then do
         if kind_of(v) = K_INST then do
           w = cls_find(ob_c[v % 2], nameid("__floor__"))
@@ -531,13 +548,23 @@ bcall_mod: procedure = .int
     end
     when bid = BI_MATH_LOG | bid = BI_MATH_LOG10 | bid = BI_MATH_LOG2 then do
       if numkind(ast[base + 1]) = 2 then do
-        /* huge integers: use the digit count */
         s = ob_s[ast[base + 1] % 2]
         if left(s, 1) == "-" then return domain_err()
-        z = rxfloat..log10(parse_flt("0." || s)) + (length(s) as .float)
-        if bid = BI_MATH_LOG10 then return mkfloat(z)
-        if bid = BI_MATH_LOG2 then return mkfloat(z / rxfloat..log10(2.0))
-        z = z * 2.302585092994046
+        if big_float_ovf(s) = 0 then do
+          x = big_tofloat(s)
+          if bid = BI_MATH_LOG10 then z = rxfloat..log10(x)
+          else if bid = BI_MATH_LOG2 then z = rxfloat..log2(x)
+          else z = rxfloat..log(x)
+        end
+        else do
+          /* too large for a float: log(m * 2**e) = log(m) + e * log(2) with m in [0.5, 1) */
+          call big_frexp s
+          z = fr_m
+          if bid = BI_MATH_LOG10 then z = rxfloat..log10(z) + (fr_e as .float) * rxfloat..log10(2.0)
+          else if bid = BI_MATH_LOG2 then z = rxfloat..log2(z) + (fr_e as .float)
+          else z = rxfloat..log(z) + (fr_e as .float) * rxfloat..log(2.0)
+        end
+        if bid \= BI_MATH_LOG | na < 2 then return mkfloat(z)
       end
       else do
         if x <= 0.0 then return domain_err()
@@ -596,14 +623,15 @@ bcall_mod: procedure = .int
     when bid = BI_MATH_FSUM then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
-      z = 0.0
+      call fsum_start
       do forever
         v = iter_next(it)
         if v = 0 then leave
-        z = z + mf(v)
+        call fsum_add mf(v)
+        if unw > 0 then return 0
       end
       if unw > 0 then return 0
-      return mkfloat(z)
+      return mkfloat(fsum_result())
     end
     when bid = BI_MATH_PROD then do
       it = iter_new(ast[base + 1])
@@ -691,6 +719,22 @@ bcall_mod: procedure = .int
       return NONE_OOP
     end
     when bid = BI_RANDOM_RANDOM then return mkfloat(rnd_float())
+    when bid = BI_RANDOM_RANDINT & (numkind(ast[base + 1]) = 2 | numkind(ast[base + 2]) = 2) then do
+      if numcmp(ast[base + 2], ast[base + 1]) < 0 then return raise_exc(C_VALUEERROR, "empty range in randrange()")
+      return arith(O_ADD, ast[base + 1], rnd_below_o(arith(O_ADD, arith(O_SUB, ast[base + 2], ast[base + 1]), mkint(1))))
+    end
+    when bid = BI_RANDOM_RANDRANGE & na <= 2 & (numkind(ast[base + 1]) = 2 | (na = 2 & numkind(ast[base + 2]) = 2)) then do
+      if na = 1 then do
+        a = mkint(0)
+        b = ast[base + 1]
+      end
+      else do
+        a = ast[base + 1]
+        b = ast[base + 2]
+      end
+      if numcmp(b, a) <= 0 then return raise_exc(C_VALUEERROR, "empty range in randrange()")
+      return arith(O_ADD, a, rnd_below_o(arith(O_SUB, b, a)))
+    end
     when bid = BI_RANDOM_RANDINT then do
       if chk_int(ast[base + 1]) = 0 | chk_int(ast[base + 2]) = 0 then return 0
       a = ival(ast[base + 1])

@@ -1227,6 +1227,8 @@ class Pattern:
         return res
 
     def subn(self, repl, string, count=0):
+        if count > 9223372036854775807 or count < -9223372036854775808:
+            raise OverflowError("Python int too large to convert to C ssize_t")
         if callable(repl):
             parts = None
         else:

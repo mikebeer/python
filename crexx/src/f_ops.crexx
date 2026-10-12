@@ -13,12 +13,12 @@ numkind: procedure = .int
 
 tofloat: procedure = .float
   arg x = .int
-  if x // 2 \= 0 then return ((x - 1) % 2) as .float
+  if x // 2 \= 0 then return i2f((x - 1) % 2)
   if ob_k[x % 2] = K_BOOL then do
     if x = TRUE_OOP then return 1.0
     return 0.0
   end
-  if ob_k[x % 2] = K_BIG then return parse_flt(ob_s[x % 2])
+  if ob_k[x % 2] = K_BIG then return big_tofloat(ob_s[x % 2])
   return ob_f[x % 2]
 
 err_binop: procedure = .int
@@ -56,6 +56,54 @@ op_sym: procedure = .string
   end
   return "?"
 
+/* sign carrier: 0.0 with the sign of f */
+f_zsign: procedure = .float
+  arg f = .float
+  if f < 0.0 then return fneg(0.0)
+  if f = 0.0 then do
+    if fl_negzero(f) = 1 then return fneg(0.0)
+  end
+  return 0.0
+
+/* Python's float % (the result has the sign of the divisor) */
+f_mod: procedure = .float
+  arg vx = .float, wx = .float
+  m = .float
+  m = rxfloat..fmod(vx, wx)
+  if m \= 0.0 then do
+    if (wx < 0.0) \= (m < 0.0) then m = m + wx
+  end
+  else m = f_zsign(wx)
+  return m
+
+/* Python's float // */
+f_floordiv: procedure = .float
+  arg vx = .float, wx = .float
+  m = .float
+  dv = .float
+  fd = .float
+  m = rxfloat..fmod(vx, wx)
+  dv = (vx - m) / wx
+  if m \= 0.0 then do
+    if (wx < 0.0) \= (m < 0.0) then dv = dv - 1.0
+  end
+  if dv \= 0.0 then do
+    fd = rxfloat..floor(dv)
+    if dv - fd > 0.5 then fd = fd + 1.0
+    return fd
+  end
+  return f_zsign(vx / wx)
+
+/* float ** float: x and y are the original operands */
+float_pow: procedure = .int
+  arg fx = .float, fy = .float, x = .int, y = .int
+  r = .float
+  if fx = 0.0 & fy < 0.0 then return raise_exc(C_ZERODIVISIONERROR, "0.0 cannot be raised to a negative power")
+  if fx < 0.0 & finf(fy) = 0 & fy = fy & fy \= rxfloat..floor(fy) then return cplx_arith(O_POW, x, y)
+  r = rxfloat..pow(fx, fy)
+  if finf(r) \= 0 & finf(fx) = 0 & fx = fx & finf(fy) = 0 & fy = fy then return raise_exc(C_OVERFLOWERROR, "(34, 'Numerical result out of range')")
+  return mkfloat(r)
+
 /* arithmetic on two numbers (kinds: 1 small/bool, 2 big, 3 float) */
 numarith: procedure = .int
   arg op = .int, x = .int, y = .int
@@ -78,6 +126,7 @@ numarith: procedure = .int
   if kx = 3 | ky = 3 then do
     fx = tofloat(x)
     fy = tofloat(y)
+    if unw > 0 then return 0
     select
       when op = O_ADD then return mkfloat(fx + fy)
       when op = O_SUB then return mkfloat(fx - fy)
@@ -91,17 +140,13 @@ numarith: procedure = .int
       end
       when op = O_FLOORDIV then do
         if fy = 0.0 then return raise_exc(C_ZERODIVISIONERROR, "float floor division by zero")
-        return mkfloat(rxfloat..floor(fx / fy))
+        return mkfloat(f_floordiv(fx, fy))
       end
       when op = O_MOD then do
         if fy = 0.0 then return raise_exc(C_ZERODIVISIONERROR, "float modulo by zero")
-        fa = fx - fy * rxfloat..floor(fx / fy)
-        return mkfloat(fa)
+        return mkfloat(f_mod(fx, fy))
       end
-      when op = O_POW then do
-        if fx = 0.0 & fy < 0.0 then return raise_exc(C_ZERODIVISIONERROR, "0.0 cannot be raised to a negative power")
-        return mkfloat(rxfloat..pow(fx, fy))
-      end
+      when op = O_POW then return float_pow(fx, fy, x, y)
       otherwise return err_binop(op_sym(op), x, y)
     end
   end
@@ -119,7 +164,8 @@ numarith: procedure = .int
       end
       when op = O_DIV then do
         if b = 0 then return raise_exc(C_ZERODIVISIONERROR, "division by zero")
-        return mkfloat((a as .float) / (b as .float))
+        if a > 9007199254740992 | a < -9007199254740992 | b > 9007199254740992 | b < -9007199254740992 then return mkfloat(big_truediv(a as .string, b as .string))
+        return mkfloat(i2f(a) / i2f(b))
       end
       when op = O_FLOORDIV | op = O_MOD then do
         if b = 0 then do
@@ -138,6 +184,7 @@ numarith: procedure = .int
       when op = O_POW then return int_pow(x, y)
       when op = O_LSHIFT then do
         if b < 0 then return raise_exc(C_VALUEERROR, "negative shift count")
+        if a = 0 then return mkint(0)
         if b < 60 & a > -1000000 & a < 1000000 & b < 40 then return mkint(a * (2 ** b))
         return big_norm(smul(a as .string, big_pow("2", b)))
       end
@@ -174,7 +221,7 @@ numarith: procedure = .int
     when op = O_MUL then return big_norm(smul(sx, sy))
     when op = O_DIV then do
       if sy == "0" then return raise_exc(C_ZERODIVISIONERROR, "division by zero")
-      return mkfloat(tofloat(x) / tofloat(y))
+      return mkfloat(big_truediv(sx, sy))
     end
     when op = O_FLOORDIV | op = O_MOD then do
       if sy == "0" then do
@@ -191,30 +238,58 @@ numarith: procedure = .int
     end
     when op = O_POW then return int_pow(x, y)
     when op = O_LSHIFT then do
-      if ky \= 1 then return raise_exc(C_OVERFLOWERROR, "shift count too large")
+      if ky \= 1 then do
+        if left(sy, 1) == "-" then return raise_exc(C_VALUEERROR, "negative shift count")
+        if sx == "0" then return mkint(0)
+        return raise_exc(C_OVERFLOWERROR, "too many digits in integer")
+      end
       b = ival(y)
       if b < 0 then return raise_exc(C_VALUEERROR, "negative shift count")
+      if sx == "0" then return mkint(0)
       return big_norm(smul(sx, big_pow("2", b)))
     end
     when op = O_RSHIFT then do
-      if ky \= 1 then return mkint(0)
+      if ky \= 1 then do
+        if left(sy, 1) == "-" then return raise_exc(C_VALUEERROR, "negative shift count")
+        if left(sx, 1) == "-" then return mkint(-1)
+        return mkint(0)
+      end
       b = ival(y)
-      call sdivmod sx, big_pow("2", b)
-      if sr \== "0" & left(sx, 1) == "-" then return big_norm(ssub(sq, "1"))
-      return big_norm(sq)
+      if b < 0 then return raise_exc(C_VALUEERROR, "negative shift count")
+      return big_norm(s_shr(sx, b))
     end
-    otherwise return raise_exc(C_TYPEERROR, "bitwise operation on huge integers is not supported")
+    when op = O_BITAND then return big_norm(s_bitop(1, sx, sy))
+    when op = O_BITOR then return big_norm(s_bitop(2, sx, sy))
+    when op = O_BITXOR then return big_norm(s_bitop(3, sx, sy))
+    otherwise return err_binop(op_sym(op), x, y)
   end
   return 0
 
 int_pow: procedure = .int
   arg x = .int, y = .int
+  sy = .string
+  ev = .int
   a = .int
   b = .int
   r = .int
   est = .float
   fa = .float
   if numkind(y) = 2 then do
+    sy = num_str(y)
+    ev = (right(sy, 1) as .int) // 2
+    if numkind(x) = 1 then do
+      a = ival(x)
+      if a = 1 then return mkint(1)
+      if a = -1 then do
+        if ev = 0 then return mkint(1)
+        return mkint(-1)
+      end
+      if a = 0 then do
+        if left(sy, 1) == "-" then return raise_exc(C_ZERODIVISIONERROR, "0.0 cannot be raised to a negative power")
+        return mkint(0)
+      end
+    end
+    if left(sy, 1) == "-" then return mkfloat(0.0)
     return raise_exc(C_OVERFLOWERROR, "exponent too large")
   end
   b = ival(y)
@@ -360,6 +435,8 @@ arith: procedure = .int
       end
     end
     when op = O_MUL then do
+      if (kx = K_STR | kx = K_LIST | kx = K_TUPLE | kx = K_BYTES) & numkind(y) = 2 then return seq_repeat_big(x, y)
+      if (ky = K_STR | ky = K_LIST | ky = K_TUPLE | ky = K_BYTES) & numkind(x) = 2 then return seq_repeat_big(y, x)
       if kx = K_BYTES & numkind(y) = 1 then return bytes_rep(x, ival(y))
       if ky = K_BYTES & numkind(x) = 1 then return bytes_rep(y, ival(x))
       if (kx = K_STR | kx = K_LIST | kx = K_TUPLE) & numkind(y) = 1 then return seq_repeat(x, ival(y))
@@ -395,6 +472,25 @@ as_set: procedure = .int
   end
   return o
 
+/* sequence times an int beyond the small range */
+seq_repeat_big: procedure = .int
+  arg x = .int, n = .int
+  s = .string
+  s = num_str(n)
+  if length(s) > 19 | (length(s) = 19 & s >> "9223372036854775807") | (length(s) = 20 & left(s, 1) == "-" & substr(s, 2) >> "9223372036854775808") | length(s) > 20 then return raise_exc(C_OVERFLOWERROR, "cannot fit 'int' into an index-sized integer")
+  if left(s, 1) == "-" then return seq_repeat(x, 0)
+  return seq_repeat(x, 4000000000000000000)
+
+/* the MemoryError limit of the repeat operations */
+seq_too_big: procedure = .int
+  arg m = .int, n = .int
+  if m = 0 | n <= 0 then return 0
+  if n > 200000000 % m then do
+    call raise_exc C_MEMORYERROR, ""
+    return 1
+  end
+  return 0
+
 seq_repeat: procedure = .int
   arg x = .int, n = .int
   k = .int
@@ -404,6 +500,9 @@ seq_repeat: procedure = .int
   m = .int
   k = ob_k[x % 2]
   if n < 0 then n = 0
+  if k = K_STR then m = length(ob_s[x % 2])
+  else m = ob_n[x % 2]
+  if seq_too_big(m, n) = 1 then return 0
   if k = K_STR then return mkstr(copies(ob_s[x % 2], n))
   m = ob_n[x % 2]
   if k = K_LIST then o = mklist(m * n)
@@ -465,6 +564,17 @@ set_op: procedure = .int
   dx = ob_x[x % 2]
   dy = ob_x[y % 2]
   o = dict_new(K_SET)
+  if op = O_BITAND & dd_n[dy] <= dd_n[dx] then do
+    /* like CPython the smaller set is walked and its elements are kept (the right one on a tie) */
+    e = dd_head[dy]
+    do while e > 0
+      if de_live[e] = 1 then do
+        if dict_find(dx, de_hk[e]) > 0 then call dict_put ob_x[o % 2], de_hk[e], de_key[e], TRUE_OOP
+      end
+      e = de_next[e]
+    end
+    return o
+  end
   e = dd_head[dx]
   do while e > 0
     if de_live[e] = 1 then do
@@ -535,6 +645,30 @@ unary: procedure = .int
   end
   return raise_exc(C_TYPEERROR, "bad operand type for unary ~: '" || type_name(x) || "'")
 
+/* exact comparison of the integer (small, bool or big) x with the finite float f: -1, 0, 1 */
+icmp_float: procedure = .int
+  arg x = .int, f = .float
+  a = .int
+  t = .int
+  fp = .float
+  if numkind(x) = 2 then return cmp_int_float(num_str(x), f)
+  a = ival(x)
+  if a >= -9007199254740992 & a <= 9007199254740992 then do
+    fp = i2f(a)
+    if fp < f then return -1
+    if fp > f then return 1
+    return 0
+  end
+  if f > 9000000000000000000.0 then return -1
+  if f < -9000000000000000000.0 then return 1
+  t = f2i(f)
+  if a < t then return -1
+  if a > t then return 1
+  fp = f - rxfloat..trunc(f)
+  if fp > 0.0 then return -1
+  if fp < 0.0 then return 1
+  return 0
+
 /* numeric comparison: -1, 0, 1 or 2 (unordered) */
 numcmp: procedure = .int
   arg x = .int, y = .int
@@ -547,12 +681,26 @@ numcmp: procedure = .int
   kx = numkind(x)
   ky = numkind(y)
   if kx = 3 | ky = 3 then do
-    fx = tofloat(x)
-    fy = tofloat(y)
-    if fx \= fx | fy \= fy then return 2
-    if fx < fy then return -1
-    if fx > fy then return 1
-    return 0
+    if kx = 3 & ky = 3 then do
+      fx = ob_f[x % 2]
+      fy = ob_f[y % 2]
+      if fx \= fx | fy \= fy then return 2
+      if fx < fy then return -1
+      if fx > fy then return 1
+      return 0
+    end
+    if kx = 3 then do
+      fx = ob_f[x % 2]
+      if fx \= fx then return 2
+      if finf(fx) = 1 then return 1
+      if finf(fx) = 2 then return -1
+      return 0 - icmp_float(y, fx)
+    end
+    fy = ob_f[y % 2]
+    if fy \= fy then return 2
+    if finf(fy) = 1 then return -1
+    if finf(fy) = 2 then return 1
+    return icmp_float(x, fy)
   end
   if kx = 1 & ky = 1 then do
     a = ival(x)
@@ -672,9 +820,7 @@ py_eq: procedure = .int
     return 1
   end
   if kx = K_RANGE & ky = K_RANGE then do
-    if range_len(x) = 0 & range_len(y) = 0 then return 1
-    if range_len(x) = range_len(y) & ob_n[x % 2] = ob_n[y % 2] & ob_y[x % 2] = ob_y[y % 2] then return 1
-    return 0
+    return range_eq(x, y)
   end
   if kx = K_BMETH & ky = K_BMETH then do
     if ob_x[x % 2] = ob_x[y % 2] & ob_y[x % 2] = ob_y[y % 2] then return 1
@@ -899,19 +1045,7 @@ py_contains: procedure = .int
       return 0
     end
     when k = K_RANGE then do
-      if numkind(x) \= 1 then return 0
-      v = ival(x)
-      a = ob_n[c % 2]
-      b = ob_x[c % 2]
-      st = ob_y[c % 2]
-      if st > 0 then do
-        if v < a | v >= b then return 0
-      end
-      else do
-        if v > a | v <= b then return 0
-      end
-      if (v - a) // st = 0 then return 1
-      return 0
+      return range_contains(c, x)
     end
     when k = K_INST then do
       m = cls_find(ob_c[c % 2], M___CONTAINS__)
@@ -969,6 +1103,11 @@ repr_str: procedure = .string
     else do
       v = c2d(c)
       if v < 32 | v = 127 then r = r || "\x" || lower(right(d2x(v), 2, "0"))
+      else if v >= 128 & uni_nonprint(v) = 1 then do
+        if v < 256 then r = r || "\x" || lower(right(d2x(v), 2, "0"))
+        else if v < 65536 then r = r || "\u" || lower(right(d2x(v), 4, "0"))
+        else r = r || "\U" || lower(right(d2x(v), 8, "0"))
+      end
       else r = r || c
     end
   end
@@ -1084,9 +1223,7 @@ repr_of: procedure = .string
       return "slice(" || repr_of(ob_n[x % 2]) || ", " || repr_of(ob_x[x % 2]) || ", " || repr_of(ob_y[x % 2]) || ")"
     end
     when k = K_RANGE then do
-      s = "range(" || ob_n[x % 2] || ", " || ob_x[x % 2]
-      if ob_y[x % 2] \= 1 then s = s || ", " || ob_y[x % 2]
-      return s || ")"
+      return range_repr(x)
     end
     when k = K_FUNC then return "<function " || fd_name[ob_x[x % 2]] || " at 0x" || right(d2x(x * 8), 12, "0") || ">"
     when k = K_BUILTIN then return "<built-in function " || bi_name[ob_x[x % 2]] || ">"

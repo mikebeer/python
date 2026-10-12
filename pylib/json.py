@@ -336,15 +336,32 @@ class JSONDecoder:
             return float("inf"), i + 8
         if c == "-" and s[i:i + 9] == "-Infinity":
             return float("-inf"), i + 9
-        j = i
         n = self.n
         isf = False
-        while j < n and s[j] in _NUMCH:
-            if s[j] in ".eE":
-                isf = True
+        j = i
+        if j < n and s[j] == "-":
             j += 1
-        if j == i:
+        if j < n and s[j] == "0":
+            j += 1
+        elif j < n and s[j] in "123456789":
+            while j < n and s[j] in "0123456789":
+                j += 1
+        else:
             raise JSONDecodeError("Expecting value", s, i)
+        if j + 1 < n and s[j] == "." and s[j + 1] in "0123456789":
+            isf = True
+            j += 1
+            while j < n and s[j] in "0123456789":
+                j += 1
+        if j < n and s[j] in "eE":
+            k = j + 1
+            if k < n and s[k] in "+-":
+                k += 1
+            if k < n and s[k] in "0123456789":
+                isf = True
+                while k < n and s[k] in "0123456789":
+                    k += 1
+                j = k
         t = s[i:j]
         try:
             if isf:

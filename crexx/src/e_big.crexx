@@ -378,7 +378,7 @@ float_to_int: procedure = .int
   arg f = .float
   if f \= f then return 0
   if finf(f) \= 0 then return 0
-  if f > -900000000000000000.0 & f < 900000000000000000.0 then return (rxfloat..trunc(f) as .int) * 2 + 1
+  if f > -900000000000000000.0 & f < 900000000000000000.0 then return f2i(f) * 2 + 1
   return big_norm(float_to_istr(f))
 
 /* 0 finite or nan, 1 +inf, 2 -inf */
@@ -418,15 +418,15 @@ float_exact: procedure = .void
     return
   end
   e = 0
-  do while x >= 38685626227668133590597632.0
+  do while x >= c85f
     x = x / 4294967296.0
     e = e + 32
   end
-  do while x >= 9007199254740992.0
+  do while x >= c53f
     x = x / 2.0
     e = e + 1
   end
-  do while x < 4503599627370496.0
+  do while x < c52f
     if x < 1048576.0 then do
       x = x * 4294967296.0
       e = e - 32
@@ -436,7 +436,7 @@ float_exact: procedure = .void
       e = e - 1
     end
   end
-  m = rxfloat..trunc(x) as .int
+  m = f2i(x)
   if e >= 0 then do
     fx_d = smul(m as .string, big_pow("2", e))
     fx_q = 0
@@ -496,7 +496,8 @@ float_digits: procedure = .string
   end
   return head
 
-/* parse a decimal float literal string; handles overflow / underflow without a panic */
+/* parse a decimal float literal string (digits, optional point, optional exponent) into the
+   correctly rounded float; overflow gives inf, underflow 0.0 or a denormal, never a panic */
 parse_flt: procedure = .float
   arg s0 = .string
   s = .string
@@ -504,8 +505,18 @@ parse_flt: procedure = .float
   ex = .int
   mant = .string
   ip = .int
+  fl = .int
+  d = .string
+  lz = .int
+  q10 = .int
+  e10 = .int
+  ipart = .string
+  num = .string
+  den = .string
+  m0 = .string
+  r2 = .int
+  m = .int
   y = .float
-  z = .float
   s = lower(s0)
   p = pos("e", s)
   ex = 0
@@ -517,18 +528,39 @@ parse_flt: procedure = .float
     ex = s as .int
   end
   ip = pos(".", mant)
-  if ip = 0 then ip = length(mant) + 1
-  if ex + ip - 1 > 310 then return f_inf()
-  if ex + ip - 1 < -330 then return 0.0
-  if ex >= -290 & ex <= 290 then return (mant || "e" || ex) as .float
-  if ex > 290 then do
-    y = (mant || "e290") as .float
-    z = rxfloat..pow10((ex - 290) as .float)
-    return y * z
+  fl = 0
+  if ip > 0 then do
+    fl = length(mant) - ip
+    mant = left(mant, ip - 1) || substr(mant, ip + 1)
   end
-  y = (mant || "e-290") as .float
-  z = rxfloat..pow10((ex + 290) as .float)
-  return y * z
+  d = mag_clean(mant)
+  if d == "0" then return 0.0
+  q10 = ex - fl
+  e10 = length(d) + q10 - 1
+  if e10 >= 309 then return f_inf()
+  if e10 = 308 then do
+    if q10 >= 0 then ipart = d || copies("0", q10)
+    else ipart = left(d, 309)
+    if mag_cmp(ipart, float_ovf_limit()) >= 0 then return f_inf()
+  end
+  if e10 < -325 then return 0.0
+  if e10 <= -308 & q10 < 0 then do
+    call sdivmod smul(d, big_pow("2", 1074)), big_pow("10", 0 - q10)
+    m0 = sq
+    if length(m0) <= 16 then do
+      m = m0 as .int
+      den = big_pow("10", 0 - q10)
+      r2 = scmp(smul(sr, "2"), den)
+      if r2 > 0 | (r2 = 0 & m // 2 = 1) then m = m + 1
+      if m < 4503599627370496 then do
+        y = i2f(m)
+        y = y * rxfloat..pow(2.0, -537.0)
+        return y * rxfloat..pow(2.0, -537.0)
+      end
+    end
+  end
+  y = (d || "e" || q10) as .float
+  return y
 
 /* shortest repr that round-trips (as Python's repr) */
 float_repr: procedure = .string
@@ -558,13 +590,34 @@ float_repr: procedure = .string
     x = 0.0 - x
   end
   ok = 0
+  if x < cmnf then do
+    d = den_digits(x)
+    dexp = fx_e
+    ok = 1
+  end
   do n = 15 to 17
+    if ok = 1 then leave
     d = float_digits(x, n)
     dexp = fx_e
-    if n = 17 | dexp < -300 | dexp > 306 then ok = 1
+    if n = 17 then ok = 1
     else do
-      y = (left(d, 1) || "." || substr(d, 2) || "e" || dexp) as .float
+      if dexp < -300 | dexp > 306 then y = parse_flt(left(d, 1) || "." || substr(d, 2) || "e" || dexp)
+      else y = (left(d, 1) || "." || substr(d, 2) || "e" || dexp) as .float
       if y = x then ok = 1
+      else if n = 16 then do
+        call float_decomp x
+        if fx_m = 4503599627370496 | fx_m = 9007199254740992 then do
+          /* a power of two: the interval below x is half as wide, the shortest digits may lie above x */
+          ds = mag_add(d, "1")
+          if length(ds) = n then do
+            y = parse_flt(left(ds, 1) || "." || substr(ds, 2) || "e" || dexp)
+            if y = x then do
+              d = ds
+              ok = 1
+            end
+          end
+        end
+      end
     end
     if ok = 1 then leave
   end
@@ -592,6 +645,68 @@ float_repr: procedure = .string
   end
   if neg = 1 then return "-" || mant
   return mant
+
+/* does D * 10 ** q (q < 0) round to the denormal m * 2 ** -1074 ? */
+den_rt: procedure = .int
+  arg dd = .string, q = .int, m = .int
+  t = .string
+  lhs = .string
+  lo = .string
+  hi = .string
+  c1 = .int
+  c2 = .int
+  t = big_pow("10", 0 - q)
+  lhs = smul(dd, big_pow("2", 1075))
+  lo = smul((2 * m - 1) as .string, t)
+  hi = smul((2 * m + 1) as .string, t)
+  c1 = mag_cmp(lhs, lo)
+  c2 = mag_cmp(hi, lhs)
+  if m // 2 = 0 then do
+    if c1 >= 0 & c2 >= 0 then return 1
+    return 0
+  end
+  if c1 > 0 & c2 > 0 then return 1
+  return 0
+
+/* shortest digits of the denormal x (x > 0): digits returned, decimal exponent in fx_e */
+den_digits: procedure = .string
+  arg f = .float
+  x = .float
+  m = .int
+  n = .int
+  d = .string
+  e0 = .int
+  q = .int
+  alt = .string
+  x = f * rxfloat..pow(2.0, 537.0)
+  x = x * rxfloat..pow(2.0, 537.0)
+  m = f2i(x)
+  d = ""
+  e0 = 0
+  do n = 1 to 17
+    d = float_digits(f, n)
+    e0 = fx_e
+    q = e0 - (n - 1)
+    if den_rt(d, q, m) = 1 then leave
+    alt = mag_add(d, "1")
+    if length(alt) = n then do
+      if den_rt(alt, q, m) = 1 then do
+        d = alt
+        leave
+      end
+    end
+    if n > 1 then do
+      alt = mag_sub(d, "1")
+      if length(alt) = n then do
+        if den_rt(alt, q, m) = 1 then do
+          d = alt
+          leave
+        end
+      end
+    end
+  end
+  fx_e = e0
+  return d
 
 /* negation that keeps the sign of zero */
 fneg: procedure = .float

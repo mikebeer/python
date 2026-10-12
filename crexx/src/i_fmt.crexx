@@ -15,6 +15,21 @@ group3: procedure = .string
   end
   return r
 
+/* digits grouped by w from the right */
+group_n: procedure = .string
+  arg d = .string, sep = .string, w = .int
+  r = .string
+  n = .int
+  i = .int
+  n = length(d)
+  if n <= w then return d
+  r = ""
+  do i = n to 1 by 0 - w
+    if i - w >= 1 then r = sep || substr(d, i - w + 1, w) || r
+    else r = substr(d, 1, i) || r
+  end
+  return r
+
 radix_str: procedure = .string
   arg s = .string, rdx = .int
   digs = .string
@@ -171,7 +186,7 @@ format_value: procedure = .string
       call raise_exc C_VALUEERROR, "Unknown format code '" || ty || "' for object of type '" || type_name(v) || "'"
       return ""
     end
-    if prec >= 0 then s = left(s, prec)
+    if prec >= 0 & length(s) > prec then s = left(s, prec)
     if align == "" then align = "<"
     return fmt_pad("", s, fill, align, width)
   end
@@ -202,7 +217,14 @@ format_value: procedure = .string
       s = upper(radix_str(s, 16))
       if alt = 1 then pre = "0X"
     end
-    else if grp \== "" then s = group3(s, grp)
+    if grp \== "" then do
+      if ty == "n" | ty == "c" | (grp == "," & pos(ty, "boxX") > 0 & ty \== "") then do
+        call raise_exc C_VALUEERROR, "Cannot specify '" || grp || "' with '" || ty || "'."
+        return ""
+      end
+      if pos(ty, "boxX") > 0 & ty \== "" then s = group_n(s, grp, 4)
+      else s = group3(s, grp)
+    end
     if neg = 1 then sign = "-"
     else if sgn == "+" then sign = "+"
     else if sgn == " " then sign = " "
@@ -216,6 +238,7 @@ format_value: procedure = .string
     return ""
   end
   f = tofloat(v)
+  if unw > 0 then return ""
   hasprec = 1
   if prec < 0 then do
     prec = 6
@@ -267,7 +290,10 @@ format_value: procedure = .string
 group_float: procedure = .string
   arg s = .string, sep = .string
   p = .int
+  q = .int
   p = pos(".", s)
+  q = pos("e", lower(s))
+  if q > 0 & (p = 0 | q < p) then p = q
   if p = 0 then return group3(s, sep)
   return group3(left(s, p - 1), sep) || substr(s, p)
 
@@ -306,6 +332,7 @@ float_general: procedure = .string
   end
   /* fixed with prec-1-e decimals */
   body = float_fixed(x, prec - 1 - e)
+  if alt = 1 & pos(".", body) = 0 then body = body || "."
   if alt = 0 & pos(".", body) > 0 then do
     l = length(body)
     do while substr(body, l, 1) == "0"
@@ -465,7 +492,7 @@ fmt_percent: procedure = .int
       if ty == "s" then s = str_of(v)
       else s = repr_of(v)
       if unw > 0 then return 0
-      if prec >= 0 then s = left(s, prec)
+      if prec >= 0 & length(s) > prec then s = left(s, prec)
       if left_ = 1 then al_ = "<"
       else al_ = ">"
       r = r || fmt_pad("", s, " ", al_, width)

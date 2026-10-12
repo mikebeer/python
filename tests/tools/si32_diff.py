@@ -12,6 +12,7 @@
 #     normal   cc -std=c89 -O2 py_all.c                     (64-bit long)
 #     si32     -DPY_SI32 -DPY_U64_EMUL                      (64-bit long, small ints +-999999999)
 #     m32      gcc -m32 -msse2 -mfpmath=sse                 (real 32-bit long; skipped without multilib)
+# --timeout SEC: per interpreter run (default 120; the CREXX interpreter needs a large value).
 # CATS is a comma separated subset of the category names (default: all).
 import os
 import random
@@ -1054,6 +1055,8 @@ def main(argv):
             keep = True
         elif a == "--show":
             show = int(argv[i + 1]); i += 1
+        elif a == "--timeout":
+            timeout = int(argv[i + 1]); i += 1
         elif a == "--build":
             build = True
         elif a == "--self":

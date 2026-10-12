@@ -14,8 +14,8 @@ Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
 
 - `src/*.crexx`: sources, concatenated by `build.py` into `py.crexx` (generated, checked in).
   a_head (startup, `init`, `boot`), b_lex, c_parse (nodes and scope resolution),
-  d_obj (objects, classes, dicts), e_big (big integers, float repr), f_ops (arithmetic, repr/str),
-  g_call, g_item, g_eval (tree evaluator), g_gen (generators), h_builtins, h_meth, h_mod,
+  d_obj (objects, classes, dicts), e_big (big integers, float repr, float parsing), e_big2 (bit operations, modular pow, exact int/float conversion and comparison, hashes, correctly rounded division, exact fsum), f_ops (arithmetic, repr/str),
+  e_rng (ranges of any size), e_misc (str.translate/maketrans, isprintable, slice.indices), g_call, g_item, g_eval (tree evaluator), g_gen (generators), h_builtins, h_meth, h_mod,
   h_imp (modules and imports), h_ns (globals/locals/vars/dir/eval/exec, type() with 3 arguments), i_fmt,
   j_np and k_np2 (the built-in `numpy` subset: native ndarray objects of kind `K_ARRAY`, broadcasting,
   reductions, indexing, numpy style array printing), l_bytes (bytes / bytearray, encodings), l_cplx (complex,
@@ -29,7 +29,8 @@ Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
 Everything is integer arrays. Values are tagged integers (small int `2n+1`, heap object `2*index`);
 the parser produces node arrays and the evaluator walks integer node ids. Frames live in a
 shared slot array. Generators keep an explicit resumable statement stack. Big integers use
-decimal limbs; floats print with the shortest round-trip repr.
+decimal strings (bit operations, shifts and modular pow convert to 24-bit limbs); `range` bounds of any size,
+CPython-compatible modular hashes (`hash(1e10) == hash(10**10)`) and exact int/float comparison are implemented; floats print with the shortest round-trip repr.
 
 ## numpy
 
@@ -129,11 +130,11 @@ references show up as errors).
 - `str` holds codepoints (the C interpreter uses byte strings); tracebacks always report line 1.
 - `globals()` / `locals()` are snapshots; `exec` inside a function does not write back to its locals.
 - Sets keep insertion order; `random` does not reproduce CPython's sequence; `time.time` is approximate.
-- Float literals near the end of the range and denormals print with fewer digits.
+- Set union/intersection print in insertion order, CPython orders by hash. UTF-8 decoding with `replace` follows the maximal-subpart rule, but `repr` of unassigned code points uses the table from the C interpreter (Unicode version differences remain).
 - Recursion limit is about 900 frames; a stock VM pays about 2 s per run linking the 3.1 MB bytecode (see `STARTUP.md`).
 
 ## CREXX pitfalls found
 
 `main`, `self`, `dummy` are reserved; plain-variable arguments are passed by reference (pass `x + 0`
 to copy); the literal `1.7976931348623157e308` behaves as infinity (compare via `x - x`);
-orphan `rxvme` processes can hold the driver lock after a timeout.
+orphan `rxvme` processes can hold the driver lock after a timeout; the `as .int` / `as .float` conversions are lossy beyond 15 digits (use `i2f` / `f2i` in `e_big2`), and a local variable named like a global (`pe`, `sm`) silently shadows it.

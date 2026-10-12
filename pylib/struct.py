@@ -46,7 +46,7 @@ def _parse(fmt):
             raise error("repeat count given without format specifier")
         c = fmt[i]
         i += 1
-        if c not in sizes:
+        if c not in sizes or (c in "nNP" and not native):
             raise error("bad char in struct format")
         cnt = int(cnt) if cnt else 1
         sz = sizes[c]

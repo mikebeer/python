@@ -22,8 +22,8 @@ slice_calc: procedure = .int
   v = .int
   if st = NONE_OOP | st = 0 then step = 1
   else do
-    if numkind(st) \= 1 then return raise_exc(C_TYPEERROR, "slice indices must be integers or None or have an __index__ method")
-    step = ival(st)
+    if numkind(st) \= 1 & numkind(st) \= 2 then return raise_exc(C_TYPEERROR, "slice indices must be integers or None or have an __index__ method")
+    step = clipint(st)
   end
   if step = 0 then return raise_exc(C_VALUEERROR, "slice step cannot be zero")
   if step > 0 then do
@@ -39,8 +39,8 @@ slice_calc: procedure = .int
     else start = upper
   end
   else do
-    if numkind(lo) \= 1 then return raise_exc(C_TYPEERROR, "slice indices must be integers or None or have an __index__ method")
-    start = ival(lo)
+    if numkind(lo) \= 1 & numkind(lo) \= 2 then return raise_exc(C_TYPEERROR, "slice indices must be integers or None or have an __index__ method")
+    start = clipint(lo)
     if start < 0 then start = start + n
     if start < lower then start = lower
     if start > upper then start = upper
@@ -50,8 +50,8 @@ slice_calc: procedure = .int
     else stop = lower
   end
   else do
-    if numkind(hi) \= 1 then return raise_exc(C_TYPEERROR, "slice indices must be integers or None or have an __index__ method")
-    stop = ival(hi)
+    if numkind(hi) \= 1 & numkind(hi) \= 2 then return raise_exc(C_TYPEERROR, "slice indices must be integers or None or have an __index__ method")
+    stop = clipint(hi)
     if stop < 0 then stop = stop + n
     if stop < lower then stop = lower
     if stop > upper then stop = upper
@@ -112,11 +112,7 @@ getslice: procedure = .int
     end
     return t
   end
-  if k = K_RANGE then do
-    r = slice_calc(range_len(o), lo, hi, st)
-    if r = 0 then return 0
-    return mkrange(ob_n[o % 2] + sl_a * ob_y[o % 2], ob_n[o % 2] + (sl_a + sl_n * sl_b) * ob_y[o % 2], sl_b * ob_y[o % 2])
-  end
+  if k = K_RANGE then return range_slice(o, lo, hi, st)
   if k = K_INST then do
     r = cls_find(ob_c[o % 2], M___GETITEM__)
     if r > 0 then do
@@ -133,7 +129,21 @@ idx_int: procedure = .int
   arg x = .int
   if x // 2 \= 0 then return (x - 1) % 2
   if ob_k[x % 2] = K_BOOL then return ival(x)
-  if ob_k[x % 2] = K_BIG then return ival(x)
+  if ob_k[x % 2] = K_BIG then return clipint(x)
+  return 0
+
+/* an int object as a raw int, huge values clipped to about +-4e18 */
+clipint: procedure = .int
+  arg x = .int
+  if x // 2 \= 0 then return (x - 1) % 2
+  if ob_k[x % 2] = K_BOOL then return ival(x)
+  if ob_k[x % 2] = K_BIG then do
+    if ob_c[x % 2] = 0 then do
+      if left(ob_s[x % 2], 1) == "-" then return -4000000000000000000
+      return 4000000000000000000
+    end
+    return ival(x)
+  end
   return 0
 
 getitem: procedure = .int
@@ -163,7 +173,7 @@ getitem: procedure = .int
     if k = K_BYTES then return bytes_geti(o, ix)
   end
   if k = K_LIST | k = K_TUPLE then do
-    if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL then do
+    if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL & ob_k[ix % 2] \= K_BIG then do
       if ob_k[ix % 2] = K_SLICE then return getslice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
       if kind_of(ix) = K_INST then do
         m = cls_find(ob_c[ix % 2], M___INDEX__)
@@ -197,7 +207,7 @@ getitem: procedure = .int
   end
   if k = K_STR then do
     if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then return getslice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
-    if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL then return raise_exc(C_TYPEERROR, "string indices must be integers, not '" || type_name(ix) || "'")
+    if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL & ob_k[ix % 2] \= K_BIG then return raise_exc(C_TYPEERROR, "string indices must be integers, not '" || type_name(ix) || "'")
     i = idx_int(ix)
     s = ob_s[o % 2]
     n = length(s)
@@ -207,6 +217,8 @@ getitem: procedure = .int
   end
   if k = K_RANGE then do
     if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then return getslice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    if numkind(ix) \= 1 & numkind(ix) \= 2 then return raise_exc(C_TYPEERROR, "range indices must be integers or slices, not " || type_name(ix))
+    if ob_s[o % 2] \== "" | numkind(ix) = 2 then return range_getitem(o, ix)
     i = idx_int(ix)
     n = range_len(o)
     if i < 0 then i = i + n
@@ -586,11 +598,7 @@ iter_new: procedure = .int
     when k = K_LIST | k = K_TUPLE then return mkiter(IT_SEQ, x, 0)
     when k = K_BYTES then return mkiter(IT_BYTES, x, 0)
     when k = K_STR then return mkiter(IT_STR, x, 0)
-    when k = K_RANGE then do
-      it = mkiter(IT_RANGE, ob_n[x % 2], ob_x[x % 2])
-      ob_c[it % 2] = ob_y[x % 2]
-      return it
-    end
+    when k = K_RANGE then return range_iter(x)
     when k = K_DICT | k = K_SET then return mkiter(IT_DKEYS, x, dd_head[ob_x[x % 2]])
     when k = K_DVIEW then do
       r = ob_x[x % 2]
@@ -661,6 +669,7 @@ iter_next: procedure = .int
       ob_y[ix] = i + 1
       return np_item0(src, i)
     end
+    when sub = IT_RANGEB then return rangeb_next(ix)
     when sub = IT_RANGE then do
       v = ob_x[ix]
       step = ob_c[ix]
@@ -713,7 +722,8 @@ iter_next: procedure = .int
       v = iter_next(ob_x[ix])
       if v = 0 then return 0
       t = mktuple(2)
-      sl[ob_p[t % 2]] = ob_y[ix] * 2 + 1
+      if ob_c[ix] \= 0 then sl[ob_p[t % 2]] = arith(O_ADD, ob_c[ix], mkint(ob_y[ix]))
+      else sl[ob_p[t % 2]] = mkint(ob_y[ix])
       sl[ob_p[t % 2] + 1] = v
       ob_y[ix] = ob_y[ix] + 1
       return t

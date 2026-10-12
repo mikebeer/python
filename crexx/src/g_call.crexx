@@ -503,9 +503,7 @@ getattr_obj: procedure = .int
     if nid = M_IMAG then return mkfloat(ob_g[o % 2])
   end
   if k = K_RANGE then do
-    if nid = M_START then return mkint(ob_n[o % 2])
-    if nid = M_STOP then return mkint(ob_x[o % 2])
-    if nid = M_STEP then return mkint(ob_y[o % 2])
+    if nid = M_START | nid = M_STOP | nid = M_STEP then return range_attr(o, nid)
   end
   if k = K_FILE then do
     if nid = M_NAME then return mkstr(ob_s[o % 2])

@@ -1,0 +1,712 @@
+/* ---------------------------------------------------------------------
+   Big integers, part 2: two's complement bit operations, modular power, exact
+   int / float conversion, correctly rounded true division, CPython's modular hash.
+   Everything here works on signed decimal strings (as e_big) and on 24 bit limbs.
+   The limb arrays lm / lr are global scratch (lmn / lrn count the limbs in use).
+   --------------------------------------------------------------------- */
+
+/* the CREXX conversions "int as .float" and "float as .int" go through 15 digit decimal text, so
+   they are only exact below 10**15; these two are exact (the float conversion rounds once) */
+i2f: procedure = .float
+  arg a0 = .int
+  a = .int
+  hi = .int
+  lo = .int
+  r = .float
+  neg = .int
+  a = a0
+  if a > -1000000000000000 & a < 1000000000000000 then do
+    r = a as .float
+    return r
+  end
+  neg = 0
+  if a < 0 then do
+    neg = 1
+    a = 0 - a
+  end
+  hi = a % 4294967296
+  lo = a // 4294967296
+  r = (hi as .float) * 4294967296.0 + (lo as .float)
+  if neg = 1 then return 0.0 - r
+  return r
+
+/* truncation of a float with |f| < 2**63 to an int, exactly */
+f2i: procedure = .int
+  arg f0 = .float
+  a = .float
+  hi = .float
+  lo = .float
+  hh = .int
+  ll = .int
+  r = .int
+  neg = .int
+  a = f0
+  neg = 0
+  if a < 0.0 then do
+    neg = 1
+    a = 0.0 - a
+  end
+  a = rxfloat..trunc(a)
+  hi = rxfloat..floor(a / 4294967296.0)
+  lo = a - hi * 4294967296.0
+  hh = hi as .int
+  ll = lo as .int
+  r = hh * 4294967296 + ll
+  if neg = 1 then return 0 - r
+  return r
+
+/* limbs (24 bits, least significant first) of the decimal magnitude s: lm[1..lmn] */
+mag_limbs: procedure = .void
+  arg s = .string
+  t = .int[]
+  n = .int
+  l = .int
+  p = .int
+  cur = .int
+  i = .int
+  top = .int
+  rem = .int
+  c = .int
+  l = length(s)
+  n = 0
+  p = l // 9
+  if p = 0 then p = 9
+  cur = 1
+  do while cur <= l
+    n = n + 1
+    t[n] = substr(s, cur, p) as .int
+    cur = cur + p
+    p = 9
+  end
+  t[n + 1] = 1
+  lmn = 0
+  top = 1
+  do while t[top] = 0
+    top = top + 1
+  end
+  do while top <= n
+    rem = 0
+    do i = top to n
+      c = rem * 1000000000 + t[i]
+      t[i] = c % 16777216
+      rem = c // 16777216
+    end
+    lmn = lmn + 1
+    lm[lmn] = rem
+    do while t[top] = 0
+      top = top + 1
+    end
+  end
+  return
+
+/* decimal magnitude of the n limbs lr[1..n] */
+limbs_mag: procedure = .string
+  arg n = .int
+  t = .int[]
+  tn = .int
+  i = .int
+  k = .int
+  carry = .int
+  v = .int
+  r = .string
+  tn = 1
+  t[1] = 0
+  do i = n to 1 by -1
+    carry = lr[i]
+    do k = 1 to tn
+      v = t[k] * 16777216 + carry
+      carry = v % 1000000000
+      t[k] = v // 1000000000
+    end
+    do while carry > 0
+      tn = tn + 1
+      t[tn] = carry // 1000000000
+      carry = carry % 1000000000
+    end
+  end
+  r = t[tn] as .string
+  do k = tn - 1 to 1 by -1
+    r = r || right(copies("0", 9) || t[k], 9)
+  end
+  return r
+
+/* number of bits of the decimal magnitude m (0 for "0") */
+mag_bits: procedure = .int
+  arg m = .string
+  b = .int
+  top = .int
+  call mag_limbs m
+  if lmn = 0 then return 0
+  top = lm[lmn]
+  b = 0
+  do while top > 0
+    b = b + 1
+    top = top % 2
+  end
+  return (lmn - 1) * 24 + b
+
+/* a op b on two's complement integers of any size; op 1 and, 2 or, 3 xor */
+s_bitop: procedure = .string
+  arg op = .int, sa = .string, sb = .string
+  la = .int[]
+  lb = .int[]
+  na = .int
+  nb = .int
+  ea = .int
+  eb = .int
+  i = .int
+  n = .int
+  x = .int
+  y = .int
+  z = .int
+  re = .int
+  mask = .int
+  neg = .int
+  m = .string
+  mask = 16777215
+  m = sa
+  neg = 0
+  if left(m, 1) == "-" then do
+    neg = 1
+    m = mag_sub(substr(m, 2), "1")
+  end
+  call mag_limbs m
+  na = lmn
+  ea = 0
+  if neg = 1 then ea = mask
+  do i = 1 to na
+    x = lm[i]
+    if neg = 1 then do
+      assembler ixor x, x, mask
+    end
+    la[i] = x
+  end
+  m = sb
+  neg = 0
+  if left(m, 1) == "-" then do
+    neg = 1
+    m = mag_sub(substr(m, 2), "1")
+  end
+  call mag_limbs m
+  nb = lmn
+  eb = 0
+  if neg = 1 then eb = mask
+  do i = 1 to nb
+    x = lm[i]
+    if neg = 1 then do
+      assembler ixor x, x, mask
+    end
+    lb[i] = x
+  end
+  n = na
+  if nb > n then n = nb
+  do i = 1 to n
+    x = ea
+    if i <= na then x = la[i]
+    y = eb
+    if i <= nb then y = lb[i]
+    if op = 1 then do
+      assembler iand z, x, y
+    end
+    else if op = 2 then do
+      assembler ior z, x, y
+    end
+    else do
+      assembler ixor z, x, y
+    end
+    lr[i] = z
+  end
+  x = ea
+  y = eb
+  if op = 1 then do
+    assembler iand re, x, y
+  end
+  else if op = 2 then do
+    assembler ior re, x, y
+  end
+  else do
+    assembler ixor re, x, y
+  end
+  if re = 0 then return limbs_mag(n)
+  do i = 1 to n
+    z = lr[i]
+    assembler ixor z, z, mask
+    lr[i] = z
+  end
+  m = limbs_mag(n)
+  return "-" || mag_add(m, "1")
+
+/* floor(a / 2**k), k >= 0 */
+s_shr: procedure = .string
+  arg a = .string, k = .int
+  q = .string
+  r = .string
+  neg = .int
+  if a == "0" then return "0"
+  neg = 0
+  if left(a, 1) == "-" then neg = 1
+  if k > 4 * length(a) + 8 then do
+    if neg = 1 then return "-1"
+    return "0"
+  end
+  call sdivmod a, big_pow("2", k)
+  q = sq
+  r = sr
+  if r \== "0" & neg = 1 then q = ssub(q, "1")
+  return q
+
+/* floor modulo (sign of m) */
+s_fmod: procedure = .string
+  arg a = .string, m = .string
+  r = .string
+  call sdivmod a, m
+  r = sr
+  if r \== "0" & ((left(a, 1) == "-") \= (left(m, 1) == "-")) then r = sadd(r, m)
+  return r
+
+/* a ** e mod m for e >= 0 and m \= 0 (result has the sign of m) */
+s_powmod: procedure = .string
+  arg a = .string, e = .string, m = .string
+  r = .string
+  b = .string
+  pwe = .int[]
+  pn = .int
+  i = .int
+  bit = .int
+  w = .int
+  bv = .int
+  started = .int
+  r = s_fmod("1", m)
+  if e == "0" then return r
+  b = s_fmod(a, m)
+  call mag_limbs e
+  pn = lmn
+  do i = 1 to pn
+    pwe[i] = lm[i]
+  end
+  started = 0
+  do i = pn to 1 by -1
+    w = pwe[i]
+    do bit = 23 to 0 by -1
+      bv = (w % (2 ** bit)) // 2
+      if started = 1 then r = s_fmod(smul(r, r), m)
+      if bv = 1 then do
+        r = s_fmod(smul(r, b), m)
+        started = 1
+      end
+    end
+  end
+  return r
+
+/* inverse of a modulo |m| in [0, |m|), "" when a is not invertible */
+s_invmod: procedure = .string
+  arg a = .string, m = .string
+  mm = .string
+  r0 = .string
+  r1 = .string
+  t0 = .string
+  t1 = .string
+  tt = .string
+  qq = .string
+  rr = .string
+  mm = m
+  if left(mm, 1) == "-" then mm = substr(mm, 2)
+  r0 = mm
+  r1 = s_fmod(a, mm)
+  t0 = "0"
+  t1 = "1"
+  do while r1 \== "0"
+    call sdivmod r0, r1
+    qq = sq
+    rr = sr
+    r0 = r1
+    r1 = rr
+    tt = ssub(t0, smul(qq, t1))
+    t0 = t1
+    t1 = tt
+  end
+  if r0 \== "1" then return ""
+  return s_fmod(t0, mm)
+
+/* ---- floats ---- */
+
+/* the finite float x > 0 as fx_m * 2 ** fx_k (fx_m an integer below 2**53) */
+float_decomp: procedure = .void
+  arg f = .float
+  x = .float
+  e = .int
+  x = f
+  e = 0
+  do while x >= c85f
+    x = x / 4294967296.0
+    e = e + 32
+  end
+  do while x >= c53f
+    x = x / 2.0
+    e = e + 1
+  end
+  do while x < c52f
+    if x < 1048576.0 then do
+      x = x * 4294967296.0
+      e = e - 32
+    end
+    else do
+      x = x * 2.0
+      e = e - 1
+    end
+  end
+  fx_m = f2i(x)
+  fx_k = e
+  return
+
+/* f * 2 ** e for an integer e (the product may overflow to inf or underflow) */
+f_ldexp: procedure = .float
+  arg f = .float, e = .int
+  x = .float
+  big = .float
+  small = .float
+  x = f
+  big = rxfloat..pow(2.0, 1000.0)
+  small = rxfloat..pow(2.0, -1000.0)
+  do while e > 1000
+    x = x * big
+    e = e - 1000
+  end
+  do while e < -1000
+    x = x * small
+    e = e + 1000
+  end
+  if e \= 0 then x = x * rxfloat..pow(2.0, e as .float)
+  return x
+
+/* 2**1024 - 2**970: the smallest integer that does not convert to a float */
+float_ovf_limit: procedure = .string
+  if fovf == "" then fovf = ssub(big_pow("2", 1024), big_pow("2", 970))
+  return fovf
+
+/* 1 when the integer string s does not fit in a float */
+big_float_ovf: procedure = .int
+  arg s = .string
+  m = .string
+  m = s
+  if left(m, 1) == "-" then m = substr(m, 2)
+  if length(m) > 309 then return 1
+  if length(m) = 309 then do
+    if mag_cmp(m, float_ovf_limit()) >= 0 then return 1
+  end
+  return 0
+
+/* correctly rounded float of the integer string s (OverflowError when too large) */
+big_tofloat: procedure = .float
+  arg s = .string
+  m = .string
+  x = .float
+  zi = .int
+  m = s
+  if big_float_ovf(s) = 1 then do
+    zi = raise_exc(C_OVERFLOWERROR, "int too large to convert to float")
+    return 0.0
+  end
+  if left(m, 1) == "-" then do
+    m = substr(m, 2)
+    x = m as .float
+    return 0.0 - x
+  end
+  x = m as .float
+  return x
+
+/* a / b for integer strings, correctly rounded; b \= "0" */
+big_truediv: procedure = .float
+  arg sa = .string, sb = .string
+  ma = .string
+  mb = .string
+  neg = .int
+  ba = .int
+  bb = .int
+  sh = .int
+  num = .string
+  den = .string
+  q = .int
+  sticky = .int
+  nbits = .int
+  drop = .int
+  p = .int
+  low = .int
+  q53 = .int
+  f = .float
+  zi = .int
+  neg = 0
+  ma = sa
+  mb = sb
+  if left(ma, 1) == "-" then do
+    neg = 1 - neg
+    ma = substr(ma, 2)
+  end
+  if left(mb, 1) == "-" then do
+    neg = 1 - neg
+    mb = substr(mb, 2)
+  end
+  if ma == "0" then do
+    if neg = 1 then return fneg(0.0)
+    return 0.0
+  end
+  ba = mag_bits(ma)
+  bb = mag_bits(mb)
+  sh = 57 - (ba - bb)
+  if sh >= 0 then do
+    num = smul(ma, big_pow("2", sh))
+    den = mb
+  end
+  else do
+    num = ma
+    den = smul(mb, big_pow("2", 0 - sh))
+  end
+  call sdivmod num, den
+  q = sq as .int
+  sticky = 0
+  if sr \== "0" then sticky = 1
+  nbits = 0
+  p = q
+  do while p > 0
+    nbits = nbits + 1
+    p = p % 2
+  end
+  drop = nbits - 53
+  p = 2 ** drop
+  low = q // p
+  q53 = q % p
+  if low * 2 > p | (low * 2 = p & (sticky = 1 | q53 // 2 = 1)) then q53 = q53 + 1
+  f = f_ldexp(i2f(q53), drop - sh)
+  if finf(f) \= 0 then do
+    zi = raise_exc(C_OVERFLOWERROR, "integer division result too large for a float")
+    return 0.0
+  end
+  if neg = 1 then return fneg(f)
+  return f
+
+/* compare the integer string s with the finite float f: -1, 0, 1 */
+cmp_int_float: procedure = .int
+  arg s = .string, f = .float
+  t = .string
+  c = .int
+  fp = .float
+  t = float_to_istr(f)
+  c = scmp(s, t)
+  if c \= 0 then return c
+  fp = f - rxfloat..trunc(f)
+  if fp > 0.0 then return -1
+  if fp < 0.0 then return 1
+  return 0
+
+/* ---- CPython's hash: value modulo 2**61 - 1 ---- */
+
+/* v * 2**s modulo 2**61 - 1 for 0 <= v < 2**61, 0 <= s < 61 */
+rot61: procedure = .int
+  arg v = .int, s = .int
+  p = .int
+  r = .int
+  if s = 0 then return v
+  p = 2 ** (61 - s)
+  r = (v // p) * (2 ** s) + (v % p)
+  if r = 2305843009213693951 then return 0
+  return r
+
+/* hash value (a raw int) of the integer string s */
+hash_bigstr: procedure = .int
+  arg s = .string
+  m = .string
+  neg = .int
+  acc = .int
+  i = .int
+  sft = .int
+  m = s
+  neg = 0
+  if left(m, 1) == "-" then do
+    neg = 1
+    m = substr(m, 2)
+  end
+  call mag_limbs m
+  acc = 0
+  do i = 1 to lmn
+    sft = (24 * (i - 1)) // 61
+    acc = acc + rot61(lm[i], sft)
+    if acc >= 2305843009213693951 then acc = acc - 2305843009213693951
+  end
+  if neg = 1 then acc = 0 - acc
+  if acc = -1 then acc = -2
+  return acc
+
+/* hash value (a raw int) of a float */
+hash_float: procedure = .int
+  arg f = .float
+  x = .float
+  neg = .int
+  h = .int
+  s = .int
+  if f \= f then return 0
+  if finf(f) = 1 then return 314159
+  if finf(f) = 2 then return -314159
+  if f = 0.0 then return 0
+  x = f
+  neg = 0
+  if x < 0.0 then do
+    neg = 1
+    x = 0.0 - x
+  end
+  call float_decomp x
+  s = fx_k // 61
+  if s < 0 then s = s + 61
+  h = rot61(fx_m, s)
+  if neg = 1 then h = 0 - h
+  if h = -1 then h = -2
+  return h
+
+/* the integer string sx rounded half to even to a multiple of 10 ** k (k > 0) */
+s_round: procedure = .string
+  arg sx = .string, k = .int
+  p = .string
+  q = .string
+  r = .string
+  c = .int
+  p = big_pow("10", k)
+  call sdivmod sx, p
+  q = sq
+  r = sr
+  if r \== "0" & left(sx, 1) == "-" then do
+    q = ssub(q, "1")
+    r = sadd(r, p)
+  end
+  c = scmp(smul(r, "2"), p)
+  if c > 0 | (c = 0 & (right(q, 1) as .int) // 2 = 1) then q = sadd(q, "1")
+  return smul(q, p)
+
+/* m * 2 ** e = the positive integer string s, m a float in [0.5, 1) (rounded half even): fr_m, fr_e */
+big_frexp: procedure = .void
+  arg s0 = .string
+  m = .string
+  bits = .int
+  shift = .int
+  p2 = .string
+  q53 = .int
+  c = .int
+  m = s0
+  if left(m, 1) == "-" then m = substr(m, 2)
+  bits = mag_bits(m)
+  shift = bits - 53
+  if shift <= 0 then do
+    q53 = m as .int
+    fr_m = i2f(q53) / rxfloat..pow(2.0, (0 - shift) as .float)
+    fr_e = 0
+    return
+  end
+  p2 = big_pow("2", shift)
+  call sdivmod m, p2
+  q53 = sq as .int
+  c = scmp(smul(sr, "2"), p2)
+  if c > 0 | (c = 0 & q53 // 2 = 1) then q53 = q53 + 1
+  fr_m = i2f(q53) / c53f
+  fr_e = shift + 53
+  if fr_m >= 1.0 then do
+    fr_m = 0.5
+    fr_e = fr_e + 1
+  end
+  return
+
+/* exact float summation (Shewchuk), as math.fsum */
+fsum_start: procedure = .void
+  fs_n = 0
+  fs_sp = 0.0
+  fs_inf = 0.0
+  fs_nf = 0
+  return
+
+fsum_add: procedure = .void
+  arg xin = .float
+  x = .float
+  xsave = .float
+  y = .float
+  t = .float
+  hi = .float
+  lo = .float
+  yr = .float
+  i = .int
+  j = .int
+  zi = .int
+  xsave = xin
+  x = xin
+  i = 0
+  do j = 1 to fs_n
+    y = fs_p[j]
+    if rxfloat..fabs(x) < rxfloat..fabs(y) then do
+      t = x
+      x = y
+      y = t
+    end
+    hi = x + y
+    yr = hi - x
+    lo = y - yr
+    if lo \= 0.0 then do
+      i = i + 1
+      fs_p[i] = lo
+    end
+    x = hi
+  end
+  fs_n = i
+  if x \= 0.0 then do
+    if x \= x | finf(x) \= 0 then do
+      if xsave = xsave & finf(xsave) = 0 then do
+        zi = raise_exc(C_OVERFLOWERROR, "intermediate overflow in fsum")
+        return
+      end
+      fs_nf = 1
+      if finf(xsave) \= 0 then fs_inf = fs_inf + xsave
+      fs_sp = fs_sp + xsave
+      fs_n = 0
+    end
+    else do
+      fs_n = fs_n + 1
+      fs_p[fs_n] = x
+    end
+  end
+  return
+
+fsum_result: procedure = .float
+  n = .int
+  hi = .float
+  lo = .float
+  x = .float
+  y = .float
+  yr = .float
+  zi = .int
+  if fs_nf = 1 then do
+    if fs_inf \= fs_inf then do
+      zi = raise_exc(C_VALUEERROR, "-inf + inf in fsum")
+      return 0.0
+    end
+    return fs_sp
+  end
+  hi = 0.0
+  lo = 0.0
+  n = fs_n
+  if n > 0 then do
+    hi = fs_p[n]
+    n = n - 1
+    do while n > 0
+      x = hi
+      y = fs_p[n]
+      n = n - 1
+      hi = x + y
+      yr = hi - x
+      lo = y - yr
+      if lo \= 0.0 then leave
+    end
+    if n > 0 then do
+      if (lo < 0.0 & fs_p[n] < 0.0) | (lo > 0.0 & fs_p[n] > 0.0) then do
+        y = lo * 2.0
+        x = hi + y
+        yr = x - hi
+        if y = yr then hi = x
+      end
+    end
+  end
+  return hi
