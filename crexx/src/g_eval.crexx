@@ -371,6 +371,7 @@ ev: procedure = .int
           v = ev(a, fb)
           if v = 0 then return 0
           call dset o, v, TRUE_OOP
+          if unw > 0 then return 0
         end
       end
       return o
@@ -413,6 +414,7 @@ ev: procedure = .int
         v = ev(al[st + 2 * i + 1], fb)
         if v = 0 then return 0
         call dset o, l, v
+        if unw > 0 then return 0
       end
     end
     return o

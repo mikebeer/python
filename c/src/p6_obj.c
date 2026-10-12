@@ -215,7 +215,9 @@ static long py_len(Value v)
         Value *m = class_find(AS_INST(v)->cls, S_len);
         if (m) {
             Value r = call1(*m, v);
-            if (r.t != T_INT) throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer", type_name(r));
+            if (r.t != T_INT)
+                throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+                type_name(r));
             if (r.u.i < 0) throw_new(cls_ValueError, "__len__() should return >= 0");
             return r.u.i;
         }
@@ -495,7 +497,8 @@ static int rich_cmp(int op, Value a, Value b)
             }
         }
     }
-    if ((a.t == T_DVIEW || b.t == T_DVIEW) && (a.t == T_SET || b.t == T_SET || (a.t == T_DVIEW && b.t == T_DVIEW))) {
+    if ((a.t == T_DVIEW || b.t == T_DVIEW)
+        && (a.t == T_SET || b.t == T_SET || (a.t == T_DVIEW && b.t == T_DVIEW))) {
         Value *base = vsp;
         if (a.t == T_DVIEW) a = dview_set(a);
         VPUSH(a);
@@ -675,7 +678,8 @@ static void repr_buf(Value v, Buf *b, int depth)
         Value *m = class_find(in->cls, S_repr);
         if (m) {
             Value r = call1(*m, v);
-            if (r.t != T_STR) throw_new(cls_TypeError, "__repr__ returned non-string (type %.40s)", type_name(r));
+            if (r.t != T_STR)
+                throw_new(cls_TypeError, "__repr__ returned non-string (type %.40s)", type_name(r));
             buf_addn(b, AS_STR(r)->s, AS_STR(r)->len);
         } else {
             buf_add(b, "<__main__.");
@@ -717,7 +721,8 @@ static void repr_buf(Value v, Buf *b, int depth)
         DView *dv = (DView *)v.u.o;
         Dict *d = AS_DICT(dv->d);
         int first = 1;
-        buf_add(b, dv->what == 0 ? "dict_keys([" : (dv->what == 1 ? "dict_values([" : "dict_items(["));
+        buf_add(b,
+            dv->what == 0 ? "dict_keys([" : (dv->what == 1 ? "dict_values([" : "dict_items(["));
         for (i = 0; i < d->used; i++) {
             if (d->e[i].k.t == T_UNSET) continue;
             if (!first) buf_add(b, ", ");
@@ -776,7 +781,8 @@ static void str_buf(Value v, Buf *b)
         }
         if (m) {
             Value r = call1(*m, v);
-            if (r.t != T_STR) throw_new(cls_TypeError, "__str__ returned non-string (type %.40s)", type_name(r));
+            if (r.t != T_STR)
+                throw_new(cls_TypeError, "__str__ returned non-string (type %.40s)", type_name(r));
             buf_addn(b, AS_STR(r)->s, AS_STR(r)->len);
             return;
         }
@@ -905,9 +911,12 @@ static void c3_build(Class *c, Class **bases, int nb)
         if (!cand) {
             for (i = 0; i <= nb; i++) free(sq[i].a);
             free(sq); free(res);
-            throw_new(cls_TypeError, "Cannot create a consistent method resolution order (MRO) for bases");
+            throw_new(cls_TypeError,
+                "Cannot create a consistent method resolution order (MRO) for bases");
         }
-        if (nres >= rcap) { rcap *= 2; res = (Class **)xrealloc(res, sizeof(Class *) * (size_t)rcap); }
+        if (nres >= rcap) { rcap *= 2;
+            res = (Class **)xrealloc(res, sizeof(Class *) * (size_t)rcap);
+        }
         res[nres++] = cand;
         for (i = 0; i <= nb; i++)
             if (sq[i].pos < sq[i].n && sq[i].a[sq[i].pos] == cand) sq[i].pos++;
@@ -997,7 +1006,8 @@ static Value get_attr(Value o, Str *nm)
         break; }
     case T_SUPER: {
         Super *s = (Super *)o.u.o;
-        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start, nm);
+        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start,
+            nm);
         if (p) {
             if (s->obj.t == T_CLASS) {
                 if (p->t == T_CMETH) return new_bound(s->obj, ((Prop *)p->u.o)->get);
@@ -1043,9 +1053,12 @@ static Value get_attr(Value o, Str *nm)
         }
         if (nm == intern_c("deleter")) return new_bound(o, propdeleter_fn);
         if (nm == intern_c("getter")) return new_bound(o, propgetter_fn);
-        if (nm == intern_c("fget")) return ((Prop *)o.u.o)->get.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->get;
-        if (nm == intern_c("fset")) return ((Prop *)o.u.o)->set.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->set;
-        if (nm == intern_c("fdel")) return ((Prop *)o.u.o)->del.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->del;
+        if (nm == intern_c("fget")) return ((Prop *)o.u.o)
+            ->get.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->get;
+        if (nm == intern_c("fset")) return ((Prop *)o.u.o)
+            ->set.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->set;
+        if (nm == intern_c("fdel")) return ((Prop *)o.u.o)
+            ->del.t == T_UNSET ? NONE_V : ((Prop *)o.u.o)->del;
         break; }
     case T_ND: {
         Value r;
@@ -1064,12 +1077,14 @@ static Value get_attr(Value o, Str *nm)
     {
         Class *c = class_of(o);
         p = class_find(c, nm);
-        if (p && o.t != T_INST && o.t != T_CLASS && o.t != T_MODULE) return bind_class_attr(o, p, c);
+        if (p && o.t != T_INST && o.t != T_CLASS && o.t != T_MODULE)
+            return bind_class_attr(o, p, c);
         if (nm == S_name && o.t != T_INST) {
             /* fallthrough to error */
         }
     }
-    if (o.t == T_INST && ((nm == intern_c("value") && class_isa(AS_INST(o)->cls, cls_StopIteration)) ||
+    if (o.t == T_INST
+        && ((nm == intern_c("value") && class_isa(AS_INST(o)->cls, cls_StopIteration)) ||
                           (nm == intern_c("code") && class_isa(AS_INST(o)->cls, cls_SystemExit)))) {
         Value *av = amap_get(&AS_INST(o)->a, S_args);
         if (av && av->t == T_TUPLE && AS_LIST(*av)->n > 0) return AS_LIST(*av)->a[0];
@@ -1100,7 +1115,8 @@ static int lookup_method(Value *o, Str *nm, Value *out, Node *cache)
         break; }
     case T_SUPER: {
         Super *s = (Super *)o->u.o;
-        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start, nm);
+        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start,
+            nm);
         if (p && (p->t == T_FUNC || p->t == T_BUILTIN) && s->obj.t != T_CLASS) {
             *out = *p;
             *o = s->obj;
@@ -1145,7 +1161,8 @@ static void set_attr(Value o, Str *nm, Value v)
             Value *p = class_find(in->cls, nm);
             if (p && p->t == T_PROP) {
                 Prop *pr = (Prop *)p->u.o;
-                if (pr->set.t == T_UNSET) throw_new(cls_AttributeError, "can't set attribute '%.60s'", nm->s);
+                if (pr->set.t == T_UNSET)
+                    throw_new(cls_AttributeError, "can't set attribute '%.60s'", nm->s);
                 call2(pr->set, o, v);
                 return;
             }
@@ -1167,7 +1184,9 @@ static void set_attr(Value o, Str *nm, Value v)
         return; }
     default: break;
     }
-    throw_new(cls_AttributeError, "'%.60s' object has no attribute '%.60s' and no __dict__ for setting new attributes", type_name(o), nm->s);
+    throw_new(cls_AttributeError,
+        "'%.60s' object has no attribute '%.60s' and no __dict__ for setting new attributes",
+        type_name(o), nm->s);
 }
 static void del_attr(Value o, Str *nm)
 {
@@ -1175,7 +1194,8 @@ static void del_attr(Value o, Str *nm)
         Value *p = class_find(AS_INST(o)->cls, nm);
         if (p && p->t == T_PROP) {
             Prop *pr = (Prop *)p->u.o;
-            if (pr->del.t == T_UNSET) throw_new(cls_AttributeError, "can't delete attribute '%.60s'", nm->s);
+            if (pr->del.t == T_UNSET)
+                throw_new(cls_AttributeError, "can't delete attribute '%.60s'", nm->s);
             call1(pr->del, o);
             return;
         }
@@ -1320,7 +1340,8 @@ static Value subscr(Value o, Value idx)
             long i = norm_index(idx.u.i, s->len, "index");
             return mkint((unsigned char)s->s[i]);
         }
-        throw_new(cls_TypeError, "byte indices must be integers or slices, not %.40s", type_name(idx));
+        throw_new(cls_TypeError, "byte indices must be integers or slices, not %.40s",
+            type_name(idx));
         break;
     case T_ND: return nd_subscr(o, idx);
     case T_RANGE:
@@ -1329,7 +1350,8 @@ static Value subscr(Value o, Value idx)
             long i = norm_index(idx.u.i, range_len(r), "range object");
             return mkint(r->start + i * r->step);
         }
-        throw_new(cls_TypeError, "range indices must be integers or slices, not %.40s", type_name(idx));
+        throw_new(cls_TypeError, "range indices must be integers or slices, not %.40s",
+            type_name(idx));
         break;
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_getitem);
@@ -1366,7 +1388,9 @@ static void slice_set(Value o, Value lo, Value hi, Value st, Value v)
             list_splice(l, start, stop, src->a, src->n);
         } else {
             if (src->n != cnt)
-                throw_new(cls_ValueError, "attempt to assign sequence of size %ld to extended slice of size %ld", src->n, cnt);
+                throw_new(cls_ValueError,
+                    "attempt to assign sequence of size %ld to extended slice of size %ld", src->n,
+                    cnt);
             for (i = 0; i < cnt; i++) l->a[start + i * step] = src->a[i];
         }
         vsp--;
@@ -1402,7 +1426,8 @@ static void setitem(Value o, Value idx, Value v)
             l->a[i] = v;
             return;
         }
-        throw_new(cls_TypeError, "list indices must be integers or slices, not %.40s", type_name(idx));
+        throw_new(cls_TypeError, "list indices must be integers or slices, not %.40s",
+            type_name(idx));
         break;
     case T_DICT: dict_set(AS_DICT(o), idx, v); return;
     case T_ND: nd_setitem(o, idx, v); return;
@@ -1459,7 +1484,8 @@ static void slice_del(Value o, Value lo, Value hi, Value st)
         slice_adjust(lo, hi, st, l->n, &start, &stop, &step, &cnt);
         if (step == 1) { if (stop > start) list_splice(l, start, stop, NULL, 0); return; }
         if (step < 0) { start = start + (cnt - 1) * step; step = -step; }
-        for (i = cnt - 1; i >= 0; i--) list_splice(l, start + i * step, start + i * step + 1, NULL, 0);
+        for (i = cnt - 1; i >= 0; i--)
+            list_splice(l, start + i * step, start + i * step + 1, NULL, 0);
         return;
     }
     if (o.t == T_INST) {
@@ -1528,7 +1554,8 @@ static int iter_next(Value it, Value *out)
     if (it.t == T_INST) {
         Value *m = class_find(AS_INST(it)->cls, S_next);
         Value res, exc;
-        if (!m) throw_new(cls_TypeError, "iter() returned non-iterator of type '%.40s'", type_name(it));
+        if (!m)
+            throw_new(cls_TypeError, "iter() returned non-iterator of type '%.40s'", type_name(it));
         if (protected_call(*m, 1, &it, &res, &exc)) {
             if (class_isa(AS_INST(exc)->cls, cls_StopIteration)) return 0;
             throw_val(exc);
@@ -1700,7 +1727,9 @@ static int contains(Value c, Value x)
     case T_STR: {
         Str *s = AS_STR(c), *u;
         long i;
-        if (x.t != T_STR) throw_new(cls_TypeError, "'in <string>' requires string as left operand, not %.40s", type_name(x));
+        if (x.t != T_STR)
+            throw_new(cls_TypeError, "'in <string>' requires string as left operand, not %.40s",
+            type_name(x));
         u = AS_STR(x);
         if (u->len == 0) return 1;
         for (i = 0; i + u->len <= s->len; i++)
@@ -1710,7 +1739,8 @@ static int contains(Value c, Value x)
         Str *s = AS_STR(c), *u;
         long i;
         if (x.t == T_INT) return memchr(s->s, (int)x.u.i, (size_t)s->len) != NULL;
-        if (x.t != T_BYTES) throw_new(cls_TypeError, "a bytes-like object is required, not '%.40s'", type_name(x));
+        if (x.t != T_BYTES)
+            throw_new(cls_TypeError, "a bytes-like object is required, not '%.40s'", type_name(x));
         u = AS_STR(x);
         if (u->len == 0) return 1;
         for (i = 0; i + u->len <= s->len; i++)
@@ -1839,8 +1869,10 @@ static Value num_binop(int op, Value a, Value b)
             if (y == 0) throw_new(cls_ZeroDivisionError, "float modulo by zero");
             return mkfloat(fl_mod(x, y));
         case B_POW:
-            if (x == 0 && y < 0) throw_new(cls_ZeroDivisionError, "0.0 cannot be raised to a negative power");
-            if (x < 0 && y != floor(y)) throw_new(cls_ValueError, "negative number cannot be raised to a fractional power");
+            if (x == 0 && y < 0)
+                throw_new(cls_ZeroDivisionError, "0.0 cannot be raised to a negative power");
+            if (x < 0 && y != floor(y))
+                throw_new(cls_ValueError, "negative number cannot be raised to a fractional power");
             return mkfloat(pow(x, y));
         default: break;
         }
@@ -1861,11 +1893,15 @@ static Value num_binop(int op, Value a, Value b)
         if (a.t == T_BIG || b.t == T_BIG)
             throw_new(cls_OverflowError, "bitwise operations on huge integers are not supported");
         if (a.t == T_BOOL && b.t == T_BOOL)
-            return tobool(op == B_AND ? (a.u.i & b.u.i) : (op == B_OR ? (a.u.i | b.u.i) : (a.u.i ^ b.u.i)));
-        return mkint(op == B_AND ? (a.u.i & b.u.i) : (op == B_OR ? (a.u.i | b.u.i) : (a.u.i ^ b.u.i)));
+            return tobool
+                ((int)(op == B_AND ? (a.u.i & b.u.i)
+                : (op == B_OR ? (a.u.i | b.u.i) : (a.u.i ^ b.u.i))));
+        return mkint(op == B_AND ? (a.u.i & b.u.i)
+            : (op == B_OR ? (a.u.i | b.u.i) : (a.u.i ^ b.u.i)));
     case B_LSH: {
         if (int_sign(b) < 0) throw_new(cls_ValueError, "negative shift count");
-        if (b.t == T_BIG || b.u.i > 100000000L) throw_new(cls_OverflowError, "shift count too large");
+        if (b.t == T_BIG || b.u.i > 100000000L)
+            throw_new(cls_OverflowError, "shift count too large");
         return int_mul(a, int_pow(mkint(2), b.u.i)); }
     default: {
         if (int_sign(b) < 0) throw_new(cls_ValueError, "negative shift count");
@@ -1970,7 +2006,8 @@ static Value binop(int op, Value a, Value b)
         if ((b.t == T_STR || b.t == T_LIST || b.t == T_TUPLE) && (a.t == T_INT || a.t == T_BOOL))
             return seq_repeat(b, a.u.i);
         if ((a.t == T_STR || a.t == T_LIST || a.t == T_TUPLE) && b.t != T_INST)
-            throw_new(cls_TypeError, "can't multiply sequence by non-int of type '%.40s'", type_name(b));
+            throw_new(cls_TypeError, "can't multiply sequence by non-int of type '%.40s'",
+                type_name(b));
     }
     if (op == B_MOD && a.t == T_STR) return py_format_percent(a, b);
     if (op == B_OR && a.t == T_DICT && b.t == T_DICT) {
@@ -1984,7 +2021,8 @@ static Value binop(int op, Value a, Value b)
     }
     if (a.t == T_SET && b.t == T_SET && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR))
         return set_op(op, a, b);
-    if ((a.t == T_DVIEW || b.t == T_DVIEW) && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR)) {
+    if ((a.t == T_DVIEW || b.t == T_DVIEW)
+        && (op == B_OR || op == B_AND || op == B_SUB || op == B_XOR)) {
         Value x = a, y = b, r;
         Value *base = vsp;
         if (a.t == T_DVIEW) x = ((DView *)a.u.o)->what == 1 ? a : dview_set(a);
@@ -2021,7 +2059,8 @@ static Value binop(int op, Value a, Value b)
     if (op == B_ADD && a.t == T_LIST)
         throw_new(cls_TypeError, "can only concatenate list (not \"%.40s\") to list", type_name(b));
     if (op == B_ADD && a.t == T_TUPLE)
-        throw_new(cls_TypeError, "can only concatenate tuple (not \"%.40s\") to tuple", type_name(b));
+        throw_new(cls_TypeError, "can only concatenate tuple (not \"%.40s\") to tuple",
+            type_name(b));
     throw_new(cls_TypeError, "unsupported operand type(s) for %s: '%.40s' and '%.40s'",
               op_str(op), type_name(a), type_name(b));
     return NONE_V;

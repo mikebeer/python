@@ -91,7 +91,8 @@ static Value format_float_spec(double d, FSpec *sp)
     }
     if (d < 0 || (d == 0 && 1.0 / d < 0)) { neg = 1; d = -d; }
     if (d > DBL_MAX) {
-        return pad_result(sp, sign_str(sp, neg), "", t == 'F' || t == 'E' || t == 'G' ? "INF" : "inf", 3, '>');
+        return pad_result(sp, sign_str(sp, neg), "",
+            t == 'F' || t == 'E' || t == 'G' ? "INF" : "inf", 3, '>');
     }
     if (t == 0) {
         if (prec < 0) { float_repr(d, tmp); }
@@ -157,7 +158,8 @@ static Value format_value(Value v, const char *spec, long speclen)
     if (v.t == T_INST) {
         Value *m = class_find(AS_INST(v)->cls, S_format);
         if (m) return call2(*m, v, mkstr(spec, speclen));
-        throw_new(cls_TypeError, "unsupported format string passed to %.60s.__format__", type_name(v));
+        throw_new(cls_TypeError, "unsupported format string passed to %.60s.__format__",
+            type_name(v));
     }
     parse_spec(spec, speclen, &sp);
     if (v.t == T_STR || (sp.type == 's')) {
@@ -181,7 +183,8 @@ static Value format_value(Value v, const char *spec, long speclen)
             return r;
         }
         if (t == 0 || t == 'd' || t == 'n' || t == 'x' || t == 'X' || t == 'o' || t == 'b') {
-            if (sp.prec >= 0) throw_new(cls_ValueError, "Precision not allowed in integer format specifier");
+            if (sp.prec >= 0)
+                throw_new(cls_ValueError, "Precision not allowed in integer format specifier");
             return format_int_spec(v, &sp);
         }
         if (strchr("eEfFgG%", t)) return format_float_spec(to_dbl(v), &sp);
@@ -238,7 +241,8 @@ static Value py_format_percent(Value fmt, Value args)
         if (i < f->len && f->s[i] == '*') {
             Value w;
             i++;
-            if (!tup || argi >= tup->n) throw_new(cls_TypeError, "not enough arguments for format string");
+            if (!tup || argi >= tup->n)
+                throw_new(cls_TypeError, "not enough arguments for format string");
             w = tup->a[argi++];
             width = need_long(w, "width");
             if (width < 0) { flags_minus = 1; width = -width; }
@@ -253,10 +257,12 @@ static Value py_format_percent(Value fmt, Value args)
             prec = 0;
             if (i < f->len && f->s[i] == '*') {
                 i++;
-                if (!tup || argi >= tup->n) throw_new(cls_TypeError, "not enough arguments for format string");
+                if (!tup || argi >= tup->n)
+                    throw_new(cls_TypeError, "not enough arguments for format string");
                 prec = need_long(tup->a[argi++], "precision");
             } else {
-                while (i < f->len && ch_digit[(unsigned char)f->s[i]]) prec = prec * 10 + (f->s[i++] - '0');
+                while (i < f->len && ch_digit[(unsigned char)f->s[i]])
+                    prec = prec * 10 + (f->s[i++] - '0');
             }
         }
         while (i < f->len && strchr("lhL", f->s[i])) i++;
@@ -265,7 +271,8 @@ static Value py_format_percent(Value fmt, Value args)
         if (t == '%') { buf_addc(&out, '%'); continue; }
         if (used_single != 2) {
             if (tup) {
-                if (argi >= tup->n) throw_new(cls_TypeError, "not enough arguments for format string");
+                if (argi >= tup->n)
+                    throw_new(cls_TypeError, "not enough arguments for format string");
                 arg = tup->a[argi++];
             } else {
                 if (argi >= 1) throw_new(cls_TypeError, "not enough arguments for format string");
@@ -287,9 +294,11 @@ static Value py_format_percent(Value fmt, Value args)
         else if (t == 's') { arg = py_str(arg); }
         else if (t == 'i' || t == 'u') t = 'd';
         if (t == 'd' || t == 'x' || t == 'X' || t == 'o') {
-            if (arg.t == T_FLOAT) arg = int_from_double(arg.u.d < 0 ? ceil(arg.u.d) : floor(arg.u.d));
+            if (arg.t == T_FLOAT)
+                arg = int_from_double(arg.u.d < 0 ? ceil(arg.u.d) : floor(arg.u.d));
             else if (!is_intv(arg))
-                throw_new(cls_TypeError, "%%%c format: a real number is required, not %.40s", t, type_name(arg));
+                throw_new(cls_TypeError, "%%%c format: a real number is required, not %.40s", t,
+                    type_name(arg));
         } else if (strchr("eEfFgG", t)) {
             if (!is_num(arg))
                 throw_new(cls_TypeError, "must be real number, not %.40s", type_name(arg));
@@ -321,8 +330,14 @@ static Value format_template(Str *t, int nargs, Value *args, int nk, Value *kw, 
     if (depth > 3) throw_new(cls_ValueError, "Max string recursion exceeded");
     while (i < t->len) {
         int c = t->s[i];
-        if (c == '{' && i + 1 < t->len && t->s[i + 1] == '{') { buf_addc(&out, '{'); i += 2; continue; }
-        if (c == '}' && i + 1 < t->len && t->s[i + 1] == '}') { buf_addc(&out, '}'); i += 2; continue; }
+        if (c == '{' && i + 1 < t->len && t->s[i + 1] == '{') { buf_addc(&out, '{');
+            i += 2;
+            continue;
+        }
+        if (c == '}' && i + 1 < t->len && t->s[i + 1] == '}') { buf_addc(&out, '}');
+            i += 2;
+            continue;
+        }
         if (c == '}') throw_new(cls_ValueError, "Single '}' encountered in format string");
         if (c == '{') {
             long st = i + 1, j = st, fend, send = -1, sst = -1;
@@ -352,17 +367,23 @@ static Value format_template(Str *t, int nargs, Value *args, int nk, Value *kw, 
                 while (*p && *p != '.' && *p != '[') first[fl++] = *p++;
                 first[fl] = 0;
                 if (fl == 0) {
-                    if (auto_idx >= nargs) throw_new(cls_IndexError, "Replacement index %d out of range for positional args tuple", auto_idx);
+                    if (auto_idx >= nargs)
+                        throw_new(cls_IndexError,
+                        "Replacement index %d out of range for positional args tuple", auto_idx);
                     v = args[auto_idx++];
                 } else if (ch_digit[(unsigned char)first[0]]) {
                     int ix = atoi(first);
-                    if (ix >= nargs) throw_new(cls_IndexError, "Replacement index %d out of range for positional args tuple", ix);
+                    if (ix >= nargs)
+                        throw_new(cls_IndexError,
+                        "Replacement index %d out of range for positional args tuple", ix);
                     v = args[ix];
                 } else {
                     int found = 0;
                     v = NONE_V;
                     for (k = 0; k < nk; k++)
-                        if (strcmp(AS_STR(kw[2 * k])->s, first) == 0) { v = kw[2 * k + 1]; found = 1; }
+                        if (strcmp(AS_STR(kw[2 * k])->s, first) == 0) { v = kw[2 * k + 1];
+                            found = 1;
+                        }
                     if (!found) throw_key(mkcstr(first));
                 }
                 while (*p) {

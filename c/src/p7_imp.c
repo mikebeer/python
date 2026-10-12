@@ -11,41 +11,15 @@ static Value sys_path_v = { 0, { 0 } };
 static Class *cls_ModuleNotFoundError;
 static const char *exe_path = "";
 
-/* the only place that knows how paths are joined (VM/370 may differ) */
-static void path_join(Buf *b, const char *dir, long dlen, const char *name, long nlen)
-{
-    if (dlen > 0) {
-        buf_addn(b, dir, dlen);
-        if (dir[dlen - 1] != '/') buf_addc(b, '/');
-    }
-    buf_addn(b, name, nlen);
-}
+/* paths are composed and files read only through the host_* adapters (p0_os.c) */
 static Value path_join_v(Value dir, const char *name)
 {
-    Buf b;
-    buf_init(&b);
-    path_join(&b, AS_STR(dir)->s, AS_STR(dir)->len, name, (long)strlen(name));
-    return buf_value(&b);
+    char tmp[PY_PATHMAX];
+    long n = host_join(tmp, AS_STR(dir)->s, AS_STR(dir)->len, name, (long)strlen(name));
+    if (n < 0) throw_new(cls_OSError, "path too long");
+    return mkstr(tmp, n);
 }
-
-static char *read_whole(const char *path, long *len)
-{
-    FILE *fp = fopen(path, "rb");
-    char *buf;
-    long n = 0, cap = 4096;
-    int c;
-    if (!fp) return NULL;
-    buf = (char *)xmalloc((size_t)cap);
-    while ((c = getc(fp)) != EOF) {
-        if (n + 2 >= cap) { cap *= 2; buf = (char *)xrealloc(buf, (size_t)cap); }
-        buf[n++] = (char)c;
-    }
-    if (ferror(fp)) { fclose(fp); free(buf); return NULL; }
-    buf[n] = 0;
-    fclose(fp);
-    *len = n;
-    return buf;
-}
+#define read_whole host_read_file
 
 /* ---- compile and run -------------------------------------------------- */
 static Node *compile_src(const char *src, long len, Str *gp)
@@ -179,7 +153,8 @@ static Value import_one(Str *full);
 /* look for module `leaf` in directory `dir`; returns the module or UNSET */
 static Value try_dir(Value dir, Str *leaf, Str *full, Str *parentname)
 {
-    Buf pb;
+    char pb[PY_PATHMAX];
+    long pn;
     Value sub, pkgfile, mv;
     char *src;
     long len;
@@ -188,20 +163,15 @@ static Value try_dir(Value dir, Str *leaf, Str *full, Str *parentname)
     if (dir.t != T_STR) return UNSET_V;
     sub = path_join_v(dir, leaf->s);
     VPUSH(sub);
-    buf_init(&pb);
-    path_join(&pb, AS_STR(sub)->s, AS_STR(sub)->len, "__init__.py", 11);
-    src = read_whole(pb.s, &len);
+    pn = host_module_path(pb, AS_STR(dir)->s, AS_STR(dir)->len, leaf->s, leaf->len, 1);
+    src = pn < 0 ? NULL : read_whole(pb, &len);
     if (!src) {
-        buf_free(&pb);
-        buf_init(&pb);
-        buf_addn(&pb, AS_STR(sub)->s, AS_STR(sub)->len);
-        buf_add(&pb, ".py");
-        src = read_whole(pb.s, &len);
+        pn = host_module_path(pb, AS_STR(dir)->s, AS_STR(dir)->len, leaf->s, leaf->len, 0);
+        src = pn < 0 ? NULL : read_whole(pb, &len);
         ispkg = 0;
     }
-    if (!src) { buf_free(&pb); vsp--; return UNSET_V; }
-    pkgfile = mkstr(pb.s, pb.n);
-    buf_free(&pb);
+    if (!src) { vsp--; return UNSET_V; }
+    pkgfile = mkstr(pb, pn);
     VPUSH(pkgfile);
     m = module_new_py(full);
     mv = mkobj(m, T_MODULE);
@@ -235,7 +205,8 @@ static Value import_one(Str *full)
         pm = import_one(parent);
         dirs = module_getattr_opt(pm, intern_c("__path__"));
         if (dirs.t != T_LIST)
-            throw_new(cls_ModuleNotFoundError, "No module named '%.200s'; '%.100s' is not a package",
+            throw_new(cls_ModuleNotFoundError,
+                "No module named '%.200s'; '%.100s' is not a package",
                       full->s, parent->s);
     } else {
         leaf = full;
@@ -302,18 +273,12 @@ static int module_overlay(Module *md, Str *nm, Value *out)
         overlay_mod = UNSET_V;
         for (k = 0; k < AS_LIST(sys_path_v)->n && overlay_mod.t == T_UNSET; k++) {
             Value cand = AS_LIST(sys_path_v)->a[k];
-            Value sub;
-            Buf pb;
-            char *src;
+            char pb[PY_PATHMAX];
+            char *src = NULL;
             long len;
             if (cand.t != T_STR) continue;
-            sub = path_join_v(cand, "numpy");
-            VPUSH(sub);
-            buf_init(&pb);
-            path_join(&pb, AS_STR(sub)->s, AS_STR(sub)->len, "__init__.py", 11);
-            src = read_whole(pb.s, &len);
-            buf_free(&pb);
-            vsp--;
+            if (host_module_path(pb, AS_STR(cand)->s, AS_STR(cand)->len, "numpy", 5, 1) >= 0)
+                src = read_whole(pb, &len);
             if (src) { free(src); overlay_mod = try_dir(cand, leaf, ovn, NULL); }
         }
         if (overlay_mod.t == T_UNSET) { overlay_state = 3; return 0; }
@@ -447,34 +412,38 @@ static void path_append(List *l, const char *s, long n)
 {
     list_push(l, mkstr(s, n));
 }
+static void path_add_rel(List *l, const char *base, long blen, const char *rel)
+{
+    char tmp[PY_PATHMAX];
+    long n = host_join(tmp, base, blen, rel, (long)strlen(rel));
+    if (n >= 0) path_append(l, tmp, n);
+}
 static void init_sys_path(const char *script)
 {
     List *l = list_new(8);
-    const char *env = getenv("PYLIB");
-    long i, last = -1, n = (long)strlen(script);
-    Buf b;
-    for (i = 0; i < n; i++) if (script[i] == '/') last = i;
-    path_append(l, script, last < 0 ? 0 : (last == 0 ? 1 : last));
+    const char *env = host_getenv("PYLIB");
+    long n;
+    path_append(l, script, host_dirname_len(script));
+#ifdef PY_EMBED_LIBS
+    path_append(l, PY_EMBED_DIR, (long)strlen(PY_EMBED_DIR));
+#endif
     if (env) {
         const char *p = env;
+        size_t sl = strlen(PY_PATHLIST_SEP);
         while (*p) {
             const char *q = p;
-            while (*q && *q != ':') q++;
+            while (*q && strncmp(q, PY_PATHLIST_SEP, sl) != 0) q++;
             if (q > p) path_append(l, p, (long)(q - p));
-            p = *q ? q + 1 : q;
+            p = *q ? q + sl : q;
         }
     }
-    n = (long)strlen(exe_path);
-    last = -1;
-    for (i = 0; i < n; i++) if (exe_path[i] == '/') last = i;
-    buf_init(&b);
-    path_join(&b, exe_path, last < 0 ? 0 : last, "pylib", 5);
-    path_append(l, b.s, b.n);
-    buf_free(&b);
-    buf_init(&b);
-    path_join(&b, exe_path, last < 0 ? 0 : last, "../pylib", 8);
-    path_append(l, b.s, b.n);
-    buf_free(&b);
+    if (PY_EXE_LIBS) {
+        char tmp[PY_PATHMAX];
+        n = host_dirname_len(exe_path);
+        path_add_rel(l, exe_path, n, "pylib");
+        if (host_join(tmp, exe_path, n, PY_PARDIR, (long)strlen(PY_PARDIR)) >= 0)
+            path_add_rel(l, tmp, (long)strlen(tmp), "pylib");
+    }
     path_append(l, PY_LIBDIR, (long)strlen(PY_LIBDIR));
     sys_path_v = mklist(l);
 }
@@ -619,7 +588,8 @@ static Value exec_eval(Args *x, int is_eval)
     int usedict = 0, pushed = 0;
     need(x, 1, 3, is_eval ? "eval" : "exec");
     srcv = A(0);
-    if (srcv.t != T_STR) throw_new(cls_TypeError, "%s() arg 1 must be a string", is_eval ? "eval" : "exec");
+    if (srcv.t != T_STR)
+        throw_new(cls_TypeError, "%s() arg 1 must be a string", is_eval ? "eval" : "exec");
     if (x->n > 1) gd = A(1); else gd = kwget(x, "globals");
     if (x->n > 2) ld = A(2); else ld = kwget(x, "locals");
     if (gd.t != T_DICT && ld.t != T_DICT && cur_frame && cur_frame->fn && cur_frame->loc) {
@@ -643,7 +613,9 @@ static Value exec_eval(Args *x, int is_eval)
             for (i = 0; i < AS_DICT(dd)->used; i++) {
                 DEnt *e = &AS_DICT(dd)->e[i];
                 if (e->k.t == T_STR)
-                    { long gi2 = global_index(prefixed(gp, intern_str(AS_STR(e->k)))); G[gi2] = e->v; }
+                    { long gi2 = global_index(prefixed(gp, intern_str(AS_STR(e->k))));
+                        G[gi2] = e->v;
+                    }
             }
         }
     } else {
@@ -652,7 +624,9 @@ static Value exec_eval(Args *x, int is_eval)
             for (i = 0; i < AS_DICT(ld)->used; i++) {
                 DEnt *e = &AS_DICT(ld)->e[i];
                 if (e->k.t == T_STR)
-                    { long gi2 = global_index(prefixed(gp, intern_str(AS_STR(e->k)))); G[gi2] = e->v; }
+                    { long gi2 = global_index(prefixed(gp, intern_str(AS_STR(e->k))));
+                        G[gi2] = e->v;
+                    }
             }
         }
     }
@@ -674,7 +648,8 @@ static Value exec_eval(Args *x, int is_eval)
     buf_free(&b);
     if (is_eval) {
         Frame fr;
-        if (blk->n < 1 || blk->list[0]->kind != S_EXPR) throw_new(cls_SyntaxError, "invalid syntax");
+        if (blk->n < 1 || blk->list[0]->kind != S_EXPR)
+            throw_new(cls_SyntaxError, "invalid syntax");
         init_frame(&fr, gp);
         cur_frame = &fr;
         call_depth++;
@@ -689,7 +664,8 @@ static Value exec_eval(Args *x, int is_eval)
         VPUSH(result);
         for (i = 0; i < nglobals; i++) {
             Str *g = gnames[i];
-            if (g->len > gp->len && memcmp(g->s, gp->s, (size_t)gp->len) == 0 && G[i].t != T_UNSET &&
+            if (g->len > gp->len && memcmp(g->s, gp->s, (size_t)gp->len) == 0 && G[i].t != T_UNSET
+                &&
                 !memchr(g->s + gp->len, '.', (size_t)(g->len - gp->len)) && g->s[gp->len] != '.')
                 dict_set(AS_DICT(gd), mkstr(g->s + gp->len, g->len - gp->len), G[i]);
         }
@@ -703,7 +679,8 @@ BI(bi_eval) { return exec_eval(x, 1); }
 BI(bi_import)
 {
     need(x, 1, 5, "__import__");
-    return import_dotted(intern_str(astr(A(0), "name")), x->n > 3 && A(3).t == T_TUPLE && AS_LIST(A(3))->n > 0);
+    return import_dotted(intern_str(astr(A(0), "name")),
+        x->n > 3 && A(3).t == T_TUPLE && AS_LIST(A(3))->n > 0);
 }
 
 /* ---- os and os.path --------------------------------------------------- */
@@ -711,19 +688,17 @@ BI(os_getenv)
 {
     const char *v;
     need(x, 1, 2, "getenv");
-    v = getenv(astr(A(0), "key")->s);
+    v = host_getenv(astr(A(0), "key")->s);
     if (v) return mkcstr(v);
     return x->n > 1 ? A(1) : NONE_V;
 }
 BI(os_getcwd)
 {
     (void)x;
-#ifdef PY_POSIX
     {
-        char b[4096];
-        if (getcwd(b, sizeof(b))) return mkcstr(b);
+        char b[PY_PATHMAX];
+        if (host_getcwd(b, (long)sizeof(b))) return mkcstr(b);
     }
-#endif
     return mkcstr(".");
 }
 BI(osp_join)
@@ -861,7 +836,7 @@ BI(osp_expanduser)
     need(x, 1, 1, "expanduser");
     s = astr(A(0), "path");
     if (s->len > 0 && s->s[0] == '~' && (s->len == 1 || s->s[1] == '/')) {
-        home = getenv("HOME");
+        home = host_getenv("HOME");
         if (home) {
             Buf b;
             buf_init(&b);
@@ -874,81 +849,54 @@ BI(osp_expanduser)
 }
 BI(osp_exists)
 {
-    FILE *fp;
     need(x, 1, 1, "exists");
-    fp = fopen(astr(A(0), "path")->s, "rb");
-    if (!fp) return FALSE_V;
-    fclose(fp);
-    return TRUE_V;
-}
-static int path_is_dir(const char *p)
-{
-    FILE *fp = fopen(p, "rb");
-    int isdir = 0;
-    if (!fp) return 0;
-    if (getc(fp) == EOF && ferror(fp)) isdir = 1;
-    fclose(fp);
-    return isdir;
+    return mkbool(host_file_exists(astr(A(0), "path")->s));
 }
 BI(osp_isdir)
 {
     need(x, 1, 1, "isdir");
-    return mkbool(path_is_dir(astr(A(0), "path")->s));
+    return mkbool(host_file_isdir(astr(A(0), "path")->s));
 }
 BI(osp_isfile)
 {
-    FILE *fp;
-    int ok;
     need(x, 1, 1, "isfile");
-    fp = fopen(astr(A(0), "path")->s, "rb");
-    if (!fp) return FALSE_V;
-    ok = !(getc(fp) == EOF && ferror(fp));
-    fclose(fp);
-    return mkbool(ok);
+    return mkbool(host_file_isfile(astr(A(0), "path")->s));
 }
 BI(osp_getsize)
 {
-    FILE *fp;
     long n;
     need(x, 1, 1, "getsize");
-    fp = fopen(astr(A(0), "path")->s, "rb");
-    if (!fp) throw_new(cls_FileNotFoundError, "[Errno 2] No such file or directory: '%.200s'", AS_STR(A(0))->s);
-    fseek(fp, 0L, SEEK_END);
-    n = ftell(fp);
-    fclose(fp);
+    n = host_file_size(astr(A(0), "path")->s);
+    if (n < 0)
+        throw_new(cls_FileNotFoundError, "[Errno 2] No such file or directory: '%.200s'",
+                  AS_STR(A(0))->s);
     return mkint(n);
 }
 BI(os_remove)
 {
     need(x, 1, 1, "remove");
-    if (remove(astr(A(0), "path")->s) != 0)
-        throw_new(cls_FileNotFoundError, "[Errno 2] No such file or directory: '%.200s'", AS_STR(A(0))->s);
+    if (host_file_remove(astr(A(0), "path")->s) != 0)
+        throw_new(cls_FileNotFoundError, "[Errno 2] No such file or directory: '%.200s'",
+            AS_STR(A(0))->s);
     return NONE_V;
 }
 BI(os_rename)
 {
     need(x, 2, 2, "rename");
-    if (rename(astr(A(0), "src")->s, astr(A(1), "dst")->s) != 0)
+    if (host_file_rename(astr(A(0), "src")->s, astr(A(1), "dst")->s) != 0)
         throw_new(cls_OSError, "rename failed: '%.200s'", AS_STR(A(0))->s);
     return NONE_V;
 }
 
 
-#ifdef PY_POSIX
-extern char **environ;
-#endif
 static Value init_environ(void)
 {
     Dict *d = dict_new();
     Value dv = mkobj(d, T_DICT);
-#ifdef PY_POSIX
-    {
-        char **e;
-        for (e = environ; e && *e; e++) {
-            const char *eq = strchr(*e, '=');
-            if (eq) dict_set(d, mkstr(*e, (long)(eq - *e)), mkcstr(eq + 1));
-        }
+    char **e = host_environ();
+    for (; e && *e; e++) {
+        const char *eq = strchr(*e, '=');
+        if (eq) dict_set(d, mkstr(*e, (long)(eq - *e)), mkcstr(eq + 1));
     }
-#endif
     return dv;
 }

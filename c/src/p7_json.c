@@ -69,7 +69,8 @@ BI(jde_init)
 {
     Value msg, doc, pos;
     long p, cpos, lineno, colno;
-    if (x->n < 1 || A(0).t != T_INST) throw_new(cls_TypeError, "descriptor '__init__' requires an exception");
+    if (x->n < 1 || A(0).t != T_INST)
+        throw_new(cls_TypeError, "descriptor '__init__' requires an exception");
     need(x, 4, 4, "__init__");
     msg = A(1); doc = A(2); pos = A(3);
     if (msg.t != T_STR) msg = py_str(msg);
@@ -144,13 +145,16 @@ static void j_float(JEnc *e, double d, Buf *b)
 {
     char t[64];
     if (d != d) {
-        if (!e->nan) throw_new(cls_ValueError, "Out of range float values are not JSON compliant: nan");
+        if (!e->nan)
+            throw_new(cls_ValueError, "Out of range float values are not JSON compliant: nan");
         buf_add(b, "NaN");
     } else if (d > DBL_MAX) {
-        if (!e->nan) throw_new(cls_ValueError, "Out of range float values are not JSON compliant: inf");
+        if (!e->nan)
+            throw_new(cls_ValueError, "Out of range float values are not JSON compliant: inf");
         buf_add(b, "Infinity");
     } else if (d < -DBL_MAX) {
-        if (!e->nan) throw_new(cls_ValueError, "Out of range float values are not JSON compliant: -inf");
+        if (!e->nan)
+            throw_new(cls_ValueError, "Out of range float values are not JSON compliant: -inf");
         buf_add(b, "-Infinity");
     } else {
         float_repr(d, t);
@@ -168,7 +172,8 @@ static void jenc_push(JEnc *e, Value v, long level)
 {
     int i;
     if (level > JMAXDEPTH)
-        throw_new(cls_RecursionError, "maximum recursion depth exceeded while encoding a JSON object");
+        throw_new(cls_RecursionError,
+            "maximum recursion depth exceeded while encoding a JSON object");
     if (e->circ) {
         for (i = 0; i < e->nmk; i++)
             if (e->mk[i] == v.u.o) throw_new(cls_ValueError, "Circular reference detected");
@@ -258,7 +263,8 @@ static void jenc_dict(JEnc *e, Value v, long level, Buf *b)
         if (!ok) {
             buf_free(&kb);
             if (e->skipkeys) continue;
-            throw_new(cls_TypeError, "keys must be str, int, float, bool or None, not %.40s", type_name(k));
+            throw_new(cls_TypeError, "keys must be str, int, float, bool or None, not %.40s",
+                type_name(k));
         }
         if (cnt) {
             buf_addn(b, e->isep, e->isepn);
@@ -298,7 +304,8 @@ static void jenc_value(JEnc *e, Value v, long level, Buf *b)
     {
         Value r;
         if (level > JMAXDEPTH)
-            throw_new(cls_RecursionError, "maximum recursion depth exceeded while encoding a JSON object");
+            throw_new(cls_RecursionError,
+                "maximum recursion depth exceeded while encoding a JSON object");
         if (e->circ && IS_HEAP(v.t)) {
             int i;
             for (i = 0; i < e->nmk; i++)
@@ -377,7 +384,8 @@ static void jenc_config(JEnc *e, Value skipkeys, Value ascii, Value circ, Value 
             while (n-- > 0) buf_addc(&sb, ' ');
             iv = buf_value(&sb);
         } else if (iv.t != T_STR) {
-            throw_new(cls_TypeError, "can't multiply sequence by non-int of type '%.40s'", type_name(iv));
+            throw_new(cls_TypeError, "can't multiply sequence by non-int of type '%.40s'",
+                type_name(iv));
         }
         VPUSH(iv);
         e->hasind = 1;
@@ -400,7 +408,8 @@ static void jenc_config(JEnc *e, Value skipkeys, Value ascii, Value circ, Value 
     e->ksep = AS_STR(ksepv)->s; e->ksepn = AS_STR(ksepv)->len;
 }
 
-static const char *jenc_names[] = { "skipkeys", "ensure_ascii", "check_circular", "allow_nan", "cls",
+static const char *jenc_names[] = {
+    "skipkeys", "ensure_ascii", "check_circular", "allow_nan", "cls",
                                     "indent", "separators", "default", "sort_keys", NULL };
 /* positions: 0 skipkeys 1 ensure_ascii 2 check_circular 3 allow_nan 4 cls 5 indent 6 separators
    7 default 8 sort_keys (obj is argument 0) */
@@ -424,7 +433,8 @@ static Value json_dumps_core(Args *x)
     if (x->n > 10) throw_new(cls_TypeError, "dumps() takes at most 10 positional arguments");
     obj = A(0);
     cls = jarg(x, 5, "cls");
-    if (cls.t != T_UNSET && cls.t != T_NONE && !(cls.t == T_CLASS && AS_CLASS(cls) == cls_json_encoder)) {
+    if (cls.t != T_UNSET && cls.t != T_NONE
+        && !(cls.t == T_CLASS && AS_CLASS(cls) == cls_json_encoder)) {
         /* custom encoder class: cls(**options).encode(obj) */
         Value kw[2 * 16], inst, enc;
         int nk = 0, i;
@@ -440,7 +450,8 @@ static Value json_dumps_core(Args *x)
         }
         for (i = 0; i < x->nk && nk < 16; i++) {
             int k, known = 0;
-            for (k = 0; k < 9; k++) if (strcmp(AS_STR(x->kw[2 * i])->s, jenc_names[k]) == 0) known = 1;
+            for (k = 0; k < 9; k++) if (strcmp(AS_STR(x->kw[2 * i])->s, jenc_names[k]) == 0)
+                known = 1;
             if (known) continue;
             kw[2 * nk] = x->kw[2 * i];
             kw[2 * nk + 1] = x->kw[2 * i + 1];
@@ -459,7 +470,8 @@ static Value json_dumps_core(Args *x)
                                      "cls", "indent", "separators", "default", "sort_keys" };
         json_check_kw(x, okn, 9, "JSONEncoder.__init__()");
     }
-    jenc_config(&e, jarg(x, 1, "skipkeys"), jarg(x, 2, "ensure_ascii"), jarg(x, 3, "check_circular"),
+    jenc_config(&e, jarg(x, 1, "skipkeys"), jarg(x, 2, "ensure_ascii"),
+        jarg(x, 3, "check_circular"),
                 jarg(x, 4, "allow_nan"), jarg(x, 9, "sort_keys"), jarg(x, 6, "indent"),
                 jarg(x, 7, "separators"), jarg(x, 8, "default"));
     r = jenc_run(&e, obj);
@@ -474,7 +486,8 @@ BI(json_dump)
 {
     Args y;
     Value fp, s, wr;
-    if (x->n < 2) throw_new(cls_TypeError, "dump() missing required positional arguments: 'obj' and 'fp'");
+    if (x->n < 2)
+        throw_new(cls_TypeError, "dump() missing required positional arguments: 'obj' and 'fp'");
     fp = A(1);
     y.n = 1; y.a = x->a; y.nk = x->nk; y.kw = x->kw;
     s = json_dumps_core(&y);
@@ -568,11 +581,15 @@ static Value jd_string(JDec *D, long i, long *end)
         /* copy the plain run [run, j) */
         memcpy(tmp + tl, s + run, (size_t)(j - run));
         tl += j - run;
-        if (j >= n) { free(tmp); json_throw_decode("Unterminated string starting at", D->docv, begin); }
+        if (j >= n) { free(tmp);
+            json_throw_decode("Unterminated string starting at", D->docv, begin);
+        }
         if (s[j] == '"') { j++; break; }
         /* backslash */
         nx = j + 1;
-        if (nx >= n) { free(tmp); json_throw_decode("Unterminated string starting at", D->docv, begin); }
+        if (nx >= n) { free(tmp);
+            json_throw_decode("Unterminated string starting at", D->docv, begin);
+        }
         c = s[nx];
         if (c != 'u') {
             switch (c) {
@@ -595,7 +612,8 @@ static Value jd_string(JDec *D, long i, long *end)
                 json_throw_decode("Invalid \\uXXXX escape", D->docv, nx);
             }
             j = endx;
-            if (cp >= 0xD800L && cp < 0xDC00L && endx + 6 < n && s[endx] == '\\' && s[endx + 1] == 'u') {
+            if (cp >= 0xD800L && cp < 0xDC00L && endx + 6 < n && s[endx] == '\\'
+                && s[endx + 1] == 'u') {
                 long c2;
                 if (!jd_hex4(s + endx + 2, &c2)) {
                     free(tmp);
@@ -613,7 +631,9 @@ static Value jd_string(JDec *D, long i, long *end)
         while (j < n) {
             int cc = s[j];
             if (cc == '"' || cc == '\\') break;
-            if (cc <= 0x1f && D->strict) { free(tmp); json_throw_decode("Invalid control character at", D->docv, j); }
+            if (cc <= 0x1f && D->strict) { free(tmp);
+                json_throw_decode("Invalid control character at", D->docv, j);
+            }
             j++;
         }
     }
@@ -639,7 +659,8 @@ static Value jd_array(JDec *D, long i, long *end)
     const unsigned char *s = D->s;
     VPUSH(lv);
     if (++D->depth > JMAXDEPTH)
-        throw_new(cls_RecursionError, "maximum recursion depth exceeded while decoding a JSON array from a unicode string");
+        throw_new(cls_RecursionError,
+            "maximum recursion depth exceeded while decoding a JSON array from a unicode string");
     i = jd_ws(D, i);
     if (i < n && s[i] == ']') { *end = i + 1; D->depth--; vsp--; return lv; }
     for (;;) {
@@ -664,7 +685,8 @@ static Value jd_object(JDec *D, long i, long *end)
     const unsigned char *s = D->s;
     int usepairs = jd_hasv(D->phook);
     if (++D->depth > JMAXDEPTH)
-        throw_new(cls_RecursionError, "maximum recursion depth exceeded while decoding a JSON object from a unicode string");
+        throw_new(cls_RecursionError,
+            "maximum recursion depth exceeded while decoding a JSON object from a unicode string");
     if (usepairs) { pairs = list_new(8); ov = mklist(pairs); }
     else { d = dict_new(); ov = mkobj(d, T_DICT); }
     VPUSH(ov);
@@ -804,7 +826,8 @@ static Value json_doc_arg(Value s)
     if (s.t == T_INST && AS_INST(s)->pay.t == T_STR) s = AS_INST(s)->pay;
     if (s.t == T_BYTES) return mkstr(AS_STR(s)->s, AS_STR(s)->len);
     if (s.t != T_STR)
-        throw_new(cls_TypeError, "the JSON object must be str, bytes or bytearray, not %.40s", type_name(s));
+        throw_new(cls_TypeError, "the JSON object must be str, bytes or bytearray, not %.40s",
+            type_name(s));
     return s;
 }
 static void jd_config(JDec *D, Value ohook, Value phook, Value pfloat, Value pint, Value pconst,
@@ -830,7 +853,8 @@ static Value jd_decode(JDec *D, int raw, long idx, long *rawend)
     vsp--;
     return r;
 }
-static const char *jdec_names[] = { "cls", "object_hook", "parse_float", "parse_int", "parse_constant",
+static const char *jdec_names[] = {
+    "cls", "object_hook", "parse_float", "parse_int", "parse_constant",
                                     "object_pairs_hook", "strict", NULL };
 BI(json_loads)
 {
@@ -839,7 +863,8 @@ BI(json_loads)
     Value *base = vsp;
     Value r;
     if (x->n < 1) throw_new(cls_TypeError, "loads() missing 1 required positional argument: 's'");
-    if (x->n > 1) throw_new(cls_TypeError, "loads() takes 1 positional argument but %d were given", x->n);
+    if (x->n > 1)
+        throw_new(cls_TypeError, "loads() takes 1 positional argument but %d were given", x->n);
     s = A(0);
     cls = kwget(x, "cls");
     doc = json_doc_arg(s);
@@ -899,8 +924,11 @@ BI(je_init)
                                 "sort_keys", "indent", "separators", "default", NULL };
     Value skipkeys, ascii, circ, nan, sortk, indent, seps, defv;
     Value isep, ksep;
-    if (x->n < 1 || A(0).t != T_INST) throw_new(cls_TypeError, "descriptor '__init__' requires a JSONEncoder");
-    if (x->n > 1) throw_new(cls_TypeError, "JSONEncoder.__init__() takes 1 positional argument but %d were given", x->n);
+    if (x->n < 1 || A(0).t != T_INST)
+        throw_new(cls_TypeError, "descriptor '__init__' requires a JSONEncoder");
+    if (x->n > 1)
+        throw_new(cls_TypeError,
+        "JSONEncoder.__init__() takes 1 positional argument but %d were given", x->n);
     json_check_kw(x, nm, 8, "JSONEncoder.__init__()");
     in = AS_INST(A(0));
     skipkeys = kwget(x, "skipkeys"); ascii = kwget(x, "ensure_ascii");
@@ -955,7 +983,8 @@ BI(je_iterencode)
 {
     Value r, lst;
     List *l;
-    if (x->n < 2) throw_new(cls_TypeError, "iterencode() missing 1 required positional argument: 'o'");
+    if (x->n < 2)
+        throw_new(cls_TypeError, "iterencode() missing 1 required positional argument: 'o'");
     {
         Value enc = get_attr(A(0), JS_encode);
         VPUSH(enc);
@@ -972,11 +1001,15 @@ BI(je_iterencode)
 BI(jd_init)
 {
     Inst *in;
-    static const char *nm[] = { "object_hook", "parse_float", "parse_int", "parse_constant", "strict",
+    static const char *nm[] = {
+        "object_hook", "parse_float", "parse_int", "parse_constant", "strict",
                                 "object_pairs_hook", NULL };
     Value v;
-    if (x->n < 1 || A(0).t != T_INST) throw_new(cls_TypeError, "descriptor '__init__' requires a JSONDecoder");
-    if (x->n > 1) throw_new(cls_TypeError, "JSONDecoder.__init__() takes 1 positional argument but %d were given", x->n);
+    if (x->n < 1 || A(0).t != T_INST)
+        throw_new(cls_TypeError, "descriptor '__init__' requires a JSONDecoder");
+    if (x->n > 1)
+        throw_new(cls_TypeError,
+        "JSONDecoder.__init__() takes 1 positional argument but %d were given", x->n);
     json_check_kw(x, nm, 6, "JSONDecoder.__init__()");
     in = AS_INST(A(0));
     v = kwget(x, "object_hook"); amap_set(&in->a, JS_ohook, v.t == T_UNSET ? NONE_V : v);
@@ -1053,7 +1086,8 @@ static void json_init(void)
     b[0] = cls_object;
     cls_json_encoder = make_class(intern_c("JSONEncoder"), b, 1, intern_c("json.encoder"));
     def_bi(cls_json_encoder, "__init__", je_init); def_bi(cls_json_encoder, "default", je_default);
-    def_bi(cls_json_encoder, "encode", je_encode); def_bi(cls_json_encoder, "iterencode", je_iterencode);
+    def_bi(cls_json_encoder, "encode", je_encode);
+    def_bi(cls_json_encoder, "iterencode", je_iterencode);
     b = (Class **)xmalloc(sizeof(Class *));
     b[0] = cls_object;
     cls_json_decoder = make_class(intern_c("JSONDecoder"), b, 1, intern_c("json.decoder"));

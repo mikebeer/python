@@ -184,11 +184,13 @@ BI(bi_int)
         Value r;
         if (!parse_int(AS_STR(v)->s, AS_STR(v)->len, bv.t == T_UNSET ? 10 : base, &r)) {
             Value q = py_repr(v);
-            throw_new(cls_ValueError, "invalid literal for int() with base %d: %.200s", base, AS_STR(q)->s);
+            throw_new(cls_ValueError, "invalid literal for int() with base %d: %.200s", base,
+                AS_STR(q)->s);
         }
         return r;
     }
-    if (bv.t != T_UNSET) throw_new(cls_TypeError, "int() can't convert non-string with explicit base");
+    if (bv.t != T_UNSET)
+        throw_new(cls_TypeError, "int() can't convert non-string with explicit base");
     if (v.t == T_INT || v.t == T_BIG) return v;
     if (v.t == T_BOOL) return mkint(v.u.i);
     if (v.t == T_FLOAT) return int_from_double(v.u.d < 0 ? ceil(v.u.d) : floor(v.u.d));
@@ -198,7 +200,9 @@ BI(bi_int)
         m = class_find(AS_INST(v)->cls, S_index);
         if (m) return call1(*m, v);
     }
-    throw_new(cls_TypeError, "int() argument must be a string, a bytes-like object or a real number, not '%.40s'", type_name(v));
+    throw_new(cls_TypeError,
+        "int() argument must be a string, a bytes-like object or a real number, not '%.40s'",
+        type_name(v));
     return NONE_V;
 }
 BI(bi_float)
@@ -220,7 +224,8 @@ BI(bi_float)
         Value *m = class_find(AS_INST(v)->cls, S_float);
         if (m) return call1(*m, v);
     }
-    throw_new(cls_TypeError, "float() argument must be a string or a real number, not '%.40s'", type_name(v));
+    throw_new(cls_TypeError, "float() argument must be a string or a real number, not '%.40s'",
+        type_name(v));
     return NONE_V;
 }
 BI(bi_abs)
@@ -245,7 +250,8 @@ BI(bi_round)
     v = A(0);
     nd = x->n > 1 ? A(1) : kwget(x, "ndigits");
     if (is_intv(v)) {
-        if (nd.t == T_UNSET || nd.t == T_NONE || to_index(nd) >= 0) return v.t == T_BOOL ? mkint(v.u.i) : v;
+        if (nd.t == T_UNSET || nd.t == T_NONE || to_index(nd) >= 0)
+            return v.t == T_BOOL ? mkint(v.u.i) : v;
         {
             Value p = int_pow(mkint(10), -to_index(nd)), q, r, h;
             int_divmod(v, p, &q, &r);
@@ -260,7 +266,8 @@ BI(bi_round)
         if (nd.t == T_UNSET || nd.t == T_NONE) {
             double r;
             if (d != d) throw_new(cls_ValueError, "cannot convert float NaN to integer");
-            if (d > DBL_MAX || d < -DBL_MAX) throw_new(cls_OverflowError, "cannot convert float infinity to integer");
+            if (d > DBL_MAX || d < -DBL_MAX)
+                throw_new(cls_OverflowError, "cannot convert float infinity to integer");
             r = floor(d);
             if (d - r > 0.5) r += 1.0;
             else if (d - r == 0.5 && fmod(r, 2.0) != 0) r += 1.0;
@@ -326,8 +333,11 @@ BI(bi_pow)
         Value r = mkint(1), b = int_mod(A(0), A(2)), e = A(1);
         long ee;
         if (!is_intv(A(0)) || !is_intv(e) || !is_intv(A(2)))
-            throw_new(cls_TypeError, "pow() 3rd argument not allowed unless all arguments are integers");
-        if (int_sign(e) < 0) throw_new(cls_ValueError, "pow() 2nd argument cannot be negative when 3rd argument specified");
+            throw_new(cls_TypeError,
+                "pow() 3rd argument not allowed unless all arguments are integers");
+        if (int_sign(e) < 0)
+            throw_new(cls_ValueError,
+            "pow() 2nd argument cannot be negative when 3rd argument specified");
         if (e.t == T_BIG) throw_new(cls_OverflowError, "exponent too large");
         ee = e.u.i;
         while (ee > 0) {
@@ -355,25 +365,29 @@ BI(bi_ord)
     Str *s;
     unsigned long c;
     need(x, 1, 1, "ord");
-    if (A(0).t == T_BYTES && AS_STR(A(0))->len == 1) return mkint((unsigned char)AS_STR(A(0))->s[0]);
+    if (A(0).t == T_BYTES && AS_STR(A(0))->len == 1)
+        return mkint((unsigned char)AS_STR(A(0))->s[0]);
     s = astr(A(0), "ord() argument");
     if (s->len == 1) return mkint((unsigned char)s->s[0]);
     c = (unsigned char)s->s[0];
     if (s->len == 2 && (c & 0xE0) == 0xC0)
-        return mkint((long)(((c & 0x1F) << 6) | ((unsigned char)s->s[1] & 0x3F)));
+        return mkint((long)(((c & 0x1F) << 6) | ((unsigned char)s->s[1] & 0x3FUL)));
     if (s->len == 3 && (c & 0xF0) == 0xE0)
-        return mkint((long)(((c & 0x0F) << 12) | (((unsigned char)s->s[1] & 0x3F) << 6) |
-                            ((unsigned char)s->s[2] & 0x3F)));
+        return mkint((long)(((c & 0x0F) << 12) | (((unsigned char)s->s[1] & 0x3FUL) << 6) |
+                            ((unsigned char)s->s[2] & 0x3FUL)));
     if (s->len == 4 && (c & 0xF8) == 0xF0)
-        return mkint((long)(((c & 0x07) << 18) | (((unsigned char)s->s[1] & 0x3F) << 12) |
-                            (((unsigned char)s->s[2] & 0x3F) << 6) | ((unsigned char)s->s[3] & 0x3F)));
+        return mkint((long)(((c & 0x07) << 18) | (((unsigned char)s->s[1] & 0x3FUL) << 12) |
+                            (((unsigned char)s->s[2] & 0x3FUL) << 6)
+                                | ((unsigned char)s->s[3] & 0x3FUL)));
     throw_new(cls_TypeError, "ord() expected a character, but string of length %ld found", s->len);
     return NONE_V;
 }
 static Value radix_str(Value v, int base, const char *prefix)
 {
     Buf b;
-    if (!is_intv(v)) throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer", type_name(v));
+    if (!is_intv(v))
+        throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+        type_name(v));
     if (v.t == T_BOOL) v = mkint(v.u.i);
     buf_init(&b);
     if (int_sign(v) < 0) { buf_addc(&b, '-'); v = int_neg(v); }
@@ -437,7 +451,9 @@ static void dict_update_from(Dict *d, Value src)
             if (pair.t != T_LIST && pair.t != T_TUPLE) pair = iter_to_list(item);
             VPUSH(pair);
             if (AS_LIST(pair)->n != 2)
-                throw_new(cls_ValueError, "dictionary update sequence element has length %ld; 2 is required", AS_LIST(pair)->n);
+                throw_new(cls_ValueError,
+                    "dictionary update sequence element has length %ld; 2 is required",
+                    AS_LIST(pair)->n);
             dict_set(d, AS_LIST(pair)->a[0], AS_LIST(pair)->a[1]);
             vsp -= 2;
         }
@@ -745,7 +761,8 @@ BI(bi_sorted)
     need(x, 1, 1, "sorted");
     lv = iter_to_list(A(0));
     VPUSH(lv);
-    sort_list(AS_LIST(lv), kwget(x, "key"), py_truthy(kwget(x, "reverse").t == T_UNSET ? FALSE_V : kwget(x, "reverse")));
+    sort_list(AS_LIST(lv), kwget(x, "key"),
+        py_truthy(kwget(x, "reverse").t == T_UNSET ? FALSE_V : kwget(x, "reverse")));
     vsp--;
     return lv;
 }
@@ -775,7 +792,8 @@ BI(bi_issubclass)
     if (A(1).t == T_TUPLE) {
         long i;
         for (i = 0; i < AS_LIST(A(1))->n; i++)
-            if (AS_LIST(A(1))->a[i].t == T_CLASS && class_isa(AS_CLASS(A(0)), AS_CLASS(AS_LIST(A(1))->a[i])))
+            if (AS_LIST(A(1))->a[i].t == T_CLASS
+                && class_isa(AS_CLASS(A(0)), AS_CLASS(AS_LIST(A(1))->a[i])))
                 return TRUE_V;
         return FALSE_V;
     }
@@ -794,14 +812,20 @@ BI(bi_type)
         long i, nb;
         Value cv;
         Str *nm = intern_str(astr(A(0), "type.__new__() argument 1"));
-        if (A(1).t != T_TUPLE) throw_new(cls_TypeError, "type.__new__() argument 2 must be tuple, not %.40s", type_name(A(1)));
-        if (A(2).t != T_DICT) throw_new(cls_TypeError, "type.__new__() argument 3 must be dict, not %.40s", type_name(A(2)));
+        if (A(1).t != T_TUPLE)
+            throw_new(cls_TypeError, "type.__new__() argument 2 must be tuple, not %.40s",
+            type_name(A(1)));
+        if (A(2).t != T_DICT)
+            throw_new(cls_TypeError, "type.__new__() argument 3 must be dict, not %.40s",
+            type_name(A(2)));
         bt = AS_LIST(A(1));
         ns = AS_DICT(A(2));
         bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(bt->n + 1));
         nb = 0;
         for (i = 0; i < bt->n; i++) {
-            if (bt->a[i].t != T_CLASS) { free(bl); throw_new(cls_TypeError, "bases must be types"); }
+            if (bt->a[i].t != T_CLASS) { free(bl);
+                throw_new(cls_TypeError, "bases must be types");
+            }
             bl[nb++] = AS_CLASS(bt->a[i]);
         }
         if (nb == 0) bl[nb++] = cls_object;
@@ -965,7 +989,8 @@ BI(bi_exit_fn)
 /* ---- exceptions ------------------------------------------------------- */
 BI(exc_init)
 {
-    if (x->n < 1 || A(0).t != T_INST) throw_new(cls_TypeError, "descriptor '__init__' requires an exception");
+    if (x->n < 1 || A(0).t != T_INST)
+        throw_new(cls_TypeError, "descriptor '__init__' requires an exception");
     amap_set(&AS_INST(A(0))->a, S_args, mktuple_from(x->a + 1, x->n - 1));
     return NONE_V;
 }
@@ -1030,21 +1055,31 @@ static int u8_case(unsigned char *p, int up)
 {
     unsigned char c = p[0], d = p[1];
     if (up) {
-        if (c == 0xC3 && d >= 0xA0 && d <= 0xBE && d != 0xB7) { p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xC3 && d >= 0xA0 && d <= 0xBE && d != 0xB7) { p[1] = (unsigned char)(d - 0x20);
+            return 1;
+        }
         if (c == 0xC3 && d == 0xBF) { p[0] = 0xC5; p[1] = 0xB8; return 1; }
         if (c == 0xCE && d >= 0xB1 && d <= 0xBF) { p[1] = (unsigned char)(d - 0x20); return 1; }
         if (c == 0xCF && d >= 0x80 && d <= 0x89 && d != 0x82) {
             p[0] = (unsigned char)(d >= 0x80 && d <= 0x89 ? 0xCE : c);
             p[1] = (unsigned char)(d + 0x20); return 1; }
         if (c == 0xD0 && d >= 0xB0 && d <= 0xBF) { p[1] = (unsigned char)(d - 0x20); return 1; }
-        if (c == 0xD1 && d >= 0x80 && d <= 0x8F) { p[0] = 0xD0; p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xD1 && d >= 0x80 && d <= 0x8F) { p[0] = 0xD0;
+            p[1] = (unsigned char)(d + 0x20);
+            return 1;
+        }
     } else {
-        if (c == 0xC3 && d >= 0x80 && d <= 0x9E && d != 0x97) { p[1] = (unsigned char)(d + 0x20); return 1; }
+        if (c == 0xC3 && d >= 0x80 && d <= 0x9E && d != 0x97) { p[1] = (unsigned char)(d + 0x20);
+            return 1;
+        }
         if (c == 0xCE && d >= 0x91 && d <= 0x9F) { p[1] = (unsigned char)(d + 0x20); return 1; }
         if (c == 0xCE && d >= 0xA0 && d <= 0xA9 && d != 0xA2) {
             p[0] = 0xCF; p[1] = (unsigned char)(d - 0x20); return 1; }
         if (c == 0xD0 && d >= 0x90 && d <= 0x9F) { p[1] = (unsigned char)(d + 0x20); return 1; }
-        if (c == 0xD0 && d >= 0xA0 && d <= 0xAF) { p[0] = 0xD1; p[1] = (unsigned char)(d - 0x20); return 1; }
+        if (c == 0xD0 && d >= 0xA0 && d <= 0xAF) { p[0] = 0xD1;
+            p[1] = (unsigned char)(d - 0x20);
+            return 1;
+        }
     }
     return 0;
 }
@@ -1079,7 +1114,8 @@ BI(s_capitalize)
     Value r = mkstr(s->s, s->len);
     long i;
     for (i = 0; i < s->len; i++)
-        AS_STR(r)->s[i] = (char)(i == 0 ? to_up[(unsigned char)s->s[i]] : to_low[(unsigned char)s->s[i]]);
+        AS_STR(r)->s[i]
+            = (char)(i == 0 ? to_up[(unsigned char)s->s[i]] : to_low[(unsigned char)s->s[i]]);
     return r;
 }
 BI(s_title)
@@ -1179,7 +1215,8 @@ static Value startend(Args *x, int atend)
         long i;
         for (i = 0; i < AS_LIST(p)->n; i++) {
             Str *u = astr(AS_LIST(p)->a[i], "tuple item");
-            if (en - st >= u->len && memcmp(s->s + (atend ? en - u->len : st), u->s, (size_t)u->len) == 0)
+            if (en - st >= u->len
+                && memcmp(s->s + (atend ? en - u->len : st), u->s, (size_t)u->len) == 0)
                 return TRUE_V;
         }
         return FALSE_V;
@@ -1310,7 +1347,8 @@ BI(s_join)
     for (i = 0; i < l->n; i++) {
         if (l->a[i].t != T_STR) {
             buf_free(&b);
-            throw_new(cls_TypeError, "sequence item %ld: expected str instance, %.40s found", i, type_name(l->a[i]));
+            throw_new(cls_TypeError, "sequence item %ld: expected str instance, %.40s found", i,
+                type_name(l->a[i]));
         }
         if (i) buf_addn(&b, sep->s, sep->len);
         buf_addn(&b, AS_STR(l->a[i])->s, AS_STR(l->a[i])->len);
@@ -1355,9 +1393,13 @@ static int all_chars(Str *s, const unsigned char *tab)
     for (i = 0; i < s->len; i++) if (!tab[(unsigned char)s->s[i]]) return 0;
     return 1;
 }
-BI(s_isalpha) { return mkbool(all_chars(SELF, ch_alpha) && !memchr(SELF->s, '_', (size_t)SELF->len)); }
+BI(s_isalpha) {
+    return mkbool(all_chars(SELF, ch_alpha) && !memchr(SELF->s, '_', (size_t)SELF->len));
+}
 BI(s_isdigit) { return mkbool(all_chars(SELF, ch_digit)); }
-BI(s_isalnum) { return mkbool(all_chars(SELF, ch_alnum) && !memchr(SELF->s, '_', (size_t)SELF->len)); }
+BI(s_isalnum) {
+    return mkbool(all_chars(SELF, ch_alnum) && !memchr(SELF->s, '_', (size_t)SELF->len));
+}
 BI(s_isspace) { return mkbool(all_chars(SELF, ch_space)); }
 BI(s_isupper)
 {
@@ -1389,7 +1431,11 @@ static Value justify(Args *x, int mode)
     Buf b;
     need(x, 2, 3, "ljust");
     w = to_index(A(1));
-    if (x->n > 2) { Str *f = astr(A(2), "fillchar"); if (f->len != 1) throw_new(cls_TypeError, "The fill character must be exactly one character long"); fill = f->s[0]; }
+    if (x->n > 2) { Str *f = astr(A(2), "fillchar");
+        if (f->len != 1)
+            throw_new(cls_TypeError, "The fill character must be exactly one character long");
+        fill = f->s[0];
+    }
     pad = w - s->len;
     if (pad <= 0) return A(0);
     buf_init(&b);
@@ -1463,7 +1509,10 @@ BI(s_encode)
         int n = 1;
         if (c >= 0xF0) { n = 4; c &= 7; } else if (c >= 0xE0) { n = 3; c &= 15; }
         else if (c >= 0xC0) { n = 2; c &= 31; }
-        if (n > 1) { int k; for (k = 1; k < n && i + k < s->len; k++) c = (c << 6) | ((unsigned char)s->s[i + k] & 63); }
+        if (n > 1) { int k;
+            for (k = 1; k < n && i + k < s->len; k++) c = (c << 6)
+                | ((unsigned char)s->s[i + k] & 63);
+        }
         i += n;
         if (c < 128 || (c < 256 && (strcmp(enc, "latin-1") == 0 || strcmp(enc, "latin1") == 0 ||
                                     strcmp(enc, "iso-8859-1") == 0))) buf_addc(&b, (int)c);
@@ -1479,7 +1528,8 @@ BI(s_encode)
 BI(s_removeprefix)
 {
     Str *s = SELF, *p = astr(A(1), "prefix");
-    if (s->len >= p->len && memcmp(s->s, p->s, (size_t)p->len) == 0) return mkstr(s->s + p->len, s->len - p->len);
+    if (s->len >= p->len && memcmp(s->s, p->s, (size_t)p->len) == 0)
+        return mkstr(s->s + p->len, s->len - p->len);
     return A(0);
 }
 BI(s_removesuffix)
@@ -1510,7 +1560,9 @@ BI(s_expandtabs)
 /* ---- list methods ----------------------------------------------------- */
 static List *self_list(Args *x)
 {
-    if (A(0).t != T_LIST) throw_new(cls_TypeError, "descriptor requires a 'list' object but received '%.40s'", type_name(A(0)));
+    if (A(0).t != T_LIST)
+        throw_new(cls_TypeError, "descriptor requires a 'list' object but received '%.40s'",
+        type_name(A(0)));
     return AS_LIST(A(0));
 }
 BI(l_append)
@@ -1625,7 +1677,9 @@ BI(l_clear)
 /* ---- dict methods ----------------------------------------------------- */
 static Dict *self_dict(Args *x)
 {
-    if (A(0).t != T_DICT) throw_new(cls_TypeError, "descriptor requires a 'dict' object but received '%.40s'", type_name(A(0)));
+    if (A(0).t != T_DICT)
+        throw_new(cls_TypeError, "descriptor requires a 'dict' object but received '%.40s'",
+        type_name(A(0)));
     return AS_DICT(A(0));
 }
 BI(d_get)
@@ -1709,7 +1763,9 @@ BI(d_fromkeys)
 /* ---- set methods ------------------------------------------------------ */
 static Dict *self_set(Args *x)
 {
-    if (A(0).t != T_SET) throw_new(cls_TypeError, "descriptor requires a 'set' object but received '%.40s'", type_name(A(0)));
+    if (A(0).t != T_SET)
+        throw_new(cls_TypeError, "descriptor requires a 'set' object but received '%.40s'",
+        type_name(A(0)));
     return AS_DICT(A(0));
 }
 BI(st_add) { need(x, 2, 2, "add"); set_add(self_set(x), A(1)); return NONE_V; }
@@ -1877,7 +1933,9 @@ BI(g_send)
     Value out;
     need(x, 2, 2, "send");
     if (A(0).t != T_GEN) {
-        if (A(1).t != T_NONE) throw_new(cls_AttributeError, "'%.40s' object has no attribute 'send'", type_name(A(0)));
+        if (A(1).t != T_NONE)
+            throw_new(cls_AttributeError, "'%.40s' object has no attribute 'send'",
+            type_name(A(0)));
         if (iter_next(A(0), &out)) return out;
         throw_stop(A(0));
     }
@@ -1893,7 +1951,8 @@ BI(g_throw)
     Gen *g;
     Value out, e;
     need(x, 2, 4, "throw");
-    if (A(0).t != T_GEN) throw_new(cls_AttributeError, "'%.40s' object has no attribute 'throw'", type_name(A(0)));
+    if (A(0).t != T_GEN)
+        throw_new(cls_AttributeError, "'%.40s' object has no attribute 'throw'", type_name(A(0)));
     g = (Gen *)A(0).u.o;
     e = A(1);
     if (e.t == T_CLASS) e = call0(e);
@@ -1974,7 +2033,7 @@ BI(bi_open)
         if (k == 0) m[k++] = 'r';
     }
     m[k] = 0;
-    fp = fopen(path->s, m);
+    fp = host_fopen(path->s, m);
     if (!fp) {
         Value v[2];
         Value q = py_repr(A(0));
@@ -2060,7 +2119,8 @@ BI(nat_new)
     Class *c;
     Inst *in;
     Value iv;
-    if (x->n < 1 || A(0).t != T_CLASS) throw_new(cls_TypeError, "__new__(X): X is not a type object");
+    if (x->n < 1 || A(0).t != T_CLASS)
+        throw_new(cls_TypeError, "__new__(X): X is not a type object");
     c = AS_CLASS(A(0));
     in = new_inst(c);
     iv = mkobj(in, T_INST);
@@ -2106,7 +2166,9 @@ BI(num_rmul) { need(x, 2, 2, "__rmul__"); return binop(B_MUL, unpay(A(1)), unpay
 BI(num_truediv) { need(x, 2, 2, "__truediv__"); return binop(B_DIV, unpay(A(0)), unpay(A(1))); }
 BI(num_rtruediv) { need(x, 2, 2, "__rtruediv__"); return binop(B_DIV, unpay(A(1)), unpay(A(0))); }
 BI(num_floordiv) { need(x, 2, 2, "__floordiv__"); return binop(B_FDIV, unpay(A(0)), unpay(A(1))); }
-BI(num_rfloordiv) { need(x, 2, 2, "__rfloordiv__"); return binop(B_FDIV, unpay(A(1)), unpay(A(0))); }
+BI(num_rfloordiv) { need(x, 2, 2, "__rfloordiv__");
+    return binop(B_FDIV, unpay(A(1)), unpay(A(0)));
+}
 BI(num_mod) { need(x, 2, 2, "__mod__"); return binop(B_MOD, unpay(A(0)), unpay(A(1))); }
 BI(num_rmod) { need(x, 2, 2, "__rmod__"); return binop(B_MOD, unpay(A(1)), unpay(A(0))); }
 BI(num_pow) { need(x, 2, 2, "__pow__"); return binop(B_POW, unpay(A(0)), unpay(A(1))); }
@@ -2124,7 +2186,9 @@ BI(num_rrshift) { need(x, 2, 2, "__rrshift__"); return binop(B_RSH, unpay(A(1)),
 BI(num_neg) { return unop('-', unpay(A(0))); }
 BI(num_pos) { return unop('+', unpay(A(0))); }
 BI(num_invert) { return unop('~', unpay(A(0))); }
-BI(num_abs) { Value v = unpay(A(0)); return rich_cmp(C_LT, v, mkint(0)) ? unop('-', v) : unop('+', v); }
+BI(num_abs) { Value v = unpay(A(0));
+    return rich_cmp(C_LT, v, mkint(0)) ? unop('-', v) : unop('+', v);
+}
 BI(num_conj) { return unpay(A(0)); }
 BI(nat_format)
 {
@@ -2164,7 +2228,8 @@ BI(set_init)
 BI(obj_setattr)
 {
     need(x, 3, 3, "__setattr__");
-    if (A(0).t != T_INST) throw_new(cls_TypeError, "can't apply this __setattr__ to a non-instance");
+    if (A(0).t != T_INST)
+        throw_new(cls_TypeError, "can't apply this __setattr__ to a non-instance");
     amap_set(&AS_INST(A(0))->a, intern_str(astr(A(1), "attribute name")), A(2));
     return NONE_V;
 }
@@ -2260,8 +2325,13 @@ BI(bi_bytes)
         it = get_iter(v);
         VPUSH(it);
         while (iter_next(it, &y)) {
-            if (y.t != T_INT && y.t != T_BOOL) { buf_free(&b); throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer", type_name(y)); }
-            if (y.u.i < 0 || y.u.i > 255) { buf_free(&b); throw_new(cls_ValueError, "bytes must be in range(0, 256)"); }
+            if (y.t != T_INT && y.t != T_BOOL) { buf_free(&b);
+                throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+                    type_name(y));
+            }
+            if (y.u.i < 0 || y.u.i > 255) { buf_free(&b);
+                throw_new(cls_ValueError, "bytes must be in range(0, 256)");
+            }
             buf_addc(&b, (int)y.u.i);
         }
         vsp--;
@@ -2272,7 +2342,9 @@ BI(bi_bytes)
 }
 static Str *abytes(Value v)
 {
-    if (v.t != T_BYTES) throw_new(cls_TypeError, "descriptor requires a 'bytes' object but received '%.40s'", type_name(v));
+    if (v.t != T_BYTES)
+        throw_new(cls_TypeError, "descriptor requires a 'bytes' object but received '%.40s'",
+        type_name(v));
     return AS_STR(v);
 }
 BI(b_decode)
@@ -2285,15 +2357,19 @@ BI(b_decode)
     long i;
     if (ev.t == T_STR) enc = AS_STR(ev)->s;
     if (errv.t == T_STR) err = AS_STR(errv)->s;
-    if (strcmp(enc, "latin-1") == 0 || strcmp(enc, "latin1") == 0 || strcmp(enc, "iso-8859-1") == 0) {
+    if (strcmp(enc, "latin-1") == 0 || strcmp(enc, "latin1") == 0 || strcmp(enc, "iso-8859-1") == 0)
+        {
         buf_init(&b);
         for (i = 0; i < s->len; i++) put_utf8(&b, (unsigned char)s->s[i]);
         { Value r = buf_value(&b); return r; }
     }
     if (strcmp(enc, "ascii") == 0 || strcmp(enc, "us-ascii") == 0) {
         for (i = 0; i < s->len; i++)
-            if ((unsigned char)s->s[i] >= 128 && strcmp(err, "ignore") != 0 && strcmp(err, "replace") != 0)
-                throw_new(cls_ValueError, "'ascii' codec can't decode byte 0x%02x in position %ld: ordinal not in range(128)",
+            if ((unsigned char)s->s[i] >= 128 && strcmp(err, "ignore") != 0
+                && strcmp(err, "replace") != 0)
+                throw_new(cls_ValueError,
+                    "'ascii' codec can't decode byte 0x%02x in position %ld: ordinal not in "
+                    "range(128)",
                           (unsigned char)s->s[i], i);
     }
     return mkstr(s->s, s->len);
@@ -2320,11 +2396,17 @@ BI(b_fromhex)
     for (i = 0; i < s->len; i++) {
         int c = (unsigned char)s->s[i], d;
         if (c == ' ') continue;
-        if (!ch_hex[c]) { buf_free(&b); throw_new(cls_ValueError, "non-hexadecimal number found in fromhex() arg at position %ld", i); }
+        if (!ch_hex[c]) { buf_free(&b);
+            throw_new(cls_ValueError,
+                "non-hexadecimal number found in fromhex() arg at position %ld", i);
+        }
         d = digit_val(c);
         if (hi < 0) hi = d; else { buf_addc(&b, hi * 16 + d); hi = -1; }
     }
-    if (hi >= 0) { buf_free(&b); throw_new(cls_ValueError, "non-hexadecimal number found in fromhex() arg at position %ld", s->len); }
+    if (hi >= 0) { buf_free(&b);
+        throw_new(cls_ValueError, "non-hexadecimal number found in fromhex() arg at position %ld",
+            s->len);
+    }
     { Value r = mkbytes(b.s, b.n); buf_free(&b); return r; }
 }
 static Value b2s_back(Value r)
@@ -2334,7 +2416,8 @@ static Value b2s_back(Value r)
         long i;
         for (i = 0; i < AS_LIST(r)->n; i++)
             if (AS_LIST(r)->a[i].t == T_STR)
-                AS_LIST(r)->a[i] = mkbytes(AS_STR(AS_LIST(r)->a[i])->s, AS_STR(AS_LIST(r)->a[i])->len);
+                AS_LIST(r)->a[i] = mkbytes(AS_STR(AS_LIST(r)->a[i])->s,
+                    AS_STR(AS_LIST(r)->a[i])->len);
     }
     return r;
 }
@@ -2352,7 +2435,8 @@ static Value via_str(Args *x, BFn fn)
             long k;
             for (k = 0; k < AS_LIST(l)->n; k++)
                 if (AS_LIST(l)->a[k].t == T_BYTES)
-                    AS_LIST(l)->a[k] = mkstr(AS_STR(AS_LIST(l)->a[k])->s, AS_STR(AS_LIST(l)->a[k])->len);
+                    AS_LIST(l)->a[k] = mkstr(AS_STR(AS_LIST(l)->a[k])->s,
+                        AS_STR(AS_LIST(l)->a[k])->len);
             av[i] = l;
         } else av[i] = x->a[i];
     }

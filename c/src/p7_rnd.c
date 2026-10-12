@@ -2,18 +2,104 @@
    p7_rnd.c   numpy.random: xoshiro256** generator, legacy functions,
               default_rng / Generator / RandomState objects
    ========================================================================= */
+/* A 64-bit unsigned type without "long long": the native unsigned long where it
+   has 64 bits, otherwise (VM/370: long is 32 bits) two 32-bit halves.  The
+   generator below only uses the u64_* operations, so both give identical
+   streams.  -DPY_U64_EMUL forces the two-halves version for testing. */
+#define U32M 0xFFFFFFFFUL
+#if ULONG_MAX > 4294967295UL && !defined(PY_U64_EMUL)
 typedef unsigned long u64;
+static u64 u64_c(unsigned long hi, unsigned long lo) { return ((hi << 16) << 16) | lo; }
+static u64 u64_ul(unsigned long v) { return v; }
+static u64 u64_l(long v) { return (u64)v; }
+static long u64_tol(u64 a) { return (long)a; }
+static double u64_dbl(u64 a) { return (double)a; }
+static u64 u64_xor(u64 a, u64 b) { return a ^ b; }
+static u64 u64_add(u64 a, u64 b) { return a + b; }
+static u64 u64_sub(u64 a, u64 b) { return a - b; }
+static u64 u64_mul(u64 a, u64 b) { return a * b; }
+static u64 u64_shl(u64 a, int k) { return a << k; }
+static u64 u64_shr(u64 a, int k) { return a >> k; }
+static int u64_ge(u64 a, u64 b) { return a >= b; }
+static int u64_le1(u64 a) { return a <= 1; }
+static u64 u64_max(void) { return (u64)ULONG_MAX; }
+static u64 u64_mod(u64 a, u64 n) { return a % n; }
+#else
+typedef struct u64 { unsigned long hi, lo; } u64;   /* each holds 32 bits */
+static u64 u64_c(unsigned long hi, unsigned long lo)
+{
+    u64 r;
+    r.hi = hi & U32M; r.lo = lo & U32M;
+    return r;
+}
+static u64 u64_ul(unsigned long v) { return u64_c((v >> 16) >> 16, v); }
+static u64 u64_l(long v)
+{
+    u64 r = u64_ul((unsigned long)v);
+    if (v < 0 && sizeof(long) <= 4) r.hi = U32M;
+    return r;
+}
+static long u64_tol(u64 a) { return (long)(((a.hi << 16) << 16) | a.lo); }
+static double u64_dbl(u64 a) { return (double)a.hi * 4294967296.0 + (double)a.lo; }
+static u64 u64_xor(u64 a, u64 b) { return u64_c(a.hi ^ b.hi, a.lo ^ b.lo); }
+static u64 u64_add(u64 a, u64 b)
+{
+    unsigned long lo = (a.lo + b.lo) & U32M;
+    return u64_c(a.hi + b.hi + (lo < a.lo ? 1UL : 0UL), lo);
+}
+static u64 u64_sub(u64 a, u64 b)
+{
+    unsigned long lo = (a.lo - b.lo) & U32M;
+    return u64_c(a.hi - b.hi - (a.lo < b.lo ? 1UL : 0UL), lo);
+}
+static u64 u64_mul(u64 a, u64 b)
+{
+    unsigned long a0 = a.lo & 0xFFFFUL, a1 = a.lo >> 16, b0 = b.lo & 0xFFFFUL, b1 = b.lo >> 16;
+    unsigned long p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    unsigned long mid = (p00 >> 16) + (p01 & 0xFFFFUL) + (p10 & 0xFFFFUL);
+    u64 r;
+    r.lo = ((mid & 0xFFFFUL) << 16) | (p00 & 0xFFFFUL);
+    r.hi = (p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16) + a.lo * b.hi + a.hi * b.lo) & U32M;
+    return r;
+}
+static u64 u64_shl(u64 a, int k)
+{
+    if (k >= 32) return u64_c(a.lo << (k - 32), 0UL);
+    if (k == 0) return a;
+    return u64_c((a.hi << k) | (a.lo >> (32 - k)), a.lo << k);
+}
+static u64 u64_shr(u64 a, int k)
+{
+    if (k >= 32) return u64_c(0UL, a.hi >> (k - 32));
+    if (k == 0) return a;
+    return u64_c(a.hi >> k, (a.lo >> k) | (a.hi << (32 - k)));
+}
+static int u64_ge(u64 a, u64 b) { return a.hi > b.hi || (a.hi == b.hi && a.lo >= b.lo); }
+static int u64_le1(u64 a) { return a.hi == 0 && a.lo <= 1; }
+static u64 u64_max(void) { return u64_c(U32M, U32M); }
+static u64 u64_mod(u64 a, u64 n)
+{
+    u64 r = u64_c(0UL, 0UL);
+    int i;
+    for (i = 63; i >= 0; i--) {
+        r = u64_shl(r, 1);
+        r.lo |= (i >= 32 ? a.hi >> (i - 32) : a.lo >> i) & 1UL;
+        if (u64_ge(r, n)) r = u64_sub(r, n);
+    }
+    return r;
+}
+#endif
 static u64 g_rs[4];
 static Class *cls_rng[2];
 
 static u64 splitmix(u64 *z)
 {
     u64 r;
-    *z += 0x9E3779B97F4A7C15UL;
+    *z = u64_add(*z, u64_c(0x9E3779B9UL, 0x7F4A7C15UL));
     r = *z;
-    r = (r ^ (r >> 30)) * 0xBF58476D1CE4E5B9UL;
-    r = (r ^ (r >> 27)) * 0x94D049BB133111EBUL;
-    return r ^ (r >> 31);
+    r = u64_mul(u64_xor(r, u64_shr(r, 30)), u64_c(0xBF58476DUL, 0x1CE4E5B9UL));
+    r = u64_mul(u64_xor(r, u64_shr(r, 27)), u64_c(0x94D049BBUL, 0x133111EBUL));
+    return u64_xor(r, u64_shr(r, 31));
 }
 static void nrng_seed(u64 *s, u64 seed)
 {
@@ -22,19 +108,21 @@ static void nrng_seed(u64 *s, u64 seed)
 }
 static u64 rotl64(u64 v, int k)
 {
-    return (v << k) | (v >> (64 - k));
+    return u64_xor(u64_shl(v, k), u64_shr(v, 64 - k));
 }
 static u64 nrng_next(u64 *s)
 {
-    u64 r = rotl64(s[1] * 5UL, 7) * 9UL, t = s[1] << 17;
-    s[2] ^= s[0]; s[3] ^= s[1]; s[1] ^= s[2]; s[0] ^= s[3];
-    s[2] ^= t;
+    u64 r = u64_mul(rotl64(u64_mul(s[1], u64_ul(5UL)), 7), u64_ul(9UL));
+    u64 t = u64_shl(s[1], 17);
+    s[2] = u64_xor(s[2], s[0]); s[3] = u64_xor(s[3], s[1]);
+    s[1] = u64_xor(s[1], s[2]); s[0] = u64_xor(s[0], s[3]);
+    s[2] = u64_xor(s[2], t);
     s[3] = rotl64(s[3], 45);
     return r;
 }
 static double nrng_dbl(u64 *s)
 {
-    return (double)(nrng_next(s) >> 11) * (1.0 / 9007199254740992.0);
+    return u64_dbl(u64_shr(nrng_next(s), 11)) * (1.0 / 9007199254740992.0);
 }
 static double nrng_norm(u64 *s)
 {
@@ -47,30 +135,32 @@ static double nrng_norm(u64 *s)
 static u64 nrng_below(u64 *s, u64 n)
 {
     u64 lim, r;
-    if (n <= 1) return 0;
-    lim = ULONG_MAX - (ULONG_MAX % n);
-    do r = nrng_next(s); while (r >= lim);
-    return r % n;
+    if (u64_le1(n)) return u64_ul(0UL);
+    lim = u64_sub(u64_max(), u64_mod(u64_max(), n));
+    do r = nrng_next(s); while (u64_ge(r, lim));
+    return u64_mod(r, n);
 }
 static u64 seed_value(Value v)
 {
-    if (v.t == T_INT || v.t == T_BOOL) return (u64)v.u.i;
-    if (v.t == T_BIG) return (u64)py_hash(v);
-    if (v.t == T_FLOAT) throw_new(cls_TypeError, "Cannot cast scalar from dtype('float64') to dtype('int64') according to the rule 'safe'");
+    if (v.t == T_INT || v.t == T_BOOL) return u64_l(v.u.i);
+    if (v.t == T_BIG) return u64_ul(py_hash(v));
+    if (v.t == T_FLOAT)
+        throw_new(cls_TypeError,
+        "Cannot cast scalar from dtype('float64') to dtype('int64') according to the rule 'safe'");
     if (v.t == T_ND || v.t == T_LIST || v.t == T_TUPLE) {
         Nd *a = nd_from_value(v, ND_INT);
-        u64 h = 0x1234567UL;
+        u64 h = u64_ul(0x1234567UL);
         long i;
-        for (i = 0; i < a->size; i++) { u64 t = (u64)a->iv[i] + h; h = splitmix(&t); }
+        for (i = 0; i < a->size; i++) { u64 t = u64_add(u64_l(a->iv[i]), h); h = splitmix(&t); }
         return h;
     }
     throw_new(cls_TypeError, "Seed must be an integer");
-    return 0;
+    return u64_ul(0UL);
 }
 static void seed_from(u64 *s, Value v)
 {
     if (v.t == T_UNSET || v.t == T_NONE) {
-        u64 t = (u64)time(NULL) * 1000003UL + (u64)clock() + (u64)(size_t)s;
+        u64 t = u64_add(u64_ul(host_seed()), u64_ul((unsigned long)(size_t)s));
         nrng_seed(s, t);
     } else nrng_seed(s, seed_value(v));
 }
@@ -122,7 +212,8 @@ static Value rdims(Args *x, int off, u64 *s, RGen g)
     int nd = RN, k;
     Nd *r;
     if (nd == 0) return mkfloat(g(s, 0.0, 1.0));
-    if (nd > ND_MAXD) throw_new(cls_ValueError, "maximum supported dimension for an ndarray is %d", ND_MAXD);
+    if (nd > ND_MAXD)
+        throw_new(cls_ValueError, "maximum supported dimension for an ndarray is %d", ND_MAXD);
     for (k = 0; k < nd; k++) {
         shape[k] = need_long(RA(k), "dimension");
         if (shape[k] < 0) throw_new(cls_ValueError, "negative dimensions are not allowed");
@@ -163,7 +254,8 @@ static Value nr_stdexp(Args *x, int off, u64 *s)
 /* integers: legacy randint has high exclusive; Generator.integers adds endpoint */
 static Value nr_ints(Args *x, int off, u64 *s, int gen)
 {
-    Value lov = rarg(x, off, 0, "low"), hiv = rarg(x, off, 1, "high"), szv = rarg(x, off, 2, "size");
+    Value lov = rarg(x, off, 0, "low"), hiv = rarg(x, off, 1, "high"),
+        szv = rarg(x, off, 2, "size");
     Value epv = gen ? kwget(x, "endpoint") : UNSET_V;
     long lo, hi, shape[ND_MAXD], i;
     int nd;
@@ -174,9 +266,10 @@ static Value nr_ints(Args *x, int off, u64 *s, int gen)
     if (np_has(epv) && py_truthy(epv)) hi++;
     if (lo >= hi) throw_new(cls_ValueError, np_has(hiv) ? "low >= high" : "high <= 0");
     nd = rsize(szv, shape);
-    if (nd < 0) return mkint(lo + (long)nrng_below(s, (u64)hi - (u64)lo));
+    if (nd < 0) return mkint(lo + u64_tol(nrng_below(s, u64_sub(u64_l(hi), u64_l(lo)))));
     r = nd_new(ND_INT, nd, shape);
-    for (i = 0; i < r->size; i++) r->iv[i] = lo + (long)nrng_below(s, (u64)hi - (u64)lo);
+    for (i = 0; i < r->size; i++)
+        r->iv[i] = lo + u64_tol(nrng_below(s, u64_sub(u64_l(hi), u64_l(lo))));
     return nd_ret(r);
 }
 static Value nr_randint(Args *x, int off, u64 *s) { return nr_ints(x, off, s, 0); }
@@ -192,7 +285,7 @@ static void shuffle_nd(Nd *a, u64 *s)
     row = n > 0 ? a->size / n : 0;
     tmp = nd_new(a->dt, 1, &row);
     for (i = n - 1; i > 0; i--) {
-        j = (long)nrng_below(s, (u64)i + 1);
+        j = u64_tol(nrng_below(s, u64_l(i + 1)));
         if (j != i && row > 0) {
             nd_cp(tmp, 0, a, i * row, row);
             nd_cp(a, i * row, a, j * row, row);
@@ -211,7 +304,7 @@ static Value nr_shuffle(Args *x, int off, u64 *s)
         long i, j;
         for (i = l->n - 1; i > 0; i--) {
             Value t;
-            j = (long)nrng_below(s, (u64)i + 1);
+            j = u64_tol(nrng_below(s, u64_l(i + 1)));
             t = l->a[i]; l->a[i] = l->a[j]; l->a[j] = t;
         }
     } else throw_new(cls_TypeError, "shuffle: unsupported type '%.40s'", type_name(v));
@@ -221,7 +314,8 @@ static Value nr_permutation(Args *x, int off, u64 *s)
 {
     Value v;
     Nd *r;
-    if (RN < 1) throw_new(cls_TypeError, "permutation() missing 1 required positional argument: 'x'");
+    if (RN < 1)
+        throw_new(cls_TypeError, "permutation() missing 1 required positional argument: 'x'");
     v = RA(0);
     if (v.t == T_INT) {
         long n = v.u.i, i;
@@ -237,7 +331,8 @@ static Value nr_permutation(Args *x, int off, u64 *s)
 }
 static Value nr_choice(Args *x, int off, u64 *s)
 {
-    Value av = rarg(x, off, 0, "a"), szv = rarg(x, off, 1, "size"), rpv = rarg(x, off, 2, "replace");
+    Value av = rarg(x, off, 0, "a"), szv = rarg(x, off, 1, "size"),
+        rpv = rarg(x, off, 2, "replace");
     Value pv = rarg(x, off, 3, "p");
     Nd *src, *idx, *res;
     long n, cnt, i, j, shape[ND_MAXD], row;
@@ -247,7 +342,8 @@ static Value nr_choice(Args *x, int off, u64 *s)
     if (np_has(rpv)) repl = py_truthy(rpv);
     if (av.t == T_INT) {
         n = av.u.i;
-        if (n <= 0) throw_new(cls_ValueError, "a must be a positive integer unless no samples are taken");
+        if (n <= 0)
+            throw_new(cls_ValueError, "a must be a positive integer unless no samples are taken");
         src = NULL;
     } else {
         src = nd_from_value(av, -1);
@@ -264,16 +360,21 @@ static Value nr_choice(Args *x, int off, u64 *s)
         if (p->size != n) throw_new(cls_ValueError, "a and p must have same size");
         cum = (double *)xmalloc(sizeof(double) * (size_t)(n + 1));
         for (i = 0; i < n; i++) {
-            if (p->dv[i] < 0) { free(cum); throw_new(cls_ValueError, "probabilities are not non-negative"); }
+            if (p->dv[i] < 0) { free(cum);
+                throw_new(cls_ValueError, "probabilities are not non-negative");
+            }
             tot += p->dv[i];
             cum[i] = tot;
         }
-        if (fabs(tot - 1.0) > 1e-8) { free(cum); throw_new(cls_ValueError, "probabilities do not sum to 1"); }
+        if (fabs(tot - 1.0) > 1e-8) { free(cum);
+            throw_new(cls_ValueError, "probabilities do not sum to 1");
+        }
         for (i = 0; i < n; i++) cum[i] /= tot;
     }
     if (!repl && cnt > n) {
         free(cum);
-        throw_new(cls_ValueError, "Cannot take a larger sample than population when 'replace=False'");
+        throw_new(cls_ValueError,
+            "Cannot take a larger sample than population when 'replace=False'");
     }
     idx = nd_new1(ND_INT, cnt);
     if (cum) {
@@ -308,13 +409,13 @@ static Value nr_choice(Args *x, int off, u64 *s)
         }
         free(cum);
     } else if (repl) {
-        for (i = 0; i < cnt; i++) idx->iv[i] = (long)nrng_below(s, (u64)n);
+        for (i = 0; i < cnt; i++) idx->iv[i] = u64_tol(nrng_below(s, u64_l(n)));
     } else {
         long *pool = (long *)xmalloc(sizeof(long) * (size_t)n);
         for (i = 0; i < n; i++) pool[i] = i;
         for (i = 0; i < cnt; i++) {
             long t;
-            j = i + (long)nrng_below(s, (u64)(n - i));
+            j = i + u64_tol(nrng_below(s, u64_l(n - i)));
             t = pool[i]; pool[i] = pool[j]; pool[j] = t;
             idx->iv[i] = pool[i];
         }
@@ -394,14 +495,15 @@ static Value nr_binomial(Args *x, int off, u64 *s)
 static u64 *self_state(Args *x)
 {
     Value *sv;
-    if (x->n < 1 || x->a[0].t != T_INST) throw_new(cls_TypeError, "descriptor requires a Generator object");
+    if (x->n < 1 || x->a[0].t != T_INST)
+        throw_new(cls_TypeError, "descriptor requires a Generator object");
     sv = amap_get(&AS_INST(x->a[0])->a, intern_c("_s"));
     if (!sv || sv->t != T_ND) throw_new(cls_TypeError, "uninitialised Generator");
     return (u64 *)AS_ND(*sv)->iv;
 }
 #define RFN(nm, impl) \
-    BI(rm_##nm) { return impl(x, 0, g_rs); } \
-    BI(rg_##nm) { return impl(x, 1, self_state(x)); }
+  BI(rm_##nm) { return impl(x, 0, g_rs); } \
+  BI(rg_##nm) { return impl(x, 1, self_state(x)); }
 RFN(random, nr_random)
 RFN(stdnorm, nr_stdnorm)
 RFN(normal, nr_normal)
@@ -428,7 +530,7 @@ BI(rm_seed)
 static Value make_rng(Class *c, Value seed)
 {
     Inst *in = new_inst(c);
-    Nd *st = nd_new1(ND_INT, 4);
+    Nd *st = nd_new1(ND_INT, (long)(4 * sizeof(u64) / sizeof(long)));
     Value iv = mkobj(in, T_INST);
     VPUSH(iv);
     seed_from((u64 *)st->iv, seed);
@@ -479,7 +581,7 @@ static void rnd_init(Module *np)
         mod_val(m, nm[i], mkobj(cls_rng[i], T_CLASS));
     }
     cls_rng[1]->ctor = rm_RandomState;
-    nrng_seed(g_rs, (u64)time(NULL) * 2654435761UL + (u64)clock());
+    nrng_seed(g_rs, u64_mul(u64_ul(host_seed()), u64_ul(2654435761UL)));
     mod_def(m, "seed", rm_seed); mod_def(m, "default_rng", rm_default_rng);
     mod_def(m, "random", rm_random); mod_def(m, "random_sample", rm_random);
     mod_def(m, "ranf", rm_random); mod_def(m, "sample", rm_random);

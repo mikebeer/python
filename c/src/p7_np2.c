@@ -28,7 +28,9 @@ static double f_atan2(double y, double x) { return atan2(y, x); }
 static double f_hypot(double a, double b) { return n_hypot(a, b); }
 static double f_fmax(double a, double b) { return a != a ? b : (b != b ? a : (a > b ? a : b)); }
 static double f_fmin(double a, double b) { return a != a ? b : (b != b ? a : (a < b ? a : b)); }
-static double f_copysign(double a, double b) { return b < 0 || (b == 0 && 1.0 / b < 0) ? -fabs(a) : fabs(a); }
+static double f_copysign(double a, double b) {
+    return b < 0 || (b == 0 && 1.0 / b < 0) ? -fabs(a) : fabs(a);
+}
 static double f_isclose(double a, double b)
 {
     if (a != a || b != b) return g_eqnan && a != a && b != b;
@@ -262,7 +264,8 @@ BI(np_average)
         NdTmp tw, t1, t2, t3;
         Nd *w = nd_coerce(wv, &tw);
         Value prod = nd_binary(B_MUL, a, w), num, den;
-        if (w->nd != a->nd && has) throw_new(cls_NotImplementedError, "average: weights must match the array shape");
+        if (w->nd != a->nd && has)
+            throw_new(cls_NotImplementedError, "average: weights must match the array shape");
         num = nd_reduce(R_SUM, nd_coerce(prod, &t1), has, axis, 0);
         if (w->nd == a->nd || !has) den = nd_reduce(R_SUM, w, has, axis, 0);
         else den = nd_reduce(R_SUM, w, 0, 0, 0);
@@ -285,7 +288,8 @@ BI(np_diff)
     Value nv = np_arg(x, 1, "n"), av = np_arg(x, 2, "axis");
     long n = np_has(nv) ? need_long(nv, "n") : 1, step;
     int ax;
-    if (a->nd == 0) throw_new(cls_ValueError, "diff requires input that is at least one dimensional");
+    if (a->nd == 0)
+        throw_new(cls_ValueError, "diff requires input that is at least one dimensional");
     ax = np_has(av) ? axis_norm(need_long(av, "axis"), a->nd) : a->nd - 1;
     if (n < 0) throw_new(cls_ValueError, "order must be non-negative but got %ld", n);
     cur = nd_astype(a, a->dt);
@@ -301,7 +305,8 @@ BI(np_diff)
         for (o = 0; o < outer; o++)
             for (j = 0; j + 1 < len; j++)
                 for (i = 0; i < inner; i++) {
-                    long p = (o * len + j) * inner + i, q = p + inner, d = (o * (len - 1) + j) * inner + i;
+                    long p = (o * len + j) * inner + i, q = p + inner,
+                        d = (o * (len - 1) + j) * inner + i;
                     if (cur->dt == ND_FLOAT) r->dv[d] = cur->dv[q] - cur->dv[p];
                     else if (cur->dt == ND_BOOL) r->iv[d] = cur->iv[q] != cur->iv[p];
                     else r->iv[d] = cur->iv[q] - cur->iv[p];
@@ -351,13 +356,17 @@ BI(np_gradient)
         Value sp = nvar == 0 ? UNSET_V : (nvar == 1 ? A(1) : A(1 + k));
         ax = axes[k];
         axis_split(f, ax, &outer, &len, &inner);
-        if (len < 2) throw_new(cls_ValueError, "Shape of array too small to calculate a numerical gradient, at least (edge_order + 1) elements are required.");
+        if (len < 2)
+            throw_new(cls_ValueError,
+            "Shape of array too small to calculate a numerical gradient, at least (edge_order + "
+            "1) elements are required.");
         if (np_has(sp)) {
             if (sp.t == T_INT || sp.t == T_FLOAT || sp.t == T_BOOL) h = to_dbl(sp);
             else {
                 xs = np_f(sp);
                 if (xs->size != len)
-                    throw_new(cls_ValueError, "when 1d, distances must match the length of the corresponding dimension");
+                    throw_new(cls_ValueError,
+                        "when 1d, distances must match the length of the corresponding dimension");
             }
         }
         r = nd_new(ND_FLOAT, f->nd, f->shape);
@@ -370,7 +379,8 @@ BI(np_gradient)
                 for (j = 1; j < len - 1; j++) {
                     if (xs) {
                         double hd = xs->dv[j] - xs->dv[j - 1], hs = xs->dv[j + 1] - xs->dv[j];
-                        double fm = fp[(j - 1) * inner], f0 = fp[j * inner], fpl = fp[(j + 1) * inner];
+                        double fm = fp[(j - 1) * inner], f0 = fp[j * inner],
+                            fpl = fp[(j + 1) * inner];
                         rp[j * inner] = (hd * hd * fpl - hs * hs * fm + (hs * hs - hd * hd) * f0) /
                                         (hs * hd * (hd + hs));
                     } else
@@ -455,7 +465,9 @@ static Value quantile_impl(Args *x, double scale, const char *fname)
         for (qi = 0; qi < nq; qi++) {
             qs->dv[qi] /= scale;
             if (!(qs->dv[qi] >= 0.0 && qs->dv[qi] <= 1.0))
-                throw_new(cls_ValueError, scale == 1.0 ? "Quantiles must be in the range [0, 1]" : "Percentiles must be in the range [0, 100]");
+                throw_new(cls_ValueError,
+                    scale == 1.0 ? "Quantiles must be in the range [0, 1]"
+                    : "Percentiles must be in the range [0, 100]");
         }
     }
     f = nd_astype(a, ND_FLOAT);
@@ -507,7 +519,8 @@ BI(np_histogram)
 {
     NdTmp t;
     Nd *a = nd_arg0(x, &t), *f, *edges, *hist, *w = NULL;
-    Value bv = np_arg(x, 1, "bins"), rv = np_arg(x, 2, "range"), dv = kwget(x, "density"), wv = kwget(x, "weights");
+    Value bv = np_arg(x, 1, "bins"), rv = np_arg(x, 2, "range"), dv = kwget(x, "density"),
+        wv = kwget(x, "weights");
     long nb = 10, i, n;
     double lo, hi;
     int density = np_has(dv) && py_truthy(dv);
@@ -525,7 +538,8 @@ BI(np_histogram)
         nb = edges->size - 1;
         if (nb < 1) throw_new(cls_ValueError, "`bins` must have at least 2 edges");
         for (i = 0; i < nb; i++)
-            if (edges->dv[i + 1] < edges->dv[i]) throw_new(cls_ValueError, "`bins` must increase monotonically, when an array");
+            if (edges->dv[i + 1] < edges->dv[i])
+                throw_new(cls_ValueError, "`bins` must increase monotonically, when an array");
     } else {
         if (np_has(bv)) nb = need_long(bv, "bins");
         if (nb < 1) throw_new(cls_ValueError, "`bins` must be positive, when an integer");
@@ -533,11 +547,14 @@ BI(np_histogram)
             Nd *rg = np_f(rv);
             if (rg->size != 2) throw_new(cls_ValueError, "range must be a pair");
             lo = rg->dv[0]; hi = rg->dv[1];
-            if (lo > hi) throw_new(cls_ValueError, "max must be larger than min in range parameter.");
+            if (lo > hi)
+                throw_new(cls_ValueError, "max must be larger than min in range parameter.");
         } else if (n == 0) { lo = 0.0; hi = 1.0; }
         else {
             lo = HUGE_VAL; hi = -HUGE_VAL;
-            for (i = 0; i < n; i++) { if (f->dv[i] < lo) lo = f->dv[i]; if (f->dv[i] > hi) hi = f->dv[i]; }
+            for (i = 0; i < n; i++) { if (f->dv[i] < lo) lo = f->dv[i];
+                if (f->dv[i] > hi) hi = f->dv[i];
+            }
         }
         if (lo == hi) { lo -= 0.5; hi += 0.5; }
         edges = vec_new(nb + 1);
@@ -563,7 +580,8 @@ BI(np_histogram)
     if (density) {
         double tot = 0.0;
         for (i = 0; i < nb; i++) tot += hist->dv[i];
-        for (i = 0; i < nb; i++) hist->dv[i] = hist->dv[i] / tot / (edges->dv[i + 1] - edges->dv[i]);
+        for (i = 0; i < nb; i++)
+            hist->dv[i] = hist->dv[i] / tot / (edges->dv[i + 1] - edges->dv[i]);
     }
     tv[0] = ndv(hist); tv[1] = ndv(edges_out ? edges_out : edges);
     return mktuple_from(tv, 2);
@@ -574,10 +592,14 @@ BI(np_bincount)
     Nd *a = nd_arg0(x, &t), *r, *w = NULL;
     Value wv = np_arg(x, 1, "weights"), mv = np_arg(x, 2, "minlength");
     long i, mx = -1, ml = np_has(mv) ? need_long(mv, "minlength") : 0;
-    if (a->dt == ND_FLOAT) throw_new(cls_TypeError, "Cannot cast array data from dtype('float64') to dtype('int64') according to the rule 'safe'");
+    if (a->dt == ND_FLOAT)
+        throw_new(cls_TypeError,
+        "Cannot cast array data from dtype('float64') to dtype('int64') according to the rule "
+        "'safe'");
     if (a->nd != 1) throw_new(cls_ValueError, "object too deep for desired array");
     for (i = 0; i < a->size; i++) {
-        if (a->iv[i] < 0) throw_new(cls_ValueError, "'list' argument must have no negative elements");
+        if (a->iv[i] < 0)
+            throw_new(cls_ValueError, "'list' argument must have no negative elements");
         if (a->iv[i] > mx) mx = a->iv[i];
     }
     if (mx + 1 < ml) mx = ml - 1;
@@ -592,19 +614,26 @@ static Nd *cov_matrix(Args *x, int *scalar)
 {
     NdTmp t;
     Nd *m = nd_astype(nd_arg0(x, &t), ND_FLOAT), *X, *c;
-    Value yv = np_arg(x, 1, "y"), rv = np_arg(x, 2, "rowvar"), bv = np_arg(x, 3, "bias"), dv = np_arg(x, 4, "ddof");
+    Value yv = np_arg(x, 1, "y"), rv = np_arg(x, 2, "rowvar"), bv = np_arg(x, 3, "bias"),
+        dv = np_arg(x, 4, "ddof");
     int rowvar = !np_has(rv) || py_truthy(rv);
     long ddof = np_has(bv) && py_truthy(bv) ? 0 : 1, nv, N, i, j, k;
     double fact;
     double *means;
     if (np_has(dv)) ddof = need_long(dv, "ddof");
     if (m->nd > 2) throw_new(cls_ValueError, "m has more than 2 dimensions");
-    if (m->nd < 2) { long sh[2]; sh[0] = 1; sh[1] = m->size; m = nd_reshaped(m, 2, sh); rowvar = 1; }
+    if (m->nd < 2) { long sh[2];
+        sh[0] = 1;
+        sh[1] = m->size;
+        m = nd_reshaped(m, 2, sh);
+        rowvar = 1;
+    }
     *scalar = 0;
     if (!rowvar && m->shape[0] != 1) {
         long sh[2];
         Nd *tr = mat_new(m->shape[1], m->shape[0]);
-        for (i = 0; i < m->shape[0]; i++) for (j = 0; j < m->shape[1]; j++) tr->dv[j * m->shape[0] + i] = m->dv[i * m->shape[1] + j];
+        for (i = 0; i < m->shape[0]; i++) for (j = 0; j < m->shape[1]; j++)
+            tr->dv[j * m->shape[0] + i] = m->dv[i * m->shape[1] + j];
         m = tr; (void)sh;
     }
     if (np_has(yv)) {
@@ -613,10 +642,13 @@ static Nd *cov_matrix(Args *x, int *scalar)
         if (y->nd < 2) { sh[0] = 1; sh[1] = y->size; y = nd_reshaped(y, 2, sh); }
         else if (!rowvar && y->shape[0] != 1) {
             Nd *tr = mat_new(y->shape[1], y->shape[0]);
-            for (i = 0; i < y->shape[0]; i++) for (j = 0; j < y->shape[1]; j++) tr->dv[j * y->shape[0] + i] = y->dv[i * y->shape[1] + j];
+            for (i = 0; i < y->shape[0]; i++) for (j = 0; j < y->shape[1]; j++)
+                tr->dv[j * y->shape[0] + i] = y->dv[i * y->shape[1] + j];
             y = tr;
         }
-        if (y->shape[1] != m->shape[1]) throw_new(cls_ValueError, "all the input array dimensions except for the concatenation axis must match exactly");
+        if (y->shape[1] != m->shape[1])
+            throw_new(cls_ValueError,
+            "all the input array dimensions except for the concatenation axis must match exactly");
         X = mat_new(m->shape[0] + y->shape[0], m->shape[1]);
         memcpy(X->dv, m->dv, sizeof(double) * (size_t)m->size);
         memcpy(X->dv + m->size, y->dv, sizeof(double) * (size_t)y->size);
@@ -688,7 +720,9 @@ static Value tri_impl(Args *x, int upper)
         for (i = 0; i < m; i++)
             for (j = 0; j < n; j++) {
                 int keep = upper ? (j - i >= k) : (j - i <= k);
-                if (!keep) { if (r->dt == ND_FLOAT) r->dv[o * m * n + i * n + j] = 0.0; else r->iv[o * m * n + i * n + j] = 0; }
+                if (!keep) { if (r->dt == ND_FLOAT) r->dv[o * m * n + i * n + j] = 0.0;
+                    else r->iv[o * m * n + i * n + j] = 0;
+                }
             }
     return ndv(r);
 }
@@ -712,7 +746,7 @@ BI(np_kron)
     }
     dt = (a->dt == ND_FLOAT || b->dt == ND_FLOAT) ? ND_FLOAT : ND_INT;
     ra = nd_astype(a, (int)dt); rb = nd_astype(b, (int)dt);
-    r = nd_new(dt, nd, sh);
+    r = nd_new((int)dt, nd, sh);
     for (k = 0; k < ND_MAXD; k++) idx[k] = 0;
     for (i = 0; i < r->size; i++) {
         long oa = 0, ob = 0, ma = 1, mb = 1;
@@ -760,7 +794,9 @@ BI(np_vdot)
     long n;
     need(x, 2, 2, "vdot");
     a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
-    if (a->size != b->size) throw_new(cls_ValueError, "cannot reshape array of size %ld into shape (%ld)", b->size, a->size);
+    if (a->size != b->size)
+        throw_new(cls_ValueError, "cannot reshape array of size %ld into shape (%ld)", b->size,
+        a->size);
     n = a->size;
     return nd_matmul(nd_reshaped(a, 1, &n), nd_reshaped(b, 1, &n), 1);
 }
@@ -774,11 +810,13 @@ BI(np_cross)
     a = nd_coerce(A(0), &ta); b = nd_coerce(A(1), &tb);
     if (a->nd < 1 || b->nd < 1 || a->nd > 2 || b->nd > 2 ||
         a->shape[a->nd - 1] != 3 || b->shape[b->nd - 1] != 3)
-        throw_new(cls_ValueError, "incompatible dimensions for cross product\n(dimension must be 3)");
+        throw_new(cls_ValueError,
+            "incompatible dimensions for cross product\n(dimension must be 3)");
     na = a->nd == 2 ? a->shape[0] : 1;
     nb = b->nd == 2 ? b->shape[0] : 1;
     if (na != nb && na != 1 && nb != 1)
-        throw_new(cls_ValueError, "operands could not be broadcast together with shapes (%ld,3) (%ld,3) ", na, nb);
+        throw_new(cls_ValueError,
+            "operands could not be broadcast together with shapes (%ld,3) (%ld,3) ", na, nb);
     n = na > nb ? na : nb;
     dt = (a->dt == ND_FLOAT || b->dt == ND_FLOAT) ? ND_FLOAT : ND_INT;
     if (a->nd == 1 && b->nd == 1) r = nd_new1(dt, 3);
@@ -810,7 +848,8 @@ BI(np_meshgrid)
     long sh[ND_MAXD], idx[ND_MAXD], i;
     if (iv.t == T_STR) {
         if (strcmp(AS_STR(iv)->s, "ij") == 0) xy = 0;
-        else if (strcmp(AS_STR(iv)->s, "xy") != 0) throw_new(cls_ValueError, "Valid values for `indexing` are 'xy' and 'ij'.");
+        else if (strcmp(AS_STR(iv)->s, "xy") != 0)
+            throw_new(cls_ValueError, "Valid values for `indexing` are 'xy' and 'ij'.");
     }
     if (n > ND_MAXD) throw_new(cls_ValueError, "too many arrays");
     for (k = 0; k < n; k++) {
@@ -981,7 +1020,8 @@ BI(np_flip)
     ax = axis_norm(need_long(av, "axis"), a->nd);
     axis_split(a, ax, &outer, &len, &inner);
     for (o = 0; o < outer; o++) for (j = 0; j < len; j++)
-        for (i = 0; i < 1; i++) nd_cp(r, (o * len + j) * inner, a, (o * len + (len - 1 - j)) * inner, inner);
+        for (i = 0; i < 1; i++)
+            nd_cp(r, (o * len + j) * inner, a, (o * len + (len - 1 - j)) * inner, inner);
     return ndv(r);
 }
 BI(np_fliplr)
@@ -1070,7 +1110,8 @@ BI(np_repeat)
     } else { src = a; ax = axis_norm(need_long(av, "axis"), a->nd); }
     axis_split(src, ax, &outer, &len, &inner);
     if (reps && reps->size != len && reps->size != 1)
-        throw_new(cls_ValueError, "operands could not be broadcast together with shape (%ld,) (%ld,)", len, reps->size);
+        throw_new(cls_ValueError,
+            "operands could not be broadcast together with shape (%ld,) (%ld,)", len, reps->size);
     for (j = 0; j < len; j++) total += c >= 0 ? c : reps->iv[reps->size == 1 ? 0 : j];
     for (k = 0; k < src->nd; k++) sh[k] = src->shape[k];
     sh[ax] = total;
@@ -1095,9 +1136,11 @@ BI(np_squeeze)
     int k, rn = 0;
     Value av = np_arg(x, 1, "axis");
     for (k = 0; k < a->nd; k++) {
-        if (a->shape[k] == 1 && (!np_has(av) || axis_norm(need_long(av, "axis"), a->nd) == k)) continue;
+        if (a->shape[k] == 1 && (!np_has(av) || axis_norm(need_long(av, "axis"), a->nd) == k))
+            continue;
         if (np_has(av) && axis_norm(need_long(av, "axis"), a->nd) == k)
-            throw_new(cls_ValueError, "cannot select an axis to squeeze out which has size not equal to one");
+            throw_new(cls_ValueError,
+                "cannot select an axis to squeeze out which has size not equal to one");
         sh[rn++] = a->shape[k];
     }
     return nd_ret(nd_reshaped(a, rn, sh));
@@ -1110,9 +1153,12 @@ BI(np_expand_dims)
     int k, j = 0;
     need(x, 2, 2, "expand_dims");
     ax = need_long(A(1), "axis");
-    if (a->nd + 1 > ND_MAXD) throw_new(cls_ValueError, "maximum supported dimension for an ndarray is %d", ND_MAXD);
+    if (a->nd + 1 > ND_MAXD)
+        throw_new(cls_ValueError, "maximum supported dimension for an ndarray is %d", ND_MAXD);
     if (ax < 0) ax += a->nd + 1;
-    if (ax < 0 || ax > a->nd) throw_new(cls_ValueError, "axis %ld is out of bounds for array of dimension %d", ax, a->nd + 1);
+    if (ax < 0 || ax > a->nd)
+        throw_new(cls_ValueError, "axis %ld is out of bounds for array of dimension %d", ax,
+        a->nd + 1);
     for (k = 0; k <= a->nd; k++) {
         if (k == ax) sh[k] = 1; else sh[k] = a->shape[j++];
     }
@@ -1199,7 +1245,10 @@ BI(np_take)
     int ax, k, rn = 0;
     need(x, 2, 3, "take");
     a = nd_coerce(A(0), &ta); ix = nd_coerce(A(1), &ti);
-    if (ix->dt == ND_FLOAT) throw_new(cls_TypeError, "Cannot cast array data from dtype('float64') to dtype('int64') according to the rule 'same_kind'");
+    if (ix->dt == ND_FLOAT)
+        throw_new(cls_TypeError,
+        "Cannot cast array data from dtype('float64') to dtype('int64') according to the rule "
+        "'same_kind'");
     if (!np_has(av)) { long n = a->size; src = nd_reshaped(a, 1, &n); ax = 0; }
     else { src = a; ax = axis_norm(need_long(av, "axis"), a->nd); }
     axis_split(src, ax, &outer, &len, &inner);
@@ -1211,19 +1260,28 @@ BI(np_take)
         for (j = 0; j < ix->size; j++) {
             long p = ix->iv[j];
             if (p < -len || p >= len)
-                throw_new(cls_IndexError, "index %ld is out of bounds for axis %d with size %ld", p, ax, len);
+                throw_new(cls_IndexError, "index %ld is out of bounds for axis %d with size %ld", p,
+                    ax, len);
             if (p < 0) p += len;
-            for (i = 0; i < 1; i++) nd_cp(r, (o * ix->size + j) * inner, src, (o * len + p) * inner, inner);
+            for (i = 0; i < 1; i++)
+                nd_cp(r, (o * ix->size + j) * inner, src, (o * len + p) * inner, inner);
         }
     return nd_ret(r);
 }
-BI(np_shape) { NdTmp t; Nd *a = nd_arg0(x, &t); Value tv[ND_MAXD]; int k; for (k = 0; k < a->nd; k++) tv[k] = mkint(a->shape[k]); return mktuple_from(tv, a->nd); }
+BI(np_shape) { NdTmp t;
+    Nd *a = nd_arg0(x, &t);
+    Value tv[ND_MAXD];
+    int k;
+    for (k = 0; k < a->nd; k++) tv[k] = mkint(a->shape[k]);
+    return mktuple_from(tv, a->nd);
+}
 BI(np_ndim) { NdTmp t; Nd *a = nd_arg0(x, &t); return mkint(a->nd); }
 BI(np_size) { NdTmp t; Nd *a = nd_arg0(x, &t); return mkint(a->size); }
 BI(np_isscalar)
 {
     need(x, 1, 1, "isscalar");
-    return tobool(A(0).t == T_INT || A(0).t == T_FLOAT || A(0).t == T_BOOL || A(0).t == T_BIG || A(0).t == T_STR);
+    return tobool(A(0).t == T_INT || A(0).t == T_FLOAT || A(0).t == T_BOOL || A(0).t == T_BIG
+        || A(0).t == T_STR);
 }
 BI(np_linspace2)
 {

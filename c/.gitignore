@@ -1,1 +1,5 @@
 py
+py_embed*
+src/pylib_embed.c
+py_embed_all.c
+deck/py_deck_embed.c

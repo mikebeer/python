@@ -56,7 +56,7 @@ static Value nd_mkint(long v)
 static Value nd_elem(const Nd *a, long i)
 {
     if (a->dt == ND_FLOAT) return mkfloat(a->dv[i]);
-    if (a->dt == ND_BOOL) return tobool(a->iv[i]);
+    if (a->dt == ND_BOOL) return tobool(a->iv[i] != 0);
     return nd_mkint(a->iv[i]);
 }
 static double nd_d(const Nd *a, long i)
@@ -359,7 +359,8 @@ static Value nd_binary(int op, Nd *a, Nd *b)
         default:
             if (kd == ND_BOOL) {
                 kd = ND_INT;
-                rdt = (op == B_ADD || op == B_MUL || op == OP_MAX || op == OP_MIN) ? ND_BOOL : ND_INT;
+                rdt = (op == B_ADD || op == B_MUL || op == OP_MAX || op == OP_MIN) ? ND_BOOL
+                    : ND_INT;
                 boolres = rdt == ND_BOOL;
             } else rdt = kd;
             break;
@@ -518,7 +519,8 @@ static Value nd_ufunc1(int fn, Nd *a)
         return nd_ret(r);
     }
     r = nd_new(ND_FLOAT, a->nd, a->shape);
-    for (i = 0; i < a->size; i++) r->dv[i] = nd_f1(fn, a->dt == ND_FLOAT ? a->dv[i] : (double)a->iv[i]);
+    for (i = 0; i < a->size; i++)
+        r->dv[i] = nd_f1(fn, a->dt == ND_FLOAT ? a->dv[i] : (double)a->iv[i]);
     return nd_ret(r);
 }
 static Value nd_unop(int op, Value av)
@@ -528,7 +530,8 @@ static Value nd_unop(int op, Value av)
     Nd *r;
     if (op == '-') return nd_ufunc1(F_NEG, a);
     if (op == '+') return av;
-    if (a->dt == ND_FLOAT) throw_new(cls_TypeError, "ufunc 'invert' not supported for the input types");
+    if (a->dt == ND_FLOAT)
+        throw_new(cls_TypeError, "ufunc 'invert' not supported for the input types");
     r = nd_new(a->dt, a->nd, a->shape);
     for (i = 0; i < a->size; i++) r->iv[i] = a->dt == ND_BOOL ? !a->iv[i] : ~a->iv[i];
     return ndv(r);
@@ -601,7 +604,8 @@ static Value nd_reduce(int kind, Nd *a, int has_axis, int axis, long ddof)
         throw_new(cls_ValueError, "attempt to get %s of an empty sequence",
                   kind == R_ARGMIN ? "argmin" : "argmax");
     r = nd_new(rdt, rnd, rs);
-    if (kind == R_STD || kind == R_VAR) tmp = (double *)xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+    if (kind == R_STD || kind == R_VAR) tmp = (double *)
+        xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
     for (o = 0; o < outer; o++) {
         for (i = 0; i < inner; i++) {
             long base = o * n * inner + i, ri = o * inner + i;
@@ -634,7 +638,9 @@ static Value nd_reduce(int kind, Nd *a, int has_axis, int axis, long ddof)
                     for (t = 1; t < n; t++) {
                         double v = p[base + t * inner];
                         if (best != best) break;
-                        if (v != v || (kind == R_ARGMIN ? v < best : v > best)) { best = v; bi = t; }
+                        if (v != v || (kind == R_ARGMIN ? v < best : v > best)) { best = v;
+                            bi = t;
+                        }
                     }
                     r->iv[ri] = bi;
                     break; }
@@ -667,12 +673,14 @@ static Value nd_reduce(int kind, Nd *a, int has_axis, int axis, long ddof)
                 switch (kind) {
                 case R_SUM:
                     acc = 0;
-                    for (t = 0; t < n; t++) acc = (long)((unsigned long)acc + (unsigned long)p[base + t * inner]);
+                    for (t = 0; t < n; t++) acc = (long)
+                        ((unsigned long)acc + (unsigned long)p[base + t * inner]);
                     r->iv[ri] = acc;
                     break;
                 case R_PROD:
                     acc = 1;
-                    for (t = 0; t < n; t++) acc = (long)((unsigned long)acc * (unsigned long)p[base + t * inner]);
+                    for (t = 0; t < n; t++) acc = (long)
+                        ((unsigned long)acc * (unsigned long)p[base + t * inner]);
                     r->iv[ri] = acc;
                     break;
                 case R_MIN: case R_MAX: {
@@ -788,7 +796,8 @@ static long sel_index(long i, long n, int axis)
 {
     long j = i < 0 ? i + n : i;
     if (j < 0 || j >= n)
-        throw_new(cls_IndexError, "index %ld is out of bounds for axis %d with size %ld", i, axis, n);
+        throw_new(cls_IndexError, "index %ld is out of bounds for axis %d with size %ld", i, axis,
+            n);
     return j;
 }
 static void nd_select(Nd *a, Value idx, NdSel *sel)
@@ -851,7 +860,8 @@ static void nd_select(Nd *a, Value idx, NdSel *sel)
                 o = (long *)xmalloc(sizeof(long) * (size_t)(cnt > 0 ? cnt : 1));
                 for (i = 0; i < cnt; i++) o[i] = sel_index(ix->iv[i], n, k) * strides[k];
             } else
-                throw_new(cls_IndexError, "arrays used as indices must be of integer (or boolean) type");
+                throw_new(cls_IndexError,
+                    "arrays used as indices must be of integer (or boolean) type");
         } else
             throw_new(cls_IndexError, "only integers, slices (`:`), integer or boolean arrays are "
                       "valid indices");
@@ -926,7 +936,8 @@ static void nd_setitem(Value o, Value idx, Value v)
         char s1[160], s2[160];
         shape_str(s->nd, s->shape, s1);
         shape_str(sel.rnd, sel.rshape, s2);
-        throw_new(cls_ValueError, "could not broadcast input array from shape %s into shape %s", s1, s2);
+        throw_new(cls_ValueError, "could not broadcast input array from shape %s into shape %s", s1,
+            s2);
     }
     extra = sel.rnd - s->nd;
     {
@@ -1182,7 +1193,9 @@ static void nd_rec(NdR *r, int axis, int hang, int curw, Buf *out)
             nd_extend(&s, &line, r->strs + NDW * (r->next++), elemw, hang);
             buf_add(&line, r->comma ? ", " : " ");
         }
-        if (summ) { nd_extend(&s, &line, "...", elemw, hang); buf_add(&line, r->comma ? ", " : " "); }
+        if (summ) { nd_extend(&s, &line, "...", elemw, hang);
+            buf_add(&line, r->comma ? ", " : " ");
+        }
         for (j = trail; j > 1; j--) {
             nd_extend(&s, &line, r->strs + NDW * (r->next++), elemw, hang);
             buf_add(&line, r->comma ? ", " : " ");
@@ -1268,11 +1281,13 @@ static int shape_arg(Value v, long *shape)
     else if (v.t == T_TUPLE || v.t == T_LIST) {
         List *l = AS_LIST(v);
         long i;
-        if (l->n > ND_MAXD) throw_new(cls_ValueError, "maximum supported dimension for an ndarray is %d", ND_MAXD);
+        if (l->n > ND_MAXD)
+            throw_new(cls_ValueError, "maximum supported dimension for an ndarray is %d", ND_MAXD);
         for (i = 0; i < l->n; i++) shape[i] = need_long(l->a[i], "shape");
         nd = (int)l->n;
     } else
-        throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer", type_name(v));
+        throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+            type_name(v));
     for (k = 0; k < nd; k++)
         if (shape[k] < 0) throw_new(cls_ValueError, "negative dimensions are not allowed");
     return nd;
@@ -1361,7 +1376,8 @@ BI(np_arange)
     double start = 0, stop, step = 1;
     long n, k;
     Nd *r;
-    if (x->n < 1 || x->n > 3) throw_new(cls_TypeError, "arange() takes 1 to 3 positional arguments");
+    if (x->n < 1 || x->n > 3)
+        throw_new(cls_TypeError, "arange() takes 1 to 3 positional arguments");
     for (i = 0; i < x->n; i++) {
         if (py_dt(A(i)) < 0) throw_new(cls_TypeError, "arange() arguments must be numbers");
         if (A(i).t == T_FLOAT) allint = 0;
@@ -1470,7 +1486,8 @@ BI(nd_item_m)
 {
     NdTmp t;
     Nd *a = nd_arg0(x, &t);
-    if (a->size != 1) throw_new(cls_ValueError, "can only convert an array of size 1 to a Python scalar");
+    if (a->size != 1)
+        throw_new(cls_ValueError, "can only convert an array of size 1 to a Python scalar");
     return nd_elem(a, 0);
 }
 BI(nd_reshape)
@@ -1497,7 +1514,8 @@ BI(nd_reshape)
     }
     if (unk >= 0) {
         if (known == 0 || a->size % known != 0)
-            throw_new(cls_ValueError, "cannot reshape array of size %ld into shape %ld", a->size, known);
+            throw_new(cls_ValueError, "cannot reshape array of size %ld into shape %ld", a->size,
+                known);
         shape[unk] = a->size / known;
     } else if (known != a->size) {
         char s1[160];
@@ -1621,7 +1639,10 @@ static void nd_atleast2(Nd **arr, int n)
     int i;
     for (i = 0; i < n; i++) {
         long sh[2];
-        if (arr[i]->nd == 1) { sh[0] = 1; sh[1] = arr[i]->shape[0]; arr[i] = nd_reshaped(arr[i], 2, sh); }
+        if (arr[i]->nd == 1) { sh[0] = 1;
+            sh[1] = arr[i]->shape[0];
+            arr[i] = nd_reshaped(arr[i], 2, sh);
+        }
         else if (arr[i]->nd == 0) { sh[0] = 1; sh[1] = 1; arr[i] = nd_reshaped(arr[i], 2, sh); }
     }
 }
@@ -1662,7 +1683,8 @@ BI(np_stack)
     n = seq_arrays(A(0), &arr);
     if (av.t != T_UNSET && av.t != T_NONE) axis = axis_norm(need_long(av, "axis"), arr[0]->nd + 1);
     for (i = 1; i < n; i++)
-        if (arr[i]->nd != arr[0]->nd || memcmp(arr[i]->shape, arr[0]->shape, sizeof(long) * ND_MAXD))
+        if (arr[i]->nd != arr[0]->nd
+            || memcmp(arr[i]->shape, arr[0]->shape, sizeof(long) * ND_MAXD))
             throw_new(cls_ValueError, "all input arrays must have the same shape");
     for (i = 0; i < n; i++) {
         long sh[ND_MAXD];
@@ -1808,7 +1830,8 @@ BI(np_unique)
     s = nd_reshaped(a, 1, &n);
     nd_sort_rows(s, n);
     for (i = 0; i < n; i++)
-        if (i == 0 || (s->dt == ND_FLOAT ? s->dv[i] != s->dv[i - 1] : s->iv[i] != s->iv[i - 1])) m++;
+        if (i == 0 || (s->dt == ND_FLOAT ? s->dv[i] != s->dv[i - 1] : s->iv[i] != s->iv[i - 1]))
+            m++;
     r = nd_new1(s->dt, m);
     m = 0;
     for (i = 0; i < n; i++)
@@ -1838,10 +1861,12 @@ static Value nd_matmul(Nd *a, Nd *b, int isdot)
     int rnd = 0, fl;
     Nd *r;
     if (a->nd == 0 || b->nd == 0) {
-        if (!isdot) throw_new(cls_ValueError, "matmul: Input operand does not have enough dimensions");
+        if (!isdot)
+            throw_new(cls_ValueError, "matmul: Input operand does not have enough dimensions");
         return nd_binary(B_MUL, a, b);
     }
-    if (a->nd > 2 || b->nd > 2) throw_new(cls_NotImplementedError, "matmul: only 1-d and 2-d arrays are supported");
+    if (a->nd > 2 || b->nd > 2)
+        throw_new(cls_NotImplementedError, "matmul: only 1-d and 2-d arrays are supported");
     if (a->nd == 1) { m = 1; kk = a->shape[0]; } else { m = a->shape[0]; kk = a->shape[1]; }
     if (b->nd == 1) { n = 1; if (b->shape[0] != kk) goto mismatch; }
     else { n = b->shape[1]; if (b->shape[0] != kk) goto mismatch; }
@@ -1866,7 +1891,8 @@ static Value nd_matmul(Nd *a, Nd *b, int isdot)
                 unsigned long aik = (unsigned long)a->iv[i * kk + k];
                 const long *bp = b->iv + k * n;
                 long *cp = r->iv + i * n;
-                for (j = 0; j < n; j++) cp[j] = (long)((unsigned long)cp[j] + aik * (unsigned long)bp[j]);
+                for (j = 0; j < n; j++) cp[j] = (long)
+                    ((unsigned long)cp[j] + aik * (unsigned long)bp[j]);
             }
     }
     return nd_ret(r);
@@ -1875,7 +1901,8 @@ mismatch:
         char s1[160], s2[160];
         shape_str(a->nd, a->shape, s1);
         shape_str(b->nd, b->shape, s2);
-        throw_new(cls_ValueError, "shapes %s and %s not aligned: %ld (dim %d) != %ld (dim 0)", s1, s2,
+        throw_new(cls_ValueError, "shapes %s and %s not aligned: %ld (dim %d) != %ld (dim 0)", s1,
+            s2,
                   kk, a->nd - 1, b->shape[0]);
     }
     return NONE_V;
@@ -1966,8 +1993,10 @@ BI(np_clip)
     NdTmp tl, th;
     if (lo.t == T_UNSET) lo = kwget(x, "min");
     if (hi.t == T_UNSET) hi = kwget(x, "max");
-    if (lo.t != T_UNSET && lo.t != T_NONE) r = nd_binary(OP_MAX, nd_coerce(r, &t), nd_coerce(lo, &tl));
-    if (hi.t != T_UNSET && hi.t != T_NONE) r = nd_binary(OP_MIN, nd_coerce(r, &t), nd_coerce(hi, &th));
+    if (lo.t != T_UNSET && lo.t != T_NONE)
+        r = nd_binary(OP_MAX, nd_coerce(r, &t), nd_coerce(lo, &tl));
+    if (hi.t != T_UNSET && hi.t != T_NONE)
+        r = nd_binary(OP_MIN, nd_coerce(r, &t), nd_coerce(hi, &th));
     if (r.t == T_ND && r.u.o == (Hdr *)a) return ndv(nd_astype(a, a->dt));
     return r;
 }

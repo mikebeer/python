@@ -461,6 +461,7 @@ getattr_obj: procedure = .int
     v = np_attr(o, nid)
     if v \= 0 then return v
   end
+  if k = K_NONE then return no_attr(o, nid)
   if k = K_STR | k = K_LIST | k = K_DICT | k = K_SET | k = K_TUPLE | k = K_INT | k = K_BIG | k = K_BOOL | k = K_FLOAT then do
     if known_meth(k, nid_name[nid]) = 0 then return no_attr(o, nid)
   end

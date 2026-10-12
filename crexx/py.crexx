@@ -3991,6 +3991,10 @@ hashkey: procedure = .string
       end
       return "o" || x
     end
+    when k = 7 | k = 9 | k = 10 then do
+      r = raise_exc(38, "unhashable type: '" || type_name(x) || "'")
+      return "?"
+    end
     otherwise return "o" || x
   end
   return "o" || x
@@ -4771,6 +4775,17 @@ tofloat: procedure = .float
 
 err_binop: procedure = .int
   arg sym = .string, x = .int, y = .int
+  kx = .int
+  ky = .int
+  kx = 0
+  ky = 0
+  if x > 0 & x // 2 = 0 then kx = ob_k[x % 2]
+  if y > 0 & y // 2 = 0 then ky = ob_k[y % 2]
+  do
+    if sym == "+" & (kx = 6 | kx = 7 | kx = 8) then return raise_exc(38, "can only concatenate " || type_name(x) || " (not " || '"' || type_name(y) || '"' || ") to " || type_name(x))
+    if sym == "*" & (kx = 6 | kx = 7 | kx = 8) then return raise_exc(38, "can't multiply sequence by non-int of type '" || type_name(y) || "'")
+    if sym == "*" & (ky = 6 | ky = 7 | ky = 8) then return raise_exc(38, "can't multiply sequence by non-int of type '" || type_name(x) || "'")
+  end
   return raise_exc(38, "unsupported operand type(s) for " || sym || ": '" || type_name(x) || "' and '" || type_name(y) || "'")
 
 op_sym: procedure = .string
@@ -4859,7 +4874,10 @@ numarith: procedure = .int
         return mkfloat((a as .float) / (b as .float))
       end
       when op = 5 | op = 6 then do
-        if b = 0 then return raise_exc(30, "integer division or modulo by zero")
+        if b = 0 then do
+          if op = 6 then return raise_exc(30, "integer modulo by zero")
+          return raise_exc(30, "integer division or modulo by zero")
+        end
         q = a % b
         r = a // b
         if r \= 0 & ((r < 0) \= (b < 0)) then do
@@ -4911,7 +4929,10 @@ numarith: procedure = .int
       return mkfloat(tofloat(x) / tofloat(y))
     end
     when op = 5 | op = 6 then do
-      if sy == "0" then return raise_exc(30, "integer division or modulo by zero")
+      if sy == "0" then do
+        if op = 6 then return raise_exc(30, "integer modulo by zero")
+        return raise_exc(30, "integer division or modulo by zero")
+      end
       call sdivmod sx, sy
       if sr \== "0" & ((left(sx, 1) == "-") \= (left(sy, 1) == "-")) then do
         if op = 5 then return big_norm(ssub(sq, "1"))
@@ -6282,6 +6303,7 @@ getattr_obj: procedure = .int
     v = np_attr(o, nid)
     if v \= 0 then return v
   end
+  if k = 1 then return no_attr(o, nid)
   if k = 6 | k = 7 | k = 9 | k = 10 | k = 8 | k = 3 | k = 4 | k = 2 | k = 5 then do
     if known_meth(k, nid_name[nid]) = 0 then return no_attr(o, nid)
   end
@@ -7686,6 +7708,7 @@ ev: procedure = .int
           v = ev(a, fb)
           if v = 0 then return 0
           call dset o, v, 4
+          if unw > 0 then return 0
         end
       end
       return o
@@ -7728,6 +7751,7 @@ ev: procedure = .int
         v = ev(al[st + 2 * i + 1], fb)
         if v = 0 then return 0
         call dset o, l, v
+        if unw > 0 then return 0
       end
     end
     return o
@@ -9439,7 +9463,7 @@ bi_minmax: procedure = .int
   n = ob_n[l % 2]
   if n = 0 then do
     if dflt \= 0 then return dflt
-    return raise_exc(36, fname || "() arg is an empty sequence")
+    return raise_exc(36, fname || "() iterable argument is empty")
   end
   best = sl[ob_p[l % 2]]
   bestk = best

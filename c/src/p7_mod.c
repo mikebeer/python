@@ -10,7 +10,8 @@ static Module *new_module(const char *name)
     m->ns.k = NULL; m->ns.v = NULL; m->ns.n = m->ns.cap = 0;
     m->gp = NULL;
     m->gmap = NULL;
-    if (sys_modules_v.t == T_DICT) dict_set(AS_DICT(sys_modules_v), mkobj(m->name, T_STR), mkobj(m, T_MODULE));
+    if (sys_modules_v.t == T_DICT)
+        dict_set(AS_DICT(sys_modules_v), mkobj(m->name, T_STR), mkobj(m, T_MODULE));
     return m;
 }
 static void mod_def(Module *m, const char *name, BFn fn)
@@ -39,7 +40,12 @@ static void domain_check(int ok)
     if (!ok) throw_new(cls_ValueError, "math domain error");
 }
 #define MATH1(name, expr, dom) \
-    BI(name) { double v; need(x, 1, 1, "math"); v = dbl_arg(x, 0); domain_check(dom); return mkfloat(expr); }
+    BI(name) { double v; \
+        need(x, 1, 1, "math"); \
+        v = dbl_arg(x, 0); \
+        domain_check(dom); \
+        return mkfloat(expr); \
+    }
 MATH1(m_sqrt, sqrt(v), v >= 0)
 MATH1(m_sin, sin(v), 1)
 MATH1(m_cos, cos(v), 1)
@@ -152,7 +158,9 @@ BI(m_gcd)
     Value g = mkint(0);
     int i;
     for (i = 0; i < x->n; i++) {
-        if (!is_intv(A(i))) throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer", type_name(A(i)));
+        if (!is_intv(A(i)))
+            throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+            type_name(A(i)));
         g = int_gcd(g, A(i));
     }
     return g;
@@ -175,8 +183,11 @@ BI(m_factorial)
     long n, i;
     Value r = mkint(1);
     need(x, 1, 1, "factorial");
-    if (!is_intv(A(0))) throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer", type_name(A(0)));
-    if (int_sign(A(0)) < 0) throw_new(cls_ValueError, "factorial() not defined for negative values");
+    if (!is_intv(A(0)))
+        throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+        type_name(A(0)));
+    if (int_sign(A(0)) < 0)
+        throw_new(cls_ValueError, "factorial() not defined for negative values");
     n = to_index(A(0));
     for (i = 2; i <= n; i++) r = int_mul(r, mkint(i));
     return r;
@@ -186,7 +197,9 @@ BI(m_isqrt)
     Value n, r, nr;
     need(x, 1, 1, "isqrt");
     n = A(0);
-    if (!is_intv(n)) throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer", type_name(n));
+    if (!is_intv(n))
+        throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+        type_name(n));
     if (int_sign(n) < 0) throw_new(cls_ValueError, "isqrt() argument must be nonnegative");
     if (n.t != T_BIG) {
         long s = (long)sqrt((double)n.u.i);
@@ -202,7 +215,8 @@ BI(m_isqrt)
         r = nr;
     }
     while (int_cmp(int_mul(r, r), n) > 0) r = int_sub(r, mkint(1));
-    while (int_cmp(int_mul(int_add(r, mkint(1)), int_add(r, mkint(1))), n) <= 0) r = int_add(r, mkint(1));
+    while (int_cmp(int_mul(int_add(r, mkint(1)), int_add(r, mkint(1))), n) <= 0)
+        r = int_add(r, mkint(1));
     return r;
 }
 BI(m_comb)
@@ -539,7 +553,7 @@ BI(r_seed)
 {
     unsigned long h = 2463534242UL;
     if (x->n > 0 && A(0).t != T_NONE) h = (py_hash(A(0)) * 2654435761UL + 12345UL) & 0xffffffffUL;
-    else h = (unsigned long)time(NULL) & 0xffffffffUL;
+    else h = host_seed() & 0xffffffffUL;
     if (h == 0) h = 88172645UL;
     rng_state = h;
     rng_next(); rng_next();
@@ -551,7 +565,9 @@ BI(r_randint)
     long a, b;
     need(x, 2, 2, "randint");
     a = to_index(A(0)); b = to_index(A(1));
-    if (b < a) throw_new(cls_ValueError, "empty range for randrange() (%ld, %ld, %ld)", a, b + 1, b + 1 - a);
+    if (b < a)
+        throw_new(cls_ValueError, "empty range for randrange() (%ld, %ld, %ld)", a, b + 1,
+        b + 1 - a);
     return mkint(a + rng_below(b - a + 1));
 }
 BI(r_randrange)
@@ -633,38 +649,18 @@ static Value std_file(FILE *fp, int out)
 BI(t_time)
 {
     (void)x;
-#ifdef PY_POSIX
-    {
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        return mkfloat((double)tv.tv_sec + (double)tv.tv_usec / 1000000.0);
-    }
-#else
-    return mkfloat((double)time(NULL));
-#endif
+    return mkfloat(host_time());
 }
 BI(t_clock)
 {
     (void)x;
-    return mkfloat((double)clock() / (double)CLOCKS_PER_SEC);
+    return mkfloat(host_clock());
 }
 BI(t_sleep)
 {
     double d = dbl_arg(x, 0);
     fflush(stdout);
-#ifdef PY_POSIX
-    {
-        struct timespec ts;
-        ts.tv_sec = (time_t)d;
-        ts.tv_nsec = (long)((d - (double)ts.tv_sec) * 1e9);
-        nanosleep(&ts, NULL);
-    }
-#else
-    {
-        clock_t end = clock() + (clock_t)(d * (double)CLOCKS_PER_SEC);
-        while (clock() < end) { }
-    }
-#endif
+    host_sleep(d);
     return NONE_V;
 }
 BI(sys_getrec)
@@ -876,7 +872,8 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_str, "rjust", s_rjust); def_bi(cls_str, "zfill", s_zfill);
     def_bi(cls_str, "partition", s_partition); def_bi(cls_str, "rpartition", s_rpartition);
     def_bi(cls_str, "format", s_format); def_bi(cls_str, "encode", s_encode);
-    def_bi(cls_str, "removeprefix", s_removeprefix); def_bi(cls_str, "removesuffix", s_removesuffix);
+    def_bi(cls_str, "removeprefix", s_removeprefix);
+    def_bi(cls_str, "removesuffix", s_removesuffix);
     def_bi(cls_str, "expandtabs", s_expandtabs); def_bi(cls_str, "casefold", s_lower);
     def_bi(cls_str, "isidentifier", s_isidentifier); def_bi(cls_str, "istitle", s_istitle);
     def_bi(cls_str, "isprintable", s_isprintable); def_bi(cls_str, "isascii", s_isascii);
@@ -931,7 +928,8 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_set, "add", st_add); def_bi(cls_set, "discard", st_discard);
     def_bi(cls_set, "remove", st_remove); def_bi(cls_set, "pop", st_pop);
     def_bi(cls_set, "union", st_union); def_bi(cls_set, "intersection", st_intersection);
-    def_bi(cls_set, "difference", st_difference); def_bi(cls_set, "symmetric_difference", st_symdiff);
+    def_bi(cls_set, "difference", st_difference);
+    def_bi(cls_set, "symmetric_difference", st_symdiff);
     def_bi(cls_set, "update", st_update); def_bi(cls_set, "issubset", st_issubset);
     def_bi(cls_set, "issuperset", st_issuperset); def_bi(cls_set, "isdisjoint", st_isdisjoint);
     def_bi(cls_set, "copy", st_copy); def_bi(cls_set, "clear", st_clear);
@@ -944,7 +942,8 @@ static void init_runtime(int argc, char **argv)
             def_bi(nk[k], "__sub__", num_sub); def_bi(nk[k], "__rsub__", num_rsub);
             def_bi(nk[k], "__mul__", num_mul); def_bi(nk[k], "__rmul__", num_rmul);
             def_bi(nk[k], "__truediv__", num_truediv); def_bi(nk[k], "__rtruediv__", num_rtruediv);
-            def_bi(nk[k], "__floordiv__", num_floordiv); def_bi(nk[k], "__rfloordiv__", num_rfloordiv);
+            def_bi(nk[k], "__floordiv__", num_floordiv);
+            def_bi(nk[k], "__rfloordiv__", num_rfloordiv);
             def_bi(nk[k], "__mod__", num_mod); def_bi(nk[k], "__rmod__", num_rmod);
             def_bi(nk[k], "__pow__", num_pow); def_bi(nk[k], "__rpow__", num_rpow);
             def_bi(nk[k], "__neg__", num_neg); def_bi(nk[k], "__pos__", num_pos);
@@ -1042,7 +1041,9 @@ static void init_runtime(int argc, char **argv)
     m = new_module("random");
     mod_def(m, "seed", r_seed); mod_def(m, "random", r_random); mod_def(m, "randint", r_randint);
     mod_def(m, "randrange", r_randrange); mod_def(m, "uniform", r_uniform);
-    mod_def(m, "choice", r_choice); mod_def(m, "shuffle", r_shuffle); mod_def(m, "sample", r_sample);
+    mod_def(m, "choice", r_choice);
+    mod_def(m, "shuffle", r_shuffle);
+    mod_def(m, "sample", r_sample);
     {
         Args seedargs;
         seedargs.n = 0; seedargs.a = NULL; seedargs.nk = 0; seedargs.kw = NULL;
@@ -1073,10 +1074,17 @@ static void init_runtime(int argc, char **argv)
     mod_val(m, "path", sys_path_v);
     {
         Value vi[5];
-        vi[0] = mkint(3); vi[1] = mkint(12); vi[2] = mkint(0); vi[3] = mkcstr("final"); vi[4] = mkint(0);
+        vi[0] = mkint(3);
+        vi[1] = mkint(12);
+        vi[2] = mkint(0);
+        vi[3] = mkcstr("final");
+        vi[4] = mkint(0);
         mod_val(m, "version_info", mktuple_from(vi, 5));
     }
-    mod_val(m, "byteorder", mkcstr("little"));
+    {
+        unsigned long one = 1UL;
+        mod_val(m, "byteorder", mkcstr(*(unsigned char *)&one ? "little" : "big"));
+    }
     mod_val(m, "executable", mkcstr(exe_path));
     mod_val(m, "builtin_module_names", mktuple_from(NULL, 0));
     m = new_module("os");

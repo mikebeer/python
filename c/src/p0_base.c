@@ -6,30 +6,13 @@
 
    Portability rules: strict C89 (no //, no declarations after statements,
    no long long, no stdint.h), all functions static, character classes by
-   literal sets.  Integers: a small int is a long with |n| <= SI_MAX,
+   literal sets.  The standard headers and every host/OS dependency are in
+   p0_os.c.  Integers: a small int is a long with |n| <= SI_MAX,
    larger integers are big integers (base 10000 limbs).
    ========================================================================= */
-#ifdef PY_POSIX
-#define _XOPEN_SOURCE 600
-#endif
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <setjmp.h>
-#include <time.h>
-#include <limits.h>
-#include <stdarg.h>
-#include <float.h>
-
-#ifdef PY_POSIX
-#include <unistd.h>
-#include <sys/time.h>
-#endif
-
 #define PY_VERSION "1.0"
 
-#if LONG_MAX > 2147483647L
+#if LONG_MAX > 2147483647L && !defined(PY_SI32)  /* -DPY_SI32 simulates 32-bit long */
 #define SI_MAX 999999999999999999L
 #define SI_MULLIM 1000000000L
 #else
@@ -37,8 +20,12 @@
 #define SI_MULLIM 31622L
 #endif
 
-#define VSTACK_SIZE 400000L
-#define MAX_DEPTH 1000
+#ifndef VSTACK_SIZE
+#define VSTACK_SIZE 400000L   /* value stack, in Values (16 bytes each): -D to shrink for CMS */
+#endif
+#ifndef MAX_DEPTH
+#define MAX_DEPTH 1000        /* Python recursion limit (also bounds the C stack use) */
+#endif
 
 /* ---- values ----------------------------------------------------------- */
 enum {
@@ -311,7 +298,8 @@ static long nglobals, gcap;
 static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, *cls_list,
     *cls_tuple, *cls_dict, *cls_set, *cls_range, *cls_none, *cls_func, *cls_builtin,
     *cls_method, *cls_gen, *cls_module, *cls_iter, *cls_prop, *cls_file, *cls_cell,
-    *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice, *cls_dview[3], *cls_notimpl, *cls_bytes;
+    *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice, *cls_dview[3], *cls_notimpl,
+        *cls_bytes;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError, *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError, *cls_KeyError, *cls_ValueError,
     *cls_TypeError, *cls_NameError, *cls_UnboundLocalError, *cls_AttributeError,
@@ -602,13 +590,13 @@ static List *list_new(long cap)
     l->n = 0;
     l->cap = cap < 4 ? 4 : cap;
     l->a = (Value *)xmalloc(sizeof(Value) * (size_t)l->cap);
-    GC_ACCOUNT(sizeof(Value) * l->cap);
+    GC_ACCOUNT(sizeof(Value) * (size_t)l->cap);
     return l;
 }
 static void list_push(List *l, Value v)
 {
     if (l->n >= l->cap) {
-        GC_ACCOUNT(sizeof(Value) * l->cap);
+        GC_ACCOUNT(sizeof(Value) * (size_t)l->cap);
         l->cap *= 2;
         l->a = (Value *)xrealloc(l->a, sizeof(Value) * (size_t)l->cap);
     }
@@ -624,7 +612,7 @@ static List *tuple_new(long n)
     l->n = n;
     l->cap = n < 1 ? 1 : n;
     l->a = (Value *)xmalloc(sizeof(Value) * (size_t)l->cap);
-    GC_ACCOUNT(sizeof(Value) * l->cap);
+    GC_ACCOUNT(sizeof(Value) * (size_t)l->cap);
     return l;
 }
 static Value mktuple2(Value a, Value b)
@@ -699,7 +687,7 @@ static void dict_rebuild(Dict *d, long newcap)
         if (d->e[i].k.t != T_UNSET) ne[j++] = d->e[i];
     free(d->e);
     free(d->idx);
-    GC_ACCOUNT(sizeof(DEnt) * newcap + sizeof(long) * isz);
+    GC_ACCOUNT(sizeof(DEnt) * (size_t)newcap + sizeof(long) * (size_t)isz);
     d->e = ne;
     d->used = j;
     d->cap = newcap;
@@ -818,7 +806,8 @@ static long gc_obj_size(Hdr *h)
             (long)sizeof(long) * ((Dict *)h)->isz;
     case T_INST: return (long)sizeof(Inst) + 24L * ((Inst *)h)->a.cap;
     case T_CLASS: return (long)sizeof(Class) + 24L * ((Class *)h)->ns.cap;
-    case T_GEN: return (long)sizeof(Gen) + (long)sizeof(Value) * (((Gen *)h)->nloc + ((Gen *)h)->nstate);
+    case T_GEN
+        : return (long)sizeof(Gen) + (long)sizeof(Value) * (((Gen *)h)->nloc + ((Gen *)h)->nstate);
     default: return 48;
     }
 }

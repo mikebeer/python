@@ -1025,7 +1025,11 @@ static Node *fstring_parts(const char *s, long n, int raw, int line)
         int c = s[i];
         if (c == '{' && i + 1 < n && s[i + 1] == '{') { buf_addc(&lit, '{'); i += 2; continue; }
         if (c == '}' && i + 1 < n && s[i + 1] == '}') { buf_addc(&lit, '}'); i += 2; continue; }
-        if (c == '\\' && !raw && i + 1 < n) { buf_addc(&lit, c); buf_addc(&lit, s[i + 1]); i += 2; continue; }
+        if (c == '\\' && !raw && i + 1 < n) { buf_addc(&lit, c);
+            buf_addc(&lit, s[i + 1]);
+            i += 2;
+            continue;
+        }
         if (c == '{') {
             long st = i + 1, j = st;
             int depth = 0, q = 0, conv = 0;

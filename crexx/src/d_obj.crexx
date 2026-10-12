@@ -675,6 +675,10 @@ hashkey: procedure = .string
       end
       return "o" || x
     end
+    when k = K_LIST | k = K_DICT | k = K_SET then do
+      r = raise_exc(C_TYPEERROR, "unhashable type: '" || type_name(x) || "'")
+      return "?"
+    end
     otherwise return "o" || x
   end
   return "o" || x

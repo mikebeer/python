@@ -78,8 +78,11 @@ static void unbound_error(Var *v)
     if (v->kind == VK_GLOBAL || v->kind == VK_NS)
         throw_new(cls_NameError, "name '%.80s' is not defined", v->name->s);
     if (v->kind == VK_FREE)
-        throw_new(cls_NameError, "cannot access free variable '%.80s' where it is not associated with a value in enclosing scope", v->name->s);
-    throw_new(cls_UnboundLocalError, "cannot access local variable '%.80s' where it is not associated with a value", v->name->s);
+        throw_new(cls_NameError,
+            "cannot access free variable '%.80s' where it is not associated with a value in "
+            "enclosing scope", v->name->s);
+    throw_new(cls_UnboundLocalError,
+        "cannot access local variable '%.80s' where it is not associated with a value", v->name->s);
 }
 static Value load_var_slow(Frame *f, Var *v)
 {
@@ -178,7 +181,8 @@ static Value *bind_args(Func *fn, FuncDef *fd, int n, Value *a, int nk, Value *k
     if (n > npos) {
         if (fd->va_slot < 0) {
             if (fd->ndefaults > 0)
-                throw_new(cls_TypeError, "%.80s() takes from %d to %d positional arguments but %d %s given",
+                throw_new(cls_TypeError,
+                    "%.80s() takes from %d to %d positional arguments but %d %s given",
                           fn->name->s, npos - fd->ndefaults, npos, n, n == 1 ? "was" : "were");
             throw_new(cls_TypeError, "%.80s() takes %d positional argument%s but %d %s given",
                       fn->name->s, npos, npos == 1 ? "" : "s", n, n == 1 ? "was" : "were");
@@ -649,7 +653,8 @@ static Value eval_call(Frame *f, Node *n)
             Dict *d;
             long k;
             if (dv.t != T_DICT)
-                throw_new(cls_TypeError, "argument after ** must be a mapping, not %.40s", type_name(dv));
+                throw_new(cls_TypeError, "argument after ** must be a mapping, not %.40s",
+                    type_name(dv));
             d = AS_DICT(dv);
             VPUSH(dv);
             for (k = 0; k < d->used; k++) {
@@ -730,7 +735,8 @@ static void unpack_assign(Frame *f, Node *t, Value x)
     for (i = 0; i < nt; i++) if (t->list[i]->kind == N_STAR) star = i;
     if (star < 0) {
         if (cnt < nt)
-            throw_new(cls_ValueError, "not enough values to unpack (expected %ld, got %ld)", nt, cnt);
+            throw_new(cls_ValueError, "not enough values to unpack (expected %ld, got %ld)", nt,
+                cnt);
         if (cnt > nt)
             throw_new(cls_ValueError, "too many values to unpack (expected %ld)", nt);
         for (i = 0; i < nt; i++) assign_target(f, t->list[i], items[i]);
@@ -739,7 +745,8 @@ static void unpack_assign(Frame *f, Node *t, Value x)
         List *mid;
         Value mv;
         if (cnt < nt - 1)
-            throw_new(cls_ValueError, "not enough values to unpack (expected at least %ld, got %ld)",
+            throw_new(cls_ValueError,
+                "not enough values to unpack (expected at least %ld, got %ld)",
                       nt - 1, cnt);
         for (i = 0; i < star; i++) assign_target(f, t->list[i], items[i]);
         mid = list_new(cnt - star - after);
@@ -883,11 +890,13 @@ static Value eval(Frame *f, Node *n)
                 case C_EQ: r = x == y; break;
                 default: r = x != y; break;
                 }
-            } else if ((left.t == T_ND || right.t == T_ND) && left.t != T_INST && right.t != T_INST && n->name->s[i] <= C_NE) {
+            } else if ((left.t == T_ND || right.t == T_ND) && left.t != T_INST && right.t != T_INST
+                && n->name->s[i] <= C_NE) {
                 Value cv = nd_compare(n->name->s[i], left, right);
                 vsp = base;
                 return cv;
-            } else if (nops == 1 && n->name->s[i] <= C_NE && (left.t == T_INST || right.t == T_INST)) {
+            } else if (nops == 1 && n->name->s[i] <= C_NE
+                && (left.t == T_INST || right.t == T_INST)) {
                 Value rv;
                 if (inst_cmp_value(n->name->s[i], left, right, &rv)) {
                     vsp = base;
@@ -985,7 +994,8 @@ static Value eval(Frame *f, Node *n)
             if (kn->kind == N_DSTAR) {
                 Value sv = eval(f, kn->a);
                 long k;
-                if (sv.t != T_DICT) throw_new(cls_TypeError, "'%.40s' object is not a mapping", type_name(sv));
+                if (sv.t != T_DICT)
+                    throw_new(cls_TypeError, "'%.40s' object is not a mapping", type_name(sv));
                 for (k = 0; k < AS_DICT(sv)->used; k++)
                     if (AS_DICT(sv)->e[k].k.t != T_UNSET)
                         dict_set(d, AS_DICT(sv)->e[k].k, AS_DICT(sv)->e[k].v);
@@ -1031,7 +1041,8 @@ static int exc_matches(Frame *f, Value exc, Node *tn)
             if (l->a[i].t == T_CLASS && class_isa(ec, AS_CLASS(l->a[i]))) return 1;
         return 0;
     }
-    throw_new(cls_TypeError, "catching classes that do not inherit from BaseException is not allowed");
+    throw_new(cls_TypeError,
+        "catching classes that do not inherit from BaseException is not allowed");
     return 0;
 }
 
@@ -1552,7 +1563,9 @@ static int exec(Frame *f, Node *n)
                 Value rhs = eval(f, n->b);
                 if (rhs.t == T_INT && (n->op == B_ADD || n->op == B_SUB)) {
                     long z = n->op == B_ADD ? cur.u.i + rhs.u.i : cur.u.i - rhs.u.i;
-                    if (z <= SI_MAX && z >= -SI_MAX) { f->loc[n->a->var->slot] = mkint(z); return 0; }
+                    if (z <= SI_MAX && z >= -SI_MAX) { f->loc[n->a->var->slot] = mkint(z);
+                        return 0;
+                    }
                 }
                 {
                     Value *base = vsp;

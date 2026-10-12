@@ -1,4 +1,5 @@
 /* Python 3 subset interpreter in portable C89 - the parts are inlined by tools/amalg.sh */
+#include "p0_os.c"
 #include "p0_base.c"
 #include "p1_num.c"
 #include "p2_lex.c"

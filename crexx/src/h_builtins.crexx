@@ -207,7 +207,7 @@ bi_minmax: procedure = .int
   n = ob_n[l % 2]
   if n = 0 then do
     if dflt \= 0 then return dflt
-    return raise_exc(C_VALUEERROR, fname || "() arg is an empty sequence")
+    return raise_exc(C_VALUEERROR, fname || "() iterable argument is empty")
   end
   best = sl[ob_p[l % 2]]
   bestk = best

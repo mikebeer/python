@@ -45,3 +45,20 @@ All 21 tests pass with both. The remaining 0.4 s is mostly reading the 2.7 MB py
 
 The launcher `py` uses `CREXX_VM` if set, else `CREXX`, else `crexx` (default unchanged). The patched `bin/` directory must be a
 complete build tree (the driver locates `rxvme` and the providers/plugins next to itself); the original source tree was not modified.
+
+## Verification
+Both VMs were built from clean copies of CREXX 77ba820c (Release; the patched one with `git apply vm-startup.patch`) and
+the repo's own CTest suite was run on each (labels essential, smoke, comprehensive, `--parallel 4`; qualification and stress
+run separately):
+
+| suite | stock | patched |
+|---|---|---|
+| essential + smoke + comprehensive | 2289 / 2289 pass | 2289 / 2289 pass |
+| qualification + stress | 12 / 12 pass | 12 / 12 pass |
+
+The per-test results are identical; no failures on either side, so the patch needed no change. This includes the interface
+registry tests (`interface_*`, `dynamic_interface_load_rxvm`, `dynamic_interface_load_driver`). Not run: the 186
+`performance-measurement` tests (need a quiescent host and are timing-only).
+
+Re-measured with the final (unchanged) patch via `CREXX_VM`: `print(1)` 1.65 s / 2.92 s stock vs 0.33 s / 0.30 s patched;
+21-test suite 73 s stock vs 30 s patched, 21/21 pass on both.

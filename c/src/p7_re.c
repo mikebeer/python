@@ -238,7 +238,9 @@ static int re_rset_hi(const RSet *st, const long *rng, long cp)
     else if ((f & HF_NONSPACE) && !re_cp_space(cp)) hit = 1;
     else {
         for (i = 0; i < st->nrng; i++) {
-            if (cp >= rng[2 * (st->roff + i)] && cp <= rng[2 * (st->roff + i) + 1]) { hit = 1; break; }
+            if (cp >= rng[2 * (st->roff + i)] && cp <= rng[2 * (st->roff + i) + 1]) { hit = 1;
+                break;
+            }
         }
     }
     return hit != (st->neg != 0);
@@ -689,7 +691,9 @@ static void rp_class_escape(RParse *P, long st, int len, RCode *out)
     out->islit = 1; out->cat = 0; out->cp = 0;
     if (len == 2 && rp_simple_escape(c, &cp)) { out->cp = cp; return; }
     if (len == 2 && c != 0 && strchr("dDsSwW", c)) { out->islit = 0; out->cat = c; return; }
-    if (len == 2 && (c == 'x' || c == 'u' || c == 'U')) { out->cp = rp_hex_escape(P, st, c); return; }
+    if (len == 2 && (c == 'x' || c == 'u' || c == 'U')) { out->cp = rp_hex_escape(P, st, c);
+        return;
+    }
     if (len == 2 && c == 'N') {
         rp_charname(P);
     }
@@ -729,7 +733,8 @@ static int rp_class(RParse *P)
     negate = rt_match(&P->t, P->patv, '^');
     for (;;) {
         RCode c1, c2;
-        if (!rt_get(&P->t, P->patv, &st, &len)) rp_fail(P, "unterminated character set", P->t.nstart - here);
+        if (!rt_get(&P->t, P->patv, &st, &len))
+            rp_fail(P, "unterminated character set", P->t.nstart - here);
         if (len == 1 && P->t.s[st] == ']' && nitems > 0) break;
         if (P->t.s[st] == '\\') {
             rp_class_escape(P, st, len, &c1);
@@ -811,7 +816,8 @@ static int rp_escape(RParse *P, long st, int len)
         return ni;
     }
     if (len == 2 && rp_simple_escape(c, &cp)) return rp_lit_cp(P, cp);
-    if (len == 2 && (c == 'x' || c == 'u' || c == 'U')) return rp_lit_cp(P, rp_hex_escape(P, st, c));
+    if (len == 2 && (c == 'x' || c == 'u' || c == 'U'))
+        return rp_lit_cp(P, rp_hex_escape(P, st, c));
     if (len == 2 && c == 'N') {
         rp_charname(P);
     }
@@ -1014,7 +1020,8 @@ static int rp_parse_flags(RParse *P, int ch, long *addp, long *delp)
         }
         for (;;) {
             long flag = re_flagbit(c);
-            if (flag & RE_TYPEF) rp_fail(P, "bad inline flags: cannot turn off flags 'a', 'u' and 'L'", 0);
+            if (flag & RE_TYPEF)
+                rp_fail(P, "bad inline flags: cannot turn off flags 'a', 'u' and 'L'", 0);
             del |= flag;
             if (!rt_get(&P->t, P->patv, &st, &len)) rp_fail(P, "missing :", 0);
             c = len == 1 ? P->t.s[st] : 0;
@@ -1090,7 +1097,8 @@ static int rp_group(RParse *P, int verbose, int nested, int first, int haveitems
             capture = 0;
         } else if (ch == '#') {
             for (;;) {
-                if (P->t.nlen == 0) rp_fail(P, "missing ), unterminated comment", P->t.nstart - start);
+                if (P->t.nlen == 0)
+                    rp_fail(P, "missing ), unterminated comment", P->t.nstart - start);
                 rt_get(&P->t, P->patv, &st, &len);
                 if (len == 1 && P->t.s[st] == ')') break;
             }
@@ -1157,7 +1165,8 @@ static int rp_group(RParse *P, int verbose, int nested, int first, int haveitems
             cy = rp_parse(P, verbose, nested + 1, 0);
             if (rt_match(&P->t, P->patv, '|')) {
                 cn = rp_parse(P, verbose, nested + 1, 0);
-                if (RT_NEXT1(&P->t, '|')) rp_fail(P, "conditional backref with more than two branches", 0);
+                if (RT_NEXT1(&P->t, '|'))
+                    rp_fail(P, "conditional backref with more than two branches", 0);
             }
             if (!rt_match(&P->t, P->patv, ')'))
                 rp_fail(P, "missing ), unterminated subpattern", P->t.nstart - start);
@@ -1172,7 +1181,8 @@ static int rp_group(RParse *P, int verbose, int nested, int first, int haveitems
         } else if (len == 1 && (re_isflagch(ch) || ch == '-')) {
             if (rp_parse_flags(P, ch, &add, &del)) {
                 if (!first || haveitems)
-                    rp_fail(P, "global flags not at the start of the expression", P->t.nstart - start);
+                    rp_fail(P, "global flags not at the start of the expression",
+                        P->t.nstart - start);
                 return -2;
             }
             capture = 0;
@@ -1281,17 +1291,22 @@ static int rp_parse(RParse *P, int verbose, int nested, int first)
                     goto append;
                 }
                 if (nlo > 0) {
-                    if (nlo > 10) re_throw_cls(cls_OverflowError, "the repetition number is too large");
+                    if (nlo > 10)
+                        re_throw_cls(cls_OverflowError, "the repetition number is too large");
                     lo[nlo] = 0;
                     mn = atol(lo);
-                    if (mn >= RE_MAXREP) re_throw_cls(cls_OverflowError, "the repetition number is too large");
+                    if (mn >= RE_MAXREP)
+                        re_throw_cls(cls_OverflowError, "the repetition number is too large");
                 }
                 if (nhi > 0) {
-                    if (nhi > 10) re_throw_cls(cls_OverflowError, "the repetition number is too large");
+                    if (nhi > 10)
+                        re_throw_cls(cls_OverflowError, "the repetition number is too large");
                     hi[nhi] = 0;
                     mx = atol(hi);
-                    if (mx >= RE_MAXREP) re_throw_cls(cls_OverflowError, "the repetition number is too large");
-                    if (mx < mn) rp_fail(P, "min repeat greater than max repeat", P->t.nstart - here);
+                    if (mx >= RE_MAXREP)
+                        re_throw_cls(cls_OverflowError, "the repetition number is too large");
+                    if (mx < mn)
+                        rp_fail(P, "min repeat greater than max repeat", P->t.nstart - here);
                 }
             }
             ofs = P->t.nstart - here + len;
@@ -1771,7 +1786,8 @@ static long re_run(const RProg *pg, const unsigned char *s, long n, long start, 
         case RO_LIT: {
             long ln = ip->b;
             const unsigned char *lp = lits + ip->a;
-            if (pos + ln <= n && s[pos] == lp[0] && (ln == 1 || memcmp(s + pos, lp, (size_t)ln) == 0)) {
+            if (pos + ln <= n && s[pos] == lp[0]
+                && (ln == 1 || memcmp(s + pos, lp, (size_t)ln) == 0)) {
                 pos += ln; pc++; continue;
             }
             break; }
@@ -1987,7 +2003,8 @@ static long re_run(const RProg *pg, const unsigned char *s, long n, long start, 
 
 /* match/search driver.  mode 0 search, 1 match, 2 fullmatch.  na: position where an empty
    match is not allowed.  Returns 1 on a match (caps in rcaps), 0 none; -2 stack overflow. */
-static int re_exec(const RProg *pg, const unsigned char *s, long endpos, long pos, int mode, long na)
+static int re_exec(const RProg *pg, const unsigned char *s, long endpos, long pos, int mode,
+    long na)
 {
     long i, e, start;
     rcaps_ensure(pg->ncaps + 2);
@@ -2081,7 +2098,8 @@ static Value re_compile_new(Value patv, long flags)
     root = rp_parse_sub(&P, (flags & RF_X) != 0, 0);
     if (P.gflags & RF_L) re_throw_cls(cls_ValueError, "cannot use LOCALE flag with a str pattern");
     if (!(P.gflags & RF_A)) P.gflags |= RF_U;
-    else if (P.gflags & RF_U) re_throw_cls(cls_ValueError, "ASCII and UNICODE flags are incompatible");
+    else if (P.gflags & RF_U)
+        re_throw_cls(cls_ValueError, "ASCII and UNICODE flags are incompatible");
     if (P.t.nlen != 0) rp_fail(&P, "unbalanced parenthesis", 0);
     for (k = 0; k < P.ncr; k++) {
         if (P.cr_gid[k] > P.ng) {
@@ -2095,7 +2113,11 @@ static Value re_compile_new(Value patv, long flags)
     rc_emit(&P, RO_MATCH, 0, 0, 0, 0, 0);
     blob = rc_build(&P, root, P.gflags);
 #ifdef RE_DUMP
-    { long q; for (q = 0; q < P.nins; q++) fprintf(stderr, "%3ld: op=%ld a=%ld b=%ld c=%ld d=%ld e=%ld\n", q, P.ins[q].op, P.ins[q].a, P.ins[q].b, P.ins[q].c, P.ins[q].d, P.ins[q].e); }
+    { long q;
+        for (q = 0; q < P.nins; q++)
+            fprintf(stderr, "%3ld: op=%ld a=%ld b=%ld c=%ld d=%ld e=%ld\n", q, P.ins[q].op,
+            P.ins[q].a, P.ins[q].b, P.ins[q].c, P.ins[q].d, P.ins[q].e);
+    }
 #endif
     VPUSH(blob);
     dict = mkobj(dict_new(), T_DICT);
@@ -2135,11 +2157,13 @@ static Value re_get_pattern(Value patv, Value flagsv)
         flags = flagsv.u.i;
     }
     if (re_is_pattern(patv)) {
-        if (flags) throw_new(cls_ValueError, "cannot process flags argument with a compiled pattern");
+        if (flags)
+            throw_new(cls_ValueError, "cannot process flags argument with a compiled pattern");
         return patv;
     }
     if (patv.t == T_INST && AS_INST(patv)->pay.t == T_STR) patv = AS_INST(patv)->pay;
-    if (patv.t != T_STR) throw_new(cls_TypeError, "first argument must be string or compiled pattern");
+    if (patv.t != T_STR)
+        throw_new(cls_TypeError, "first argument must be string or compiled pattern");
     buf_init(&kb);
     sprintf(tmp, "%ld:", flags);
     buf_add(&kb, tmp);
@@ -2220,7 +2244,8 @@ BI(mt_group)
         Value tv = mkobj(t, T_TUPLE);
         VPUSH(tv);
         for (i = 1; i < x->n; i++) t->a[i - 1] = NONE_V;
-        for (i = 1; i < x->n; i++) t->a[i - 1] = re_m_group_val(A(0), caps, re_m_index(A(0), A(i), ng));
+        for (i = 1; i < x->n; i++)
+            t->a[i - 1] = re_m_group_val(A(0), caps, re_m_index(A(0), A(i), ng));
         vsp--;
         return tv;
     }
@@ -2489,7 +2514,8 @@ static void re_parse_template(Value replv, Value patv, RTpl *T)
             if (tk.nlen == 1 && re_isdigitc(tk.s[tk.nstart])) {
                 esc[el++] = (char)tk.s[tk.nstart];
                 rt_advance(&tk, replv);
-                if (re_isoctc(c) && re_isoctc(esc[2]) && tk.nlen == 1 && re_isoctc(tk.s[tk.nstart])) {
+                if (re_isoctc(c) && re_isoctc(esc[2]) && tk.nlen == 1 && re_isoctc(tk.s[tk.nstart]))
+                    {
                     long v;
                     esc[el++] = (char)tk.s[tk.nstart];
                     rt_advance(&tk, replv);
@@ -2603,17 +2629,20 @@ static Value pat_self(Args *x)
 BI(pt_match)
 {
     Value p = pat_self(x);
-    return re_do_match(p, re_argk(x, 1, "string"), re_argk(x, 2, "pos"), re_argk(x, 3, "endpos"), 1);
+    return re_do_match(p, re_argk(x, 1, "string"), re_argk(x, 2, "pos"), re_argk(x, 3, "endpos"),
+        1);
 }
 BI(pt_fullmatch)
 {
     Value p = pat_self(x);
-    return re_do_match(p, re_argk(x, 1, "string"), re_argk(x, 2, "pos"), re_argk(x, 3, "endpos"), 2);
+    return re_do_match(p, re_argk(x, 1, "string"), re_argk(x, 2, "pos"), re_argk(x, 3, "endpos"),
+        2);
 }
 BI(pt_search)
 {
     Value p = pat_self(x);
-    return re_do_match(p, re_argk(x, 1, "string"), re_argk(x, 2, "pos"), re_argk(x, 3, "endpos"), 0);
+    return re_do_match(p, re_argk(x, 1, "string"), re_argk(x, 2, "pos"), re_argk(x, 3, "endpos"),
+        0);
 }
 
 typedef struct RIt { long pos, endpos, na; int done; } RIt;
@@ -2645,7 +2674,8 @@ static Value re_findall(Value patv, Value strv, Value posv, Value endv)
         if (ng == 0) {
             list_push(res, mkstr(s->s + rcaps[0], rcaps[1] - rcaps[0]));
         } else if (ng == 1) {
-            if (rcaps[2] >= 0 && rcaps[3] >= 0) list_push(res, mkstr(s->s + rcaps[2], rcaps[3] - rcaps[2]));
+            if (rcaps[2] >= 0 && rcaps[3] >= 0)
+                list_push(res, mkstr(s->s + rcaps[2], rcaps[3] - rcaps[2]));
             else list_push(res, mkstr("", 0));
         } else {
             List *t = tuple_new(ng);
@@ -3021,11 +3051,13 @@ BI(re_error_init)
 {
     Value msg, pat, pos;
     Inst *in;
-    if (x->n < 1 || A(0).t != T_INST) throw_new(cls_TypeError, "descriptor '__init__' requires an exception");
+    if (x->n < 1 || A(0).t != T_INST)
+        throw_new(cls_TypeError, "descriptor '__init__' requires an exception");
     msg = re_argk(x, 1, "msg");
     pat = re_argk(x, 2, "pattern");
     pos = re_argk(x, 3, "pos");
-    if (msg.t == T_UNSET) throw_new(cls_TypeError, "error.__init__() missing 1 required positional argument: 'msg'");
+    if (msg.t == T_UNSET)
+        throw_new(cls_TypeError, "error.__init__() missing 1 required positional argument: 'msg'");
     in = AS_INST(A(0));
     if (msg.t != T_STR) {
         msg = py_str(msg);
@@ -3085,8 +3117,10 @@ static void re_init(void)
     def_bi(cls_re_match, "span", mt_span); def_bi(cls_re_match, "expand", mt_expand);
     def_bi(cls_re_match, "__repr__", mt_repr); def_bi(cls_re_match, "__bool__", mt_bool);
     def_bi(cls_re_match, "__copy__", mt_self); def_bi(cls_re_match, "__deepcopy__", pt_deepcopy);
-    amap_set(&cls_re_match->ns, intern_c("lastgroup"), mk_prop(T_PROP, mkbuiltin("lastgroup", mt_lastgroup), UNSET_V));
-    amap_set(&cls_re_match->ns, intern_c("regs"), mk_prop(T_PROP, mkbuiltin("regs", mt_regs), UNSET_V));
+    amap_set(&cls_re_match->ns, intern_c("lastgroup"),
+        mk_prop(T_PROP, mkbuiltin("lastgroup", mt_lastgroup), UNSET_V));
+    amap_set(&cls_re_match->ns, intern_c("regs"),
+        mk_prop(T_PROP, mkbuiltin("regs", mt_regs), UNSET_V));
     cls_re_match->flags |= CF_PROPS;
     mod_val(m, "Match", mkobj(cls_re_match, T_CLASS));
 

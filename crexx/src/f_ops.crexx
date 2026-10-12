@@ -23,6 +23,17 @@ tofloat: procedure = .float
 
 err_binop: procedure = .int
   arg sym = .string, x = .int, y = .int
+  kx = .int
+  ky = .int
+  kx = 0
+  ky = 0
+  if x > 0 & x // 2 = 0 then kx = ob_k[x % 2]
+  if y > 0 & y // 2 = 0 then ky = ob_k[y % 2]
+  do
+    if sym == "+" & (kx = K_STR | kx = K_LIST | kx = K_TUPLE) then return raise_exc(C_TYPEERROR, "can only concatenate " || type_name(x) || " (not " || '"' || type_name(y) || '"' || ") to " || type_name(x))
+    if sym == "*" & (kx = K_STR | kx = K_LIST | kx = K_TUPLE) then return raise_exc(C_TYPEERROR, "can't multiply sequence by non-int of type '" || type_name(y) || "'")
+    if sym == "*" & (ky = K_STR | ky = K_LIST | ky = K_TUPLE) then return raise_exc(C_TYPEERROR, "can't multiply sequence by non-int of type '" || type_name(x) || "'")
+  end
   return raise_exc(C_TYPEERROR, "unsupported operand type(s) for " || sym || ": '" || type_name(x) || "' and '" || type_name(y) || "'")
 
 op_sym: procedure = .string
@@ -111,7 +122,10 @@ numarith: procedure = .int
         return mkfloat((a as .float) / (b as .float))
       end
       when op = O_FLOORDIV | op = O_MOD then do
-        if b = 0 then return raise_exc(C_ZERODIVISIONERROR, "integer division or modulo by zero")
+        if b = 0 then do
+          if op = O_MOD then return raise_exc(C_ZERODIVISIONERROR, "integer modulo by zero")
+          return raise_exc(C_ZERODIVISIONERROR, "integer division or modulo by zero")
+        end
         q = a % b
         r = a // b
         if r \= 0 & ((r < 0) \= (b < 0)) then do
@@ -163,7 +177,10 @@ numarith: procedure = .int
       return mkfloat(tofloat(x) / tofloat(y))
     end
     when op = O_FLOORDIV | op = O_MOD then do
-      if sy == "0" then return raise_exc(C_ZERODIVISIONERROR, "integer division or modulo by zero")
+      if sy == "0" then do
+        if op = O_MOD then return raise_exc(C_ZERODIVISIONERROR, "integer modulo by zero")
+        return raise_exc(C_ZERODIVISIONERROR, "integer division or modulo by zero")
+      end
       call sdivmod sx, sy
       if sr \== "0" & ((left(sx, 1) == "-") \= (left(sy, 1) == "-")) then do
         if op = O_FLOORDIV then return big_norm(ssub(sq, "1"))

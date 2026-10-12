@@ -83,7 +83,8 @@ static Nd *la_mat(Value v, long *m, long *n)
 {
     Nd *a = np_f(v);
     if (a->nd < 2)
-        throw_new(cls_LinAlgError, "%d-dimensional array given. Array must be at least two-dimensional", a->nd);
+        throw_new(cls_LinAlgError,
+            "%d-dimensional array given. Array must be at least two-dimensional", a->nd);
     if (a->nd > 2) throw_new(cls_NotImplementedError, "linalg: stacked matrices are not supported");
     *m = a->shape[0]; *n = a->shape[1];
     return a;
@@ -139,7 +140,9 @@ static void lu_solve(const double *lu, long n, const long *piv, double *b, long 
     for (k = 0; k < n; k++)
         if (piv[k] != k)
             for (j = 0; j < nrhs; j++) {
-                double t = b[k * nrhs + j]; b[k * nrhs + j] = b[piv[k] * nrhs + j]; b[piv[k] * nrhs + j] = t;
+                double t = b[k * nrhs + j];
+                b[k * nrhs + j] = b[piv[k] * nrhs + j];
+                b[piv[k] * nrhs + j] = t;
             }
     for (i = 0; i < n; i++)
         for (k = 0; k < i; k++) {
@@ -219,7 +222,9 @@ BI(la_solve)
     a = la_sq(A(0), &n);
     b = np_f(A(1));
     if (b->nd < 1 || b->nd > 2 || b->shape[0] != n)
-        throw_new(cls_ValueError, "solve: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature (m,m),(m,n)->(m,n) (size %ld is different from %ld)",
+        throw_new(cls_ValueError,
+            "solve: Input operand 1 has a mismatch in its core dimension 0, with gufunc "
+            "signature (m,m),(m,n)->(m,n) (size %ld is different from %ld)",
                   b->nd > 0 ? b->shape[0] : 0L, n);
     nrhs = b->nd == 1 ? 1 : b->shape[1];
     r = nd_astype(b, ND_FLOAT);
@@ -498,7 +503,10 @@ BI(la_eigvals)
     free(wi);
     /* ascending order is not guaranteed by LAPACK; keep QR deflation order reversed
        so that a triangular matrix returns its diagonal in order */
-    for (i = 0; i < n / 2; i++) { double t = w->dv[i]; w->dv[i] = w->dv[n - 1 - i]; w->dv[n - 1 - i] = t; }
+    for (i = 0; i < n / 2; i++) { double t = w->dv[i];
+        w->dv[i] = w->dv[n - 1 - i];
+        w->dv[n - 1 - i] = t;
+    }
     return ndv(w);
 }
 /* eig: eigenvalues by QR, eigenvectors by solving (A - w I) v = 0 with inverse iteration */
@@ -521,7 +529,10 @@ BI(la_eig)
             throw_new(cls_NotImplementedError, "eig: complex eigenvalues are not supported");
         }
     free(wi);
-    for (i = 0; i < n / 2; i++) { double t = w->dv[i]; w->dv[i] = w->dv[n - 1 - i]; w->dv[n - 1 - i] = t; }
+    for (i = 0; i < n / 2; i++) { double t = w->dv[i];
+        w->dv[i] = w->dv[n - 1 - i];
+        w->dv[n - 1 - i] = t;
+    }
     lu = (double *)xmalloc(sizeof(double) * (size_t)(n * n + n + 1));
     b = lu + n * n;
     piv = (long *)xmalloc(sizeof(long) * (size_t)(n > 0 ? n : 1));
@@ -598,8 +609,14 @@ static void svd_jacobi(double *u, long m, long n, double *s, double *v)
         for (q = p + 1; q < n; q++) if (s[q] > s[mi]) mi = q;
         if (mi != p) {
             double t = s[p]; s[p] = s[mi]; s[mi] = t;
-            for (i = 0; i < m; i++) { t = u[i * n + p]; u[i * n + p] = u[i * n + mi]; u[i * n + mi] = t; }
-            for (i = 0; i < n; i++) { t = v[i * n + p]; v[i * n + p] = v[i * n + mi]; v[i * n + mi] = t; }
+            for (i = 0; i < m; i++) { t = u[i * n + p];
+                u[i * n + p] = u[i * n + mi];
+                u[i * n + mi] = t;
+            }
+            for (i = 0; i < n; i++) { t = v[i * n + p];
+                v[i * n + p] = v[i * n + mi];
+                v[i * n + mi] = t;
+            }
         }
     }
     for (q = 0; q < n; q++)
@@ -712,7 +729,8 @@ BI(la_svd)
             tmp = (double *)xmalloc(sizeof(double) * (size_t)(m * uc + 1));
             valid = (char *)xmalloc((size_t)uc + 1);
             for (j = 0; j < uc; j++) valid[j] = j < r;
-            for (i = 0; i < m; i++) for (j = 0; j < uc; j++) tmp[i * uc + j] = j < r ? u[i * r + j] : 0.0;
+            for (i = 0; i < m; i++) for (j = 0; j < uc; j++)
+                tmp[i * uc + j] = j < r ? u[i * r + j] : 0.0;
             orth_complete(tmp, m, uc, valid);
             memcpy(U->dv, tmp, sizeof(double) * (size_t)(m * uc));
             free(tmp); free(valid);
@@ -721,7 +739,8 @@ BI(la_svd)
             tmp = (double *)xmalloc(sizeof(double) * (size_t)(n * vr + 1));
             valid = (char *)xmalloc((size_t)vr + 1);
             for (j = 0; j < vr; j++) valid[j] = j < r;
-            for (i = 0; i < n; i++) for (j = 0; j < vr; j++) tmp[i * vr + j] = j < r ? vt[j * n + i] : 0.0;
+            for (i = 0; i < n; i++) for (j = 0; j < vr; j++)
+                tmp[i * vr + j] = j < r ? vt[j * n + i] : 0.0;
             orth_complete(tmp, n, vr, valid);
             for (i = 0; i < n; i++) for (j = 0; j < vr; j++) V->dv[j * n + i] = tmp[i * vr + j];
             free(tmp); free(valid);
@@ -874,7 +893,8 @@ BI(la_qr)
     }
     if (strcmp(mode, "r") == 0) {
         R = mat_new(K, n);
-        for (i = 0; i < K; i++) for (j = 0; j < n; j++) R->dv[i * n + j] = j >= i ? a->dv[i * n + j] : 0.0;
+        for (i = 0; i < K; i++) for (j = 0; j < n; j++)
+            R->dv[i * n + j] = j >= i ? a->dv[i * n + j] : 0.0;
         free(vs); free(tau);
         return ndv(R);
     }
@@ -896,7 +916,8 @@ BI(la_qr)
         long rr = qc;
         for (i = 0; i < m; i++) for (j = 0; j < qc; j++) Qo->dv[i * qc + j] = Q->dv[i * m + j];
         R = mat_new(rr, n);
-        for (i = 0; i < rr; i++) for (j = 0; j < n; j++) R->dv[i * n + j] = (j >= i && i < m) ? a->dv[i * n + j] : 0.0;
+        for (i = 0; i < rr; i++) for (j = 0; j < n; j++) R->dv[i * n + j] = (j >= i && i < m)
+            ? a->dv[i * n + j] : 0.0;
         tv[0] = ndv(Qo); tv[1] = ndv(R);
     }
     free(vs); free(tau);
@@ -918,7 +939,8 @@ static double vec_norm(const double *p, long n, long stride, double ord, int ord
         return sqrt(s);
     }
     if (ord == HUGE_VAL) {
-        for (i = 0; i < n; i++) if (fabs(p[i * stride]) > s || p[i * stride] != p[i * stride]) s = fabs(p[i * stride]);
+        for (i = 0; i < n; i++) if (fabs(p[i * stride]) > s || p[i * stride] != p[i * stride])
+            s = fabs(p[i * stride]);
         return s;
     }
     if (ord == -HUGE_VAL) {
@@ -955,11 +977,14 @@ BI(la_norm)
     }
     if (np_has(av)) {
         long ax;
-        if (av.t == T_TUPLE) throw_new(cls_NotImplementedError, "norm: matrix norms over an axis pair are not supported");
+        if (av.t == T_TUPLE)
+            throw_new(cls_NotImplementedError,
+            "norm: matrix norms over an axis pair are not supported");
         ax = axis_norm(need_long(av, "axis"), a->nd);
         {
             long outer = 1, len = a->shape[ax], inner = 1, o, i, sh[ND_MAXD];
-            int k, rn = 0;
+            long k;
+            int rn = 0;
             Nd *r;
             for (k = 0; k < ax; k++) outer *= a->shape[k];
             for (k = ax + 1; k < a->nd; k++) inner *= a->shape[k];
@@ -970,13 +995,15 @@ BI(la_norm)
             r = nd_new(ND_FLOAT, rn, sh);
             for (o = 0; o < outer; o++)
                 for (i = 0; i < inner; i++)
-                    r->dv[o * inner + i] = vec_norm(a->dv + o * len * inner + i, len, inner, ord, ordnone || fro);
+                    r->dv[o * inner + i] = vec_norm(a->dv + o * len * inner + i, len, inner, ord,
+                        ordnone || fro);
             return nd_ret(r);
         }
     }
     if (a->nd <= 1 || (ordnone && !nuc) || fro) {
         double v;
-        if (a->nd > 2 && !ordnone && !fro) throw_new(cls_ValueError, "Improper number of dimensions to norm.");
+        if (a->nd > 2 && !ordnone && !fro)
+            throw_new(cls_ValueError, "Improper number of dimensions to norm.");
         v = vec_norm(a->dv, a->size, 1, ord, ordnone || fro);
         if (keep && a->nd > 0) {
             Nd *r;

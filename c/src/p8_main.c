@@ -128,9 +128,7 @@ int main(int argc, char **argv)
         rc = run_source(src, len);
     } else {
         int prompt = force_i;
-#ifdef PY_POSIX
-        if (isatty(0)) prompt = 1;
-#endif
+        if (host_isatty_stdin()) prompt = 1;
         repl(prompt);
     }
     fflush(stdout);

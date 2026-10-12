@@ -51,7 +51,9 @@ static void init_chars(void)
         ch_hex[i] = 0;
         to_up[i] = to_low[i] = (unsigned char)i;
     }
-    for (p = CS_DIGIT; *p; p++) { ch_digit[(unsigned char)*p] = 1; ch_alnum[(unsigned char)*p] = 1; }
+    for (p = CS_DIGIT; *p; p++) { ch_digit[(unsigned char)*p] = 1;
+        ch_alnum[(unsigned char)*p] = 1;
+    }
     for (p = CS_UP; *p; p++) {
         ch_upper[(unsigned char)*p] = 1; ch_alpha[(unsigned char)*p] = 1;
         ch_alnum[(unsigned char)*p] = 1;
@@ -247,7 +249,8 @@ static void lex_source(const char *src, long len)
                 while (pos < len && (ch_digit[(unsigned char)src[pos]] || src[pos] == '_')) pos++;
                 if (pos < len && src[pos] == '.') {
                     isf = 1; pos++;
-                    while (pos < len && (ch_digit[(unsigned char)src[pos]] || src[pos] == '_')) pos++;
+                    while (pos < len && (ch_digit[(unsigned char)src[pos]] || src[pos] == '_'))
+                        pos++;
                 }
                 if (pos < len && (src[pos] == 'e' || src[pos] == 'E')) {
                     long save = pos;
@@ -292,7 +295,10 @@ static void lex_source(const char *src, long len)
             bs = pos;
             for (;;) {
                 if (pos >= len) syntax_error(line, "unterminated string literal");
-                if (fl && !rw && src[pos] == '{' && pos + 1 < len && src[pos + 1] == '{') { pos += 2; continue; }
+                if (fl && !rw && src[pos] == '{' && pos + 1 < len && src[pos + 1] == '{')
+                    { pos += 2;
+                    continue;
+                }
                 if (fl && src[pos] == '{') {
                     /* replacement field: quotes inside may be nested strings (PEP 701) */
                     int d = 1, pd = 0, inspec = 0;
@@ -306,7 +312,8 @@ static void lex_source(const char *src, long len)
                             while (pos < len) {
                                 if (src[pos] == '\\') { pos += 2; continue; }
                                 if (src[pos] == '\n') line++;
-                                if (src[pos] == q2 && (!tr2 || (pos + 2 < len && src[pos + 1] == q2 &&
+                                if (src[pos] == q2
+                                    && (!tr2 || (pos + 2 < len && src[pos + 1] == q2 &&
                                                                  src[pos + 2] == q2))) break;
                                 pos++;
                             }
