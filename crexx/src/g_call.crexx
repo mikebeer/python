@@ -299,7 +299,11 @@ instantiate: procedure = .int
   r = .int
   fl = .int
   fl = cl_flags[c]
-  if fl // 2 = 1 & (fl // 4) < 2 then return bcall_type(c, base, na, nk)
+  if fl // 2 = 1 & (fl // 4) < 2 then do
+    r = bcall_type(c, base, na, nk)
+    if unw > 0 then return 0
+    return r
+  end
   init = cls_find(c, M___NEW__)
   if init > 0 then return inst_with_new(c, init, base, na, nk)
   if cl_bt[c] > 0 then return inst_native(c, base, na, nk)

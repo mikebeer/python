@@ -148,6 +148,7 @@ clipint: procedure = .int
 
 getitem: procedure = .int
   arg o = .int, ix = .int
+  hkk = .string
   k = .int
   i = .int
   n = .int
@@ -191,7 +192,9 @@ getitem: procedure = .int
     return sl[ob_p[o % 2] + i]
   end
   if k = K_DICT then do
-    e = dict_find(ob_x[o % 2], hashkey(ix))
+    hkk = hashkey(ix)
+    if unw > 0 then return 0
+    e = dict_find(ob_x[o % 2], hkk)
     if e > 0 then return de_val[e]
     if ob_y[o % 2] \= 0 then do
       t = callz(ob_y[o % 2])
@@ -357,6 +360,7 @@ setslice: procedure = .void
 
 delitem: procedure = .void
   arg o = .int, ix = .int
+  hkk = .string
   k = .int
   i = .int
   n = .int
@@ -418,7 +422,9 @@ delitem: procedure = .void
     return
   end
   if k = K_DICT | k = K_SET then do
-    e = dict_del(ob_x[o % 2], hashkey(ix))
+    hkk = hashkey(ix)
+    if unw > 0 then return
+    e = dict_del(ob_x[o % 2], hkk)
     if e = 0 then r = raise_key(ix)
     return
   end

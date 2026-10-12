@@ -844,7 +844,10 @@ bi_hash: procedure = .int
   end
   select
     when k = K_STR then return mkint(strhash(ob_s[x % 2]))
-    when k = K_BYTES then return mkint(strhash(ob_s[x % 2]))
+    when k = K_BYTES then do
+      if ob_y[x % 2] = 1 then return raise_exc(C_TYPEERROR, "unhashable type: 'bytearray'")
+      return mkint(strhash(ob_s[x % 2]))
+    end
     when k = K_COMPLEX then do
       h = hash_float(ob_f[x % 2]) + 1000003 * hash_float(ob_g[x % 2])
       if h = -1 then h = -2
@@ -857,15 +860,14 @@ bi_hash: procedure = .int
       return mkint(hash_bigstr(ob_s[x % 2]))
     end
     when k = K_TUPLE then do
-      h = 3430008
-      do i = 0 to ob_n[x % 2] - 1
-        r = bi_hash(sl[ob_p[x % 2] + i])
-        if r = 0 then return 0
-        h = (h * 1000003 + ival(r)) // 1000000007
-      end
+      if tup_xx(x) = 0 then return 0
+      h = hxv[1]
+      if h >= 2147483648 then h = h - 4294967296
+      h = h * 4294967296 + hxv[2]
+      if h = -1 then h = 1546275796
       return mkint(h)
     end
-    when k = K_NONE then return mkint(1)
+    when k = K_NONE then return mkint(4238894112)
     when k = K_SET then do
       /* frozenset: CPython's algorithm (_shuffle_bits); set is unhashable */
       if is_fs(x) = 0 then return raise_exc(C_TYPEERROR, "unhashable type: 'set'")

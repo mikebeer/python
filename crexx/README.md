@@ -66,8 +66,12 @@ numpy's pairwise summation so results agree to the last digit.
 - `frozenset` is its own class (not a subclass of `set`): a `K_SET` object whose `ob_c` is `C_FROZENSET` (or a subclass of it).
   No mutating methods (`AttributeError`), `hash()` follows CPython's `frozenset_hash` (`fs_hash`, `_shuffle_bits` on 64 bits, so
   int-only sets hash like CPython), set operators and `union` etc. return the type of the left operand (`frozenset | set` is a
-  `frozenset`), `copy()` returns the same object, `|=` rebinds. `hash(set)` raises `TypeError`; elements and dict keys are
-  still looked up by the order independent key of `hashkey`.
+  `frozenset`), `copy()` returns the same object, `|=` rebinds. A plain `set`, `list`, `dict` and `bytearray` are unhashable: as a set element, dict key, tuple
+  item in a key, or argument of `dict.get/setdefault/pop/fromkeys`, `hash()` and `frozenset([..])` they raise
+  `TypeError: unhashable type: 'set'` (class name of a subclass unless it defines `__hash__`); `hashkey` (`d_obj`)
+  raises and `dict_put` ignores the key `"?"` so a failed insertion leaves nothing behind. A set probe of
+  `in`, `discard` and `remove` is converted to a frozenset (`hashkeyp`: `{1} in {frozenset({1})}` is True).
+  Dicts and sets are keyed by that text key, not by hash values.
 - Subclassing built-in types: `class X(list | dict | set | frozenset | tuple | str | int | float | bytes | bytearray |
   Exception | object)`. An instance is a native object (`K_LIST`, ...) whose `ob_c` holds the class id; instance
   attributes live in a `K_INST` holder (stem `nat_at`). Operators, `len`, `in`, iteration, `x[i]`, `repr`, `str`,
@@ -110,6 +114,15 @@ results of any type, `__abs__ __round__ __format__ __call__ __enter__ __exit__`,
 `eval`/`exec` run the text in a temporary module whose names are copied from and back to the given namespace dict
 (`globals()` and `locals()` return snapshots; `exec` at module level writes new names back to the module).
 
+## Hash values
+
+`hash()` follows CPython 3.13 for int, bool, big int, float, complex, None (4238894112), tuples (xxHash scheme,
+`tup_xx` in `f_ops.crexx`: 64-bit unsigned arithmetic done on two 32-bit halves, products with 16-bit limbs, because the
+VM multiply does not wrap) and frozensets. The tuple hash is only computed when `hash()` or a `__hash__` method asks for it;
+dict and set lookups with tuple keys use the text key and are not slower. Hashes of str and bytes differ from CPython's
+(randomized there), so a tuple containing a str hashes differently. Set iteration order is still insertion order: emulating
+CPython's table would need a numeric hash on every insertion, which the text-keyed dicts do not compute.
+
 ## Memory management (src/m_gc.crexx)
 
 Generational-style mark and sweep over the object table. Objects born while a "window" (a loop
@@ -134,7 +147,7 @@ references show up as errors).
 - Metaclasses are ignored.
 - `str` holds codepoints (the C interpreter uses byte strings); tracebacks always report line 1.
 - `globals()` / `locals()` are snapshots; `exec` inside a function does not write back to its locals.
-- Sets keep insertion order; `random` does not reproduce CPython's sequence; `time.time` is approximate.
+- Sets keep insertion order (the C interpreter emulates CPython's table); `random` does not reproduce CPython's sequence; `time.time` is approximate.
 - Set union/intersection print in insertion order, CPython orders by hash. UTF-8 decoding with `replace` follows the maximal-subpart rule, but `repr` of unassigned code points uses the table from the C interpreter (Unicode version differences remain).
 - Recursion limit is about 900 frames; a stock VM pays about 2 s per run linking the 3.1 MB bytecode (see `STARTUP.md`).
 

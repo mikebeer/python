@@ -1,0 +1,67 @@
+set in set TypeError unhashable type: 'set'
+list in set TypeError unhashable type: 'list'
+dict in set TypeError unhashable type: 'dict'
+bytearray in set TypeError unhashable type: 'bytearray'
+tuple with set TypeError unhashable type: 'set'
+tuple with list TypeError unhashable type: 'list'
+dict key set TypeError unhashable type: 'set'
+dict key list TypeError unhashable type: 'list'
+dict key bytearray TypeError unhashable type: 'bytearray'
+dict key dict TypeError unhashable type: 'dict'
+add set TypeError unhashable type: 'set'
+frozenset([set]) TypeError unhashable type: 'set'
+set([list]) TypeError unhashable type: 'list'
+dict get TypeError unhashable type: 'set'
+dict get default TypeError unhashable type: 'list'
+dict setdefault TypeError unhashable type: 'set'
+dict pop TypeError unhashable type: 'set'
+dict contains set TypeError unhashable type: 'set'
+dict getitem TypeError unhashable type: 'set'
+dict del TypeError unhashable type: 'set'
+dict fromkeys TypeError unhashable type: 'set'
+hash set TypeError unhashable type: 'set'
+hash list TypeError unhashable type: 'list'
+hash dict TypeError unhashable type: 'dict'
+hash bytearray TypeError unhashable type: 'bytearray'
+hash tuple set TypeError unhashable type: 'set'
+hash tuple list TypeError unhashable type: 'list'
+{1: 2} {1}
+True
+True
+False
+{5}
+{5}
+KeyError {8}
+list probe TypeError unhashable type: 'list'
+a
+True True
+1 7
+set subclass TypeError unhashable type: 'S'
+1
+5740354900026072187
+-6644214454873602895 -3550055125485641917 6794810172467074373 529344067295497451
+-8753497827991233192 8078679518589016365 960947337673586213 -5164621852614943976
+9181102132670838864 8339407666115719588 4238894112
+1701133413810848945 -8458139203682520985 -2202952180506713952
+1901736143494378007 True
+-1467267874458550984 4510597632111149919 135294473449115980
+-1950498447580522560 -7140843087207658277 -990024714105064924
+8177687115613195268 6307926707605215290
+-2040549277248155741 4479737025582696436
+7362461863971662964
+True
+7191011363678552293 8754814840384484374
+-3886648899224216228 -5032711679363849947
+True
+True 2
+{(1, 2): 'c'}
+True
+133146708735736
+-558064481276695278 -1826646154956904602 -272375401224217160
+6776983852052281967 -2704248722033767810 6611776082492875612
+3819360209092968377 -1826646154956904602
+-67101846648477850
+4411996150312757951
+-8311764866259218337
+True
+4668277689959418524

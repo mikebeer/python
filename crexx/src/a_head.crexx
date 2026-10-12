@@ -473,6 +473,7 @@ init: procedure = .void
   lr = .int[]
   lrn = 0
   fovf = ""
+  hxv = .int[]
   rg_sa = ""
   rg_sb = ""
   rg_sc = ""

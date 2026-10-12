@@ -9,8 +9,13 @@ bmeth: procedure = .int
   select
     when k = K_STR then return meth_str(o, nid, base, na, nk)
     when k = K_LIST then return meth_list(o, nid, base, na, nk)
-    when k = K_DICT then return meth_dict(o, nid, base, na, nk)
-    when k = K_SET then return meth_set(o, nid, base, na, nk)
+    when k = K_DICT | k = K_SET then do
+      /* an unhashable key raises while the method still returns a value: report it as an exception */
+      if k = K_DICT then nid = meth_dict(o, nid, base, na, nk)
+      else nid = meth_set(o, nid, base, na, nk)
+      if unw > 0 then return 0
+      return nid
+    end
     when k = K_TUPLE then return meth_tuple(o, nid, base, na, nk)
     when k = K_RANGE then return meth_range(o, nid, base, na, nk)
     when k = K_SLICE & nid = M_INDICES then return slice_indices(o, ast[base + 1])
@@ -40,7 +45,11 @@ bmeth: procedure = .int
 /* unbound call  type.method(receiver, args...) */
 bmeth_unbound: procedure = .int
   arg c = .int, nid = .int, base = .int, na = .int, nk = .int
-  if c = C_DICT & nid = M_FROMKEYS then return dict_fromkeys(base, na)
+  if c = C_DICT & nid = M_FROMKEYS then do
+    c = dict_fromkeys(base, na)
+    if unw > 0 then return 0
+    return c
+  end
   if nid = M___NEW__ then return cls_new(c, base, na, nk)
   if nid = M_FROMHEX & (c = C_BYTES | c = C_BYTEARRAY) then do
     if c = C_BYTEARRAY then return bytes_fromhex(1, base, na)
@@ -1198,11 +1207,11 @@ meth_set: procedure = .int
       return NONE_OOP
     end
     when nid = M_DISCARD then do
-      r = dict_del(d, hashkey(ast[base + 1]))
+      r = dict_del(d, hashkeyp(ast[base + 1]))
       return NONE_OOP
     end
     when nid = M_REMOVE then do
-      r = dict_del(d, hashkey(ast[base + 1]))
+      r = dict_del(d, hashkeyp(ast[base + 1]))
       if r = 0 then return raise_key(ast[base + 1])
       return NONE_OOP
     end
