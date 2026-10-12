@@ -22,6 +22,30 @@ inst_dict: procedure = .int
   dd_own[ob_x[d % 2]] = o
   return d
 
+/* obj.__dict__ = d: the instance attributes become the entries of d */
+inst_setdict: procedure = .void
+  arg o = .int, d = .int
+  c = .int
+  i = .int
+  e = .int
+  r = .int
+  if kind_of(d) \= K_DICT then do
+    r = raise_exc(C_TYPEERROR, "__dict__ must be set to a dictionary, not a '" || type_name(d) || "'")
+    return
+  end
+  c = ob_c[o % 2]
+  do i = 1 to nis
+    if is_c[i] = c then r = inst_del(o, is_n[i])
+  end
+  e = dd_head[ob_x[d % 2]]
+  do while e > 0
+    if de_live[e] = 1 then do
+      if kind_of(de_key[e]) = K_STR then call inst_set o, nameid(ob_s[de_key[e] % 2]), de_val[e]
+    end
+    e = de_next[e]
+  end
+  return
+
 /* class attributes (own table only) */
 cls_dict: procedure = .int
   arg c = .int

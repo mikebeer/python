@@ -335,6 +335,7 @@ hybrid_get: procedure = .int
   if h == "" then do
     h = "0"
     rel = changestr(".", mname, "/")
+    if mname == "os.path" then rel = "_ospath"
     found = 0
     do i = 2 to nsyspath
       if found = 0 then found = imp_find(syspath[i], rel)
@@ -708,6 +709,10 @@ bcall_os: procedure = .int
   end
   if bid = BI_OS_PATH_EXISTS | bid = BI_OS_PATH_ISFILE | bid = BI_OS_PATH_ISDIR then do
     if s == "" then return FALSE_OOP
+    if bid = BI_OS_PATH_ISDIR then return mkbool(rxfs..isdir(s))
+    if bid = BI_OS_PATH_ISFILE then do
+      if rxfs..isdir(s) = 1 then return FALSE_OOP
+    end
     return mkbool(file_exists(s))
   end
   if bid = BI_OS_PATH_BASENAME | bid = BI_OS_PATH_DIRNAME | bid = BI_OS_PATH_SPLIT then do

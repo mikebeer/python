@@ -46,3 +46,37 @@ def mkframe(info):
 
 def mktb(info):
     return traceback(info)
+
+
+class GenericAlias:
+    """list[int], dict[str, int]: the result of subscripting a built-in class"""
+
+    def __init__(self, origin, args):
+        self.__origin__ = origin
+        if not isinstance(args, tuple):
+            args = (args,)
+        self.__args__ = args
+
+    def __repr__(self):
+        parts = []
+        for a in self.__args__:
+            if a is Ellipsis:
+                parts.append('...')
+            elif isinstance(a, type):
+                parts.append(a.__name__)
+            else:
+                parts.append(repr(a))
+        return self.__origin__.__name__ + '[' + ', '.join(parts) + ']'
+
+    def __call__(self, *args, **kw):
+        return self.__origin__(*args, **kw)
+
+    def __eq__(self, other):
+        return isinstance(other, GenericAlias) and self.__origin__ is other.__origin__ and self.__args__ == other.__args__
+
+    def __hash__(self):
+        return hash((id(self.__origin__), self.__args__))
+
+
+def mkalias(t):
+    return GenericAlias(t[0], t[1])

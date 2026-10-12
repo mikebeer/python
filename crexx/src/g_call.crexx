@@ -455,6 +455,10 @@ getattr_obj: procedure = .int
     if nid = M___MODULE__ then return mkstr(modname_of(cl_mod[c]))
     if nid = M___DOC__ then return NONE_OOP
     if nid = M___CLASS__ then return cl_obj[C_TYPE]
+    if cl_meta[c] > 0 then do
+      v = cls_find(cl_meta[c], nid)
+      if v > 0 then return bind_attr(v, o, cl_meta[c])
+    end
     ix = c
     if cl_flags[c] // 2 \= 1 then ix = cl_bt[c]
     if ix = C_OBJECT & nid \= M___NEW__ then ix = 0
@@ -535,6 +539,7 @@ getattr_obj: procedure = .int
   if k = K_FILE then do
     if nid = M_NAME then return mkstr(ob_s[o % 2])
     if nid = M_CLOSED then return mkbool(ob_c[o % 2])
+    if nid = M_MODE & ob_x[o % 2] > 3 then return mkstr(fl_mstr[ob_x[o % 2]])
   end
   if k = K_ARRAY then do
     v = np_attr(o, nid)
@@ -784,6 +789,10 @@ setattr_obj: procedure = .void
         r = call2(ob_y[p % 2], o, v)
         return
       end
+    end
+    if nid = M___DICT__ then do
+      call inst_setdict o, v
+      return
     end
     p = cls_find(c, M___SETATTR__)
     if p > 0 & nid \= M___CLASS__ then do

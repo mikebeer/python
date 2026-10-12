@@ -471,6 +471,14 @@ init: procedure = .void
   fl_mode = .string[]
   fl_txt = .string[]
   fl_pos = .int[]
+  fl_bin = .int[]
+  fl_rd = .int[]
+  fl_wr = .int[]
+  fl_ap = .int[]
+  fl_dirty = .int[]
+  fl_mstr = .string[]
+  fl_name = .string[]
+  bin_ok = 1
   /* ---- big numbers and floats ---- */
   bq = ""
   brm = ""
@@ -545,6 +553,11 @@ init: procedure = .void
   /* ---- class linearisation ---- */
   cl_mod = .int[]
   cl_bt = .int[]
+  cl_meta = .int[]
+  nckw = 0
+  kw_cd = .int[]
+  kw_name = .string[]
+  kw_node = .int[]
   cl_ms = .int[]
   cl_mn = .int[]
   cl_bs = .int[]
@@ -750,6 +763,7 @@ boot: procedure = .void
   call cls_set C_BASEEXCEPTIONGROUP, M_SPLIT, bi_oop[BI__EG_SPLIT]
   call cls_set C_BASEEXCEPTIONGROUP, M_SUBGROUP, bi_oop[BI__EG_SUBGROUP]
   call cls_set C_OBJECT, M___INIT__, bi_oop[BI__OBJ_INIT]
+  call cls_set C_OBJECT, nameid("__init_subclass__"), bi_oop[BI__OBJ_INIT]
   /* module constants */
   modattr["math.pi"] = mkfloat(parse_flt("3.141592653589793")) as .string
   modattr["math.e"] = mkfloat(parse_flt("2.718281828459045")) as .string

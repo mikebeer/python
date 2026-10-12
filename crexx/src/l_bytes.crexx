@@ -634,6 +634,7 @@ meth_bytes: procedure = .int
       l = mklist(8)
       m = 0
       if na >= 1 then m = truthy(ast[base + 1])
+      if kwarg(base, na, nk, "keepends") \= 0 then m = truthy(kwarg(base, na, nk, "keepends"))
       n = length(s)
       i = 1
       do while i <= n

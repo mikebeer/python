@@ -233,7 +233,22 @@ getitem: procedure = .int
     if m > 0 then return call2(m, o, ix)
     return raise_exc(C_TYPEERROR, "'" || type_name(o) || "' object is not subscriptable")
   end
-  if k = K_CLASS then return o
+  if k = K_CLASS then do
+    m = meta_find(o, M___GETITEM__)
+    if m > 0 then return call2(m, o, ix)
+    m = cls_find(ob_x[o % 2], nameid("__class_getitem__"))
+    if m > 0 then do
+      if kind_of(m) = K_CLSM then m = ob_x[m % 2]
+      if kind_of(m) = K_FUNC then return call2(m, o, ix)
+    end
+    if (cl_flags[ob_x[o % 2]] // 2) = 1 & pos(" " || cl_name[ob_x[o % 2]] || " ", " list dict tuple set frozenset type ") > 0 then do
+      m = mktuple(2)
+      sl[ob_p[m % 2]] = o
+      sl[ob_p[m % 2] + 1] = ix
+      return cx_call1_in("_intro", "mkalias", m)
+    end
+    return o
+  end
   return raise_exc(C_TYPEERROR, "'" || type_name(o) || "' object is not subscriptable")
 
 raise_key: procedure = .int
@@ -588,6 +603,16 @@ mkiter: procedure = .int
   ob_y[o % 2] = y
   return o
 
+/* a method (or property) of the metaclass of class object o, or 0 */
+meta_find: procedure = .int
+  arg o = .int, nid = .int
+  m = .int
+  if o // 2 \= 0 then return 0
+  if ob_k[o % 2] \= K_CLASS then return 0
+  m = cl_meta[ob_x[o % 2]]
+  if m = 0 then return 0
+  return cls_find(m, nid)
+
 iter_new: procedure = .int
   arg x = .int
   k = .int
@@ -613,6 +638,11 @@ iter_new: procedure = .int
       return mkiter(IT_DITEMS, r, dd_head[ob_x[r % 2]])
     end
     when k = K_GEN | k = K_ITER then return x
+    when k = K_CLASS then do
+      m = meta_find(x, M___ITER__)
+      if m > 0 then return iter_wrap(call1(m, x))
+      return raise_exc(C_TYPEERROR, "'type' object is not iterable")
+    end
     when k = K_INST then do
       m = cls_find(ob_c[x % 2], M___ITER__)
       if m > 0 then do

@@ -1220,6 +1220,16 @@ py_contains: procedure = .int
     when k = K_RANGE then do
       return range_contains(c, x)
     end
+    when k = K_CLASS then do
+      m = meta_find(c, M___CONTAINS__)
+      if m > 0 then do
+        r = call2(m, c, x)
+        if r = 0 then return 0
+        return truthy(r)
+      end
+      call raise_exc C_TYPEERROR, "argument of type 'type' is not iterable"
+      return 0
+    end
     when k = K_INST then do
       m = cls_find(ob_c[c % 2], M___CONTAINS__)
       if m > 0 then do

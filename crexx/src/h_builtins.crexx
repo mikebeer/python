@@ -179,6 +179,10 @@ bi_len: procedure = .int
         return m
       end
     end
+    when k = K_CLASS then do
+      m = meta_find(x, M___LEN__)
+      if m > 0 then return call1(m, x)
+    end
     otherwise nop
   end
   return raise_exc(C_TYPEERROR, "object of type '" || type_name(x) || "' has no len()")

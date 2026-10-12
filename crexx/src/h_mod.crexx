@@ -10,6 +10,69 @@ mk_file: procedure = .int
   ob_c[o % 2] = 0
   return o
 
+/* whole content of a file as a string with one character per byte; bin_ok = 0 when it cannot be opened */
+bin_load: procedure = .string
+  arg fn = .string
+  fid = .int
+  rcx = .int
+  m = .string
+  b = .binary
+  cnt = .int
+  acc = .string
+  h = .string
+  fid = 0
+  m = "rb"
+  bin_ok = 1
+  assembler fopen fid, fn, m
+  if fid = 0 then do
+    bin_ok = 0
+    return ""
+  end
+  acc = ""
+  do forever
+    cnt = 32768
+    assembler freadb b, fid, cnt
+    h = bin2x(b)
+    if length(h) = 0 then leave
+    acc = acc || x2c(h)
+  end
+  assembler fclose rcx, fid
+  return acc
+
+/* write the string s (one character per byte) as the whole content of file fn; 0 when it cannot be opened */
+bin_save: procedure = .int
+  arg fn = .string, s = .string
+  fid = .int
+  rcx = .int
+  m = .string
+  b = .binary
+  i = .int
+  n = .int
+  fid = 0
+  m = "wb"
+  assembler fopen fid, fn, m
+  if fid = 0 then return 0
+  i = 1
+  do while i <= length(s)
+    n = length(s) - i + 1
+    if n > 16384 then n = 16384
+    b = x2bin(c2x(substr(s, i, n)))
+    assembler fwriteb fid, b
+    i = i + n
+  end
+  assembler fclose rcx, fid
+  return 1
+
+/* write the in-memory content of a binary file back to disk */
+bin_flush: procedure = .void
+  arg id = .int
+  r = .int
+  if fl_dirty[id] = 1 then do
+    r = bin_save(fl_name[id], fl_txt[id])
+    fl_dirty[id] = 0
+  end
+  return
+
 bi_open: procedure = .int
   arg base = .int, na = .int, nk = .int
   fn = .string
@@ -24,6 +87,7 @@ bi_open: procedure = .int
   nl = .int
   id = .int
   v = .int
+  plus = .int
   if na < 1 then return nargs_err("open", na, 1, 2)
   if kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "expected str, bytes or os.PathLike object, not " || type_name(ast[base + 1]))
   fn = ob_s[ast[base + 1] % 2]
@@ -38,7 +102,47 @@ bi_open: procedure = .int
   fl_mode[id] = md
   fl_pos[id] = 1
   fl_txt[id] = ""
+  fl_bin[id] = 0
+  fl_mstr[id] = mode
+  fl_name[id] = fn
   fid = 0
+  if pos("b", mode) > 0 then do
+    /* binary file: the whole content lives in memory, written back on flush and close */
+    plus = 0
+    if pos("+", mode) > 0 then plus = 1
+    fl_bin[id] = 1
+    fl_mode[id] = "r"
+    fl_rd[id] = 0
+    fl_wr[id] = 0
+    fl_ap[id] = 0
+    fl_dirty[id] = 0
+    if md == "r" | plus = 1 then fl_rd[id] = 1
+    if md \== "r" | plus = 1 then fl_wr[id] = 1
+    if md == "a" then fl_ap[id] = 1
+    if md == "r" | md == "a" then do
+      acc = bin_load(fn)
+      if bin_ok = 0 & md == "r" then do
+        nfl = nfl - 1
+        return raise_exc(C_FILENOTFOUNDERROR, "[Errno 2] No such file or directory: " || repr_str(fn))
+      end
+      fl_txt[id] = acc
+      if md == "a" then fl_pos[id] = length(acc) + 1
+    end
+    else do
+      if md == "x" then do
+        acc = bin_load(fn)
+        if bin_ok = 1 then do
+          nfl = nfl - 1
+          return raise_exc(C_FILEEXISTSERROR, "[Errno 17] File exists: " || repr_str(fn))
+        end
+      end
+      if bin_save(fn, "") = 0 then do
+        nfl = nfl - 1
+        return raise_exc(C_OSERROR, "[Errno 13] Permission denied: " || repr_str(fn))
+      end
+    end
+    return mk_file(id, fn)
+  end
   if md == "r" then do
     md = "r"
     assembler fopen fid, fn, md
@@ -105,6 +209,10 @@ file_close: procedure = .void
   id = ob_x[fo % 2]
   if ob_c[fo % 2] = 1 | id <= 3 then return
   ob_c[fo % 2] = 1
+  if fl_bin[id] = 1 then do
+    call bin_flush id
+    return
+  end
   if fl_mode[id] \== "r" then do
     fid = fl_h[id]
     assembler fclose rcx, fid
@@ -138,15 +246,18 @@ file_readline: procedure = .int
     return mkstr(line || '0a'x)
   end
   if fl_mode[id] \== "r" then return raise_exc(C_OSERROR, "not readable")
+  if fl_bin[id] = 1 & fl_rd[id] = 0 then return raise_exc(C_OSERROR, "not readable")
   t = fl_txt[id]
   if fl_pos[id] > length(t) then do
     if itermode = 1 then return 0
+    if fl_bin[id] = 1 then return mkbytes("")
     return mkstr("")
   end
   p = pos('0a'x, t, fl_pos[id])
   if p = 0 then p = length(t)
   line = substr(t, fl_pos[id], p - fl_pos[id] + 1)
   fl_pos[id] = p + 1
+  if fl_bin[id] = 1 then return mkbytes(line)
   return mkstr(line)
 
 meth_file: procedure = .int
@@ -163,6 +274,20 @@ meth_file: procedure = .int
   select
     when nid = M_WRITE then do
       if na \= 1 then return nargs_err("write", na, 1, 1)
+      if id > 3 then do
+        if fl_bin[id] = 1 then do
+          if ob_c[o % 2] = 1 then return raise_exc(C_VALUEERROR, "I/O operation on closed file.")
+          if kind_of(ast[base + 1]) \= K_BYTES then return raise_exc(C_TYPEERROR, "a bytes-like object is required, not '" || type_name(ast[base + 1]) || "'")
+          if fl_wr[id] = 0 then return raise_exc(C_OSERROR, "not writable")
+          s = ob_s[ast[base + 1] % 2]
+          if fl_ap[id] = 1 then fl_pos[id] = length(fl_txt[id]) + 1
+          if fl_pos[id] - 1 > length(fl_txt[id]) then fl_txt[id] = fl_txt[id] || copies('00'x, fl_pos[id] - 1 - length(fl_txt[id]))
+          fl_txt[id] = left(fl_txt[id], fl_pos[id] - 1) || s || substr(fl_txt[id], fl_pos[id] + length(s))
+          fl_pos[id] = fl_pos[id] + length(s)
+          fl_dirty[id] = 1
+          return mkint(length(s))
+        end
+      end
       if kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "write() argument must be str, not " || type_name(ast[base + 1]))
       call file_write o, ob_s[ast[base + 1] % 2]
       if unw > 0 then return 0
@@ -186,6 +311,7 @@ meth_file: procedure = .int
         return mkstr(s)
       end
       if fl_mode[id] \== "r" then return raise_exc(C_OSERROR, "not readable")
+      if fl_bin[id] = 1 & fl_rd[id] = 0 then return raise_exc(C_OSERROR, "not readable")
       s = substr(fl_txt[id], fl_pos[id])
       if na >= 1 then do
         if ast[base + 1] \= NONE_OOP then do
@@ -194,7 +320,36 @@ meth_file: procedure = .int
         end
       end
       fl_pos[id] = fl_pos[id] + length(s)
+      if fl_bin[id] = 1 then return mkbytes(s)
       return mkstr(s)
+    end
+    when nid = M_SEEK then do
+      if ob_c[o % 2] = 1 then return raise_exc(C_VALUEERROR, "I/O operation on closed file.")
+      if id <= 3 then return raise_exc(C_OSERROR, "Illegal seek")
+      if na < 1 then return nargs_err("seek", na, 1, 2)
+      n = ival(ast[base + 1])
+      e = 0
+      if na >= 2 then e = ival(ast[base + 2])
+      if e = 1 then n = n + fl_pos[id] - 1
+      else if e = 2 then n = n + length(fl_txt[id])
+      if n < 0 then return raise_exc(C_VALUEERROR, "negative seek value " || n)
+      fl_pos[id] = n + 1
+      return mkint(n)
+    end
+    when nid = M_TELL then do
+      if ob_c[o % 2] = 1 then return raise_exc(C_VALUEERROR, "I/O operation on closed file.")
+      if id <= 3 then return raise_exc(C_OSERROR, "Illegal seek")
+      return mkint(fl_pos[id] - 1)
+    end
+    when nid = M_READABLE then do
+      if id <= 3 then return mkbool(id = 3)
+      if fl_bin[id] = 1 then return mkbool(fl_rd[id])
+      return mkbool(fl_mode[id] == "r")
+    end
+    when nid = M_WRITABLE then do
+      if id <= 3 then return mkbool(id \= 3)
+      if fl_bin[id] = 1 then return mkbool(fl_wr[id])
+      return mkbool(fl_mode[id] \== "r")
     end
     when nid = M_READLINES then do
       l = mklist(8)
@@ -223,6 +378,9 @@ meth_file: procedure = .int
     end
     when nid = M_FLUSH then do
       if id = 1 then call flush_out
+      if id > 3 then do
+        if fl_bin[id] = 1 then call bin_flush id
+      end
       return NONE_OOP
     end
     when nid = M___ENTER__ then return o

@@ -1,9 +1,5 @@
 # tests the CREXX port is expected to skip (read by run_tests.sh when the interpreter path contains 'crexx')
 # 34_hash64: set iteration order of objects with a user __hash__ (CPython open-addressing table; CREXX sets keep insertion order). The hash values themselves are tested by 34b_hash_values
 34_hash64
-# 44_pathlib_fs: needs os.remove/os.rename, binary files and exact isdir/read semantics (CREXX os is smaller)
+# 44_pathlib_fs: text-mode open() of a file without a final newline gets one appended on CREXX (the read path uses freadline; bin_load in h_mod.crexx would fix it)
 44_pathlib_fs
-45_tempfile_shutil_glob
-# 64: needs the time natives (gmtime/strftime/strptime/mktime), getpid, os.path.getsize; 66: live/assignable __dict__, __init_subclass__ keywords, GenericAlias (list[int] is list on CREXX), bytes.splitlines(keepends), iterable enums, binary file modes (tests 65 and 67 pass on CREXX since Build 10)
-64_os_time_native
-66_runtime_gaps

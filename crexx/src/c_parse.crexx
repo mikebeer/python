@@ -2201,8 +2201,12 @@ p_class: procedure = .int
     base = psp
     do while at(")") = 0 & tk_t[tpp] \= T_EOF
       if tk_t[tpp] = T_NAME & tk_t[tpp + 1] = T_OP & tk_s[tpp + 1] == "=" then do
+        nckw = nckw + 1
+        kw_cd[nckw] = ncd + 1
+        kw_name[nckw] = tk_s[tpp]
         tpp = tpp + 2
         dmy = p_test()
+        kw_node[nckw] = dmy
       end
       else do
         dmy = p_test()

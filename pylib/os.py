@@ -90,7 +90,26 @@ def cpu_count():
 
 
 def getpid():
-    return 1
+    # the real process id where /proc is available, else 1
+    try:
+        f = open('/proc/self/stat')
+        try:
+            return int(f.read().split()[0])
+        finally:
+            f.close()
+    except Exception:
+        return 1
+
+
+def getppid():
+    try:
+        f = open('/proc/self/stat')
+        try:
+            return int(f.read().split()[3])
+        finally:
+            f.close()
+    except Exception:
+        return 0
 
 
 def urandom(n):

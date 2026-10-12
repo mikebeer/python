@@ -18,6 +18,7 @@ GCCLIB31 under `__CMS__`.
     tools/deck.py      the deck step (reflow); also --check and --verify
     tools/embed_pylib.py   library to C arrays
     tools/strict.sh    conformance matrix (gcc, clang, sanitizers)
+    tools/vm370_check.py  static VM/370 checks of py_all.c and the decks (make vm370check)
 
 ## 2. Build steps
 
@@ -365,6 +366,40 @@ based, not host-character based:
   32-bit `long`): that run found the `SI_MAX` defect above (10_misc, 19_modules), fixed in
   commit 6e4a7a5; its complete result is not recorded here. Otherwise not run on any
   non-x86-64 platform.
+
+## 9. VM/370 checklist (host-independent part is automated)
+
+Run `make vm370check` (`python3 tools/vm370_check.py`; `--no-nm` without a compiler,
+`--strict-chars` to make character-literal warnings errors). It reads `py_all.c`, `deck/py_deck.c`
+and, if present, `deck/py_deck_embed.c`. Current result: 0 errors, 27 warnings (the character
+literals below). Steps, in order:
+
+1. Static check, must report `ok`: card images at most 71 columns, no tab, form feed,
+   non-ASCII byte, trailing blank or `??`; only C89 headers (`stdio stdlib string ctype math
+   setjmp signal stdarg stddef limits float errno locale time assert`), POSIX headers only under
+   `PY_POSIX`; no `%lld %zu %jd %hhd %a`, no `long long`, no `//`, `inline`, `snprintf`,
+   `strtoll`, stdint types; identifiers at most 31 characters (longest: 26); logical lines at most
+   509 characters (deck: longest 444); the only external symbol is `main` (`nm`), so the 8-character,
+   case-folded linker name limit never applies (a new non-static function would fail the check).
+2. Character literals that name `^ [ ] { } ~ \ | #` are reported as warnings (deck: `^` 5,
+   `[` 19, `]` 27, `{` 28, `}` 32, `|` 12, `~` 3, `\` 31, `#` 10 uses). They are Python syntax
+   characters in the lexer, `repr` and the formatter, not a deck defect: the upload has to map
+   exactly these code points anyway because every card is full of `{ } [ ] #`. Use an ASCII to
+   EBCDIC table that maps them (IBM-1047 or 037 plus `[ ]` fix-ups), or let the cross compiler read
+   ASCII source (the apl route). Do not use trigraphs for the deck: gcc `-Wtrigraphs` makes the
+   strict matrix fail and the token stream would change. A real fix (literal set lookups as in
+   `init_chars`) belongs in the sources and is open.
+3. Cross compile as in section 2 (`-std=c89 -pedantic -m31 -D__CMS__ -D__CHAR_UNSIGNED__
+   -DPY_EMBED_LIBS -DVSTACK_SIZE=40000L`) against the real GCCLIB31 headers; expect to need
+   `-U` or stubs for `clock`, `CLOCKS_PER_SEC`, `strtod`, `%g`, `vsprintf` differences.
+4. Link, then check storage: 16 MB machine, `VSTACK_SIZE` x 16 bytes, heap, 5 MB embedded data;
+   lower `MAX_DEPTH` until deep recursion stops overflowing the C stack.
+5. Run the tests on Hercules (`make deck-embed-test` equivalent): feed the `.py` files through the
+   terminal or a minidisk; compare output after translating back to ASCII. Expected float
+   differences: S/370 hex floating point (point 8 above) unless the compiler emits IEEE.
+6. Decisions still open: CMS file names (`FN FT FM`, point 7), character set strategy (point 1),
+   terminal I/O (line mode, `-i`), `host_*` CMS implementations for `listdir`, `mkdir`, `getpid`,
+   calendar and sockets (section 3).
 
 ## Sets and hashes
 

@@ -49,6 +49,10 @@ deck/py_deck_embed.c: py_embed_all.c tools/deck.py
 	$(PYTHON) tools/deck.py --limit $(DECKCOLS) py_embed_all.c > deck/py_deck_embed.c
 	$(PYTHON) tools/deck.py --verify py_embed_all.c deck/py_deck_embed.c
 
+# static VM/370 checks of py_all.c and the decks (tools/vm370_check.py, PORTING.md section 9)
+vm370check: deck
+	$(PYTHON) tools/vm370_check.py
+
 # fails if a deck line is longer than $(DECKCOLS) columns (or has tabs, non-ASCII, trigraphs)
 deckcheck: deck
 	$(PYTHON) tools/deck.py --check --limit $(DECKCOLS) deck/py_deck.c \
@@ -90,5 +94,5 @@ bench: py
 clean:
 	rm -f py py_embed py_deck py_deck_embed strict_san
 
-.PHONY: posix embed deck deck-embed deckcheck linecheck test deck-test embed-test deck-embed-test \
+.PHONY: vm370check posix embed deck deck-embed deckcheck linecheck test deck-test embed-test deck-embed-test \
         strict bench clean

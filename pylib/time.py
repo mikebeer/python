@@ -68,7 +68,11 @@ def tzset():
 
 
 thread_time = _t.process_time
-thread_time_ns = _t.process_time_ns
+if hasattr(_t, 'process_time_ns'):
+    thread_time_ns = _t.process_time_ns
+else:
+    def thread_time_ns():
+        return int(_t.process_time() * 1000000000)
 CLOCK_REALTIME = 0
 CLOCK_MONOTONIC = 1
 
@@ -78,4 +82,6 @@ def clock_gettime(clk_id):
 
 
 def clock_gettime_ns(clk_id):
-    return _t.time_ns() if clk_id == 0 else _t.monotonic_ns()
+    if clk_id == 0:
+        return _t.time_ns()
+    return _t.monotonic_ns() if hasattr(_t, 'monotonic_ns') else int(_t.monotonic() * 1000000000)

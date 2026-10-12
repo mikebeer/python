@@ -1215,6 +1215,8 @@ exec_class: procedure = .void
   nb = .int
   b = .int
   isf = .int
+  nk = .int
+  base = .int
   cd = n_a[n]
   bc = C_OBJECT
   bl_n = 0
@@ -1247,6 +1249,10 @@ exec_class: procedure = .void
   cl_dflt[c] = cl_dflt[bc]
   cobj = cl_obj[c]
   cd_obj[cd] = cobj
+  isf = 0
+  do j = 1 to nb
+    if isf = 0 & bl_a[j] \= C_OBJECT then isf = cls_find(bl_a[j], nameid("__init_subclass__"))
+  end
   size = cd_ns[cd]
   nf = alloc_frame(size)
   vp[nf + 1] = fb
@@ -1258,16 +1264,41 @@ exec_class: procedure = .void
       if v \= 0 then call cls_set c, nameid(cv_name[j]), v
     end
   end
-  if bc \= C_OBJECT then do
-    isf = cls_find(bc, nameid("__init_subclass__"))
-    if isf > 0 then do
-      if kind_of(isf) = K_CLSM then isf = ob_x[isf % 2]
-      if kind_of(isf) = K_FUNC then do
-        r = call1(isf, cobj)
-        if r = 0 then return
+  /* class keywords: metaclass=... selects the metaclass, the others go to __init_subclass__ */
+  nk = 0
+  base = asp
+  call push cobj
+  do j = 1 to nckw
+    if kw_cd[j] = cd then do
+      r = ev(kw_node[j], fb)
+      if r = 0 then do
+        asp = base
+        return
+      end
+      if kw_name[j] == "metaclass" then do
+        if kind_of(r) = K_CLASS then do
+          if ob_x[r % 2] \= C_TYPE then cl_meta[c] = ob_x[r % 2]
+        end
+      end
+      else do
+        asp = asp + 1
+        ast[asp] = r
+        asn[asp] = kw_name[j]
+        nk = nk + 1
       end
     end
   end
+  if isf > 0 then do
+    if kind_of(isf) = K_CLSM then isf = ob_x[isf % 2]
+    if kind_of(isf) = K_FUNC then do
+      r = docall(isf, base, 1, nk)
+      if r = 0 then do
+        asp = base
+        return
+      end
+    end
+  end
+  asp = base
   v = cobj
   do i = n_e[n] to 1 by -1
     r = ev(al[n_d[n] + i - 1], fb)
