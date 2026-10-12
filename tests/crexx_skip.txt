@@ -1,0 +1,3 @@
+# tests the CREXX port is expected to skip (read by run_tests.sh when the interpreter path contains 'crexx')
+# 34_hash64: 64-bit hash values of user __hash__ and the resulting set order (C interpreter only)
+34_hash64

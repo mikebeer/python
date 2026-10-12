@@ -525,8 +525,7 @@ static unsigned long py_hash(Value v)
         Value *m = class_find(AS_INST(v)->cls, S_hash);
         if (m) {
             Value r = call1(*m, v);
-            if (r.t == T_INT || r.t == T_BOOL) return (unsigned long)(r.u.i == -1 ? -2L : r.u.i);
-            if (r.t == T_BIG) return hash_fold(int_hash_mod(r));
+            if (r.t == T_INT || r.t == T_BOOL || r.t == T_BIG) return hash_fold(user_hash_val(r));
             throw_new(cls_TypeError, "__hash__ method should return an integer");
         }
         if (class_find(AS_INST(v)->cls, S_eq))

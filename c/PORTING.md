@@ -375,3 +375,12 @@ xxHash scheme and `frozenset` the `_shuffle_bits` scheme. Both need a 64-bit `un
 32-bit variants, the sets work the same but the iteration order of colliding keys can differ
 from CPython. `Decimal.__hash__` (`pylib/decimal.py`) uses the same modulo-(2**61-1) scheme as
 `Fraction`.
+
+A user `__hash__` result is taken as CPython does (`user_hash_val` in `src/p1_num.c`): an int that
+fits a signed 64-bit value is the hash itself (-1 becomes -2), anything larger is reduced with
+`hash(int)` (modulo 2**61-1), a non-int raises TypeError. Such instances count as reproducible
+keys (`key_det`), so sets of them follow the CPython table order; instances without `__hash__`
+(identity hash) still switch the set to insertion order. With a 32-bit `unsigned long` the value
+is truncated to its low word (self-consistent, order can differ). `tests/34_hash64.py` is C only:
+`tests/crexx_skip.txt` is read by `run_tests.sh` when the interpreter path contains `crexx`, and
+`SKIPFILE=tests/m32_skip.txt` skips it (and `33_hashing`) for a real 32-bit `long`.

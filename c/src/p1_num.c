@@ -752,6 +752,14 @@ static Value complex_hash_exact(double re, double im)
     if (r.t == T_INT && r.u.i == -1) r = mkint(-2);
     return r;
 }
+/* the hash CPython takes from the integer returned by a user __hash__: the value itself when it
+   fits a signed 64 bit Py_hash_t (-1 becomes -2), else hash(int), i.e. modulo 2**61 - 1 */
+static Value user_hash_val(Value r)
+{
+    if (r.t != T_BIG) return r.u.i == -1 ? mkint(-2) : mkint(r.u.i);
+    if (int_cmp(r, int_neg(int_pow2(63))) >= 0 && int_cmp(r, int_pow2(63)) < 0) return r;
+    return int_hash_mod(r);
+}
 /* the exact hash as an unsigned long for dictionaries (the low word of the Python hash) */
 static unsigned long hash_fold(Value h)
 {

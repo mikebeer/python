@@ -862,6 +862,9 @@ static int key_det(Value k)
         for (i = 0; i < d->used; i++)
             if (d->e[i].k.t != T_UNSET && !key_det(d->e[i].k)) return 0;
         return 1; }
+    case T_INST: {
+        Value *m = class_find(((Inst *)k.u.o)->cls, S_hash);
+        return m != NULL && m->t != T_BUILTIN && m->t != T_NONE; }   /* a user __hash__ */
     default: return 0;
     }
 }

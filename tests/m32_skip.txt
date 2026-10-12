@@ -1,0 +1,4 @@
+# tests that differ with a real 32-bit long (use: SKIPFILE=tests/m32_skip.txt sh tests/run_tests.sh /tmp/py_m32)
+# 33_hashing, 34_hash64: CPython's tuple/set hash values and 64-bit __hash__ results need a 64-bit unsigned long
+33_hashing
+34_hash64

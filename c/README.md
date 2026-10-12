@@ -71,8 +71,14 @@ build steps and the list of remaining ASCII/IEEE assumptions: `PORTING.md`.
   x4 / x2 above 50000, fill 3/5, `pop` finger, `set_merge`, `set_table_resize`, the constant
   folding of set displays), so the iteration order of sets of ints, bools, None, floats,
   complex numbers, tuples and frozensets of those is the same as in CPython (exact where
-  `unsigned long` has 64 bits; `tuple` hashes use CPython's xxHash scheme). A set that receives a
-  key with a per-run hash in CPython (str, bytes, instances) switches to insertion order.
+  `unsigned long` has 64 bits; `tuple` hashes use CPython's xxHash scheme). Instances of classes
+  with a user `__hash__` are called at insert time and ordered by the value returned: a result
+  that fits a signed 64-bit `Py_hash_t` is kept (-1 becomes -2), a larger int is reduced like
+  `hash(int)` (modulo 2**61-1), a non-int raises `TypeError: __hash__ method should return an
+  integer`, as in CPython (`tests/34_hash64.py`, C only: skipped for CREXX via
+  `tests/crexx_skip.txt` and for a real 32-bit `long` via `SKIPFILE=tests/m32_skip.txt`). A set
+  that receives a key with a per-run hash in CPython (str, bytes, identity-hashed instances)
+  switches to insertion order.
 - Dicts are insertion-ordered; floats print with the shortest repr that
   round-trips; `sum` uses compensated summation like CPython 3.12.
 
