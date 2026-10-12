@@ -584,6 +584,22 @@ def _split_tz(s):
     return t, False
 
 
+def split_offset(s):
+    """'2024-01-01T10:00+02:00' -> ('2024-01-01T10:00', 7200); no offset -> (s, None)"""
+    t = s.strip()
+    if t.endswith('Z') or t.endswith('z'):
+        return t[:-1], 0
+    if ':' in t:
+        for cand in (6, 5, 3):
+            if len(t) > cand and t[-cand] in '+-' and t[-cand + 1:].replace(':', '').isdigit() and ':' in t[:-cand]:
+                body = t[-cand + 1:].replace(':', '')
+                hh = int(body[:2])
+                mm = int(body[2:4]) if len(body) >= 4 else 0
+                sg = -1 if t[-cand] == '-' else 1
+                return t[:-cand], sg * (hh * 3600 + mm * 60)
+    return s, None
+
+
 def _mon_index(w):
     lw = w.lower()
     for k in range(12):
@@ -845,6 +861,101 @@ def ts_from_us(us, unit='us'):
     return r
 
 
+# ------------------------------------------------------------------------------------------ time zones
+
+def get_tz(tz):
+    """None / name / tzinfo -> tzinfo (UTC is datetime.timezone.utc, names are zoneinfo.ZoneInfo)"""
+    if tz is None:
+        return None
+    if isinstance(tz, str):
+        t = tz.strip()
+        if t.upper() in ('UTC', 'Z', 'UTC+00:00', 'UTC-00:00'):
+            return _dtm.timezone.utc
+        if t[:1] in '+-' and len(t) >= 3 and t[1:3].isdigit():
+            sg = -1 if t[0] == '-' else 1
+            hh = int(t[1:3])
+            mm = int(t[-2:]) if len(t) > 3 else 0
+            return _dtm.timezone(_dtm.timedelta(seconds=sg * (hh * 3600 + mm * 60)))
+        if t.startswith('UTC') and t[3:4] in ('+', '-'):
+            return get_tz(t[3:])
+        import zoneinfo
+        try:
+            return zoneinfo.ZoneInfo(t)
+        except zoneinfo.ZoneInfoNotFoundError:
+            raise ValueError('UnknownTimeZoneError: %s' % tz)
+    if hasattr(tz, 'utcoffset'):
+        return tz
+    raise TypeError('Cannot convert %s to a time zone' % type(tz).__name__)
+
+
+def tz_label(tz):
+    """tzinfo -> the name shown in reprs and dtypes"""
+    if tz is None:
+        return None
+    k = getattr(tz, 'key', None)
+    if k is not None:
+        return k
+    if tz == _dtm.timezone.utc:
+        return 'UTC'
+    return str(tz)
+
+
+def _off_at_utc(tz, secs):
+    f = getattr(tz, '_off_utc', None)
+    if f is not None:
+        return f(secs)[0]
+    return int(tz.utcoffset(None).total_seconds())
+
+
+def _fields_us(y, mo, d, hh, mi, ss, us):
+    return _dtm.datetime(y, mo, d, hh, mi, ss, us)._us() - _EPOCH_US
+
+
+def ts_from_utc_us(u, tz, unit='us'):
+    """a tz-aware Timestamp for the UTC instant u (microseconds since the epoch)"""
+    off = _off_at_utc(tz, u // 1000000)
+    r = ts_from_us(u + off * 1000000, unit)
+    r.tzinfo = tz
+    r._offs = off
+    return r
+
+
+def localize_us(w, tz, unit='us', ambiguous='raise', nonexistent='raise'):
+    """wall-clock microseconds (naive) -> tz-aware Timestamp; NaT when ambiguous/nonexistent is 'NaT'"""
+    ws = w // 1000000
+    f = getattr(tz, '_wall_offsets', None)
+    c = f(ws) if f is not None else [(_off_at_utc(tz, 0), False)]
+    if len(c) == 1:
+        off = c[0][0]
+    elif len(c) == 2:
+        if ambiguous is True:
+            off = c[1][0]
+        elif ambiguous is False:
+            off = c[0][0]
+        elif ambiguous == 'NaT':
+            return NaT
+        else:
+            raise ValueError("Cannot infer dst time from %s, try using the 'ambiguous' argument"
+                             % ts_from_us(w)._text())
+    else:
+        std = tz._off
+        if nonexistent == 'shift_forward':
+            t = tz._dst_start(ws)
+            return ts_from_utc_us(t * 1000000, tz, unit)
+        if nonexistent == 'shift_backward':
+            t = tz._dst_start(ws)
+            return ts_from_utc_us(t * 1000000 - 1, tz, unit)
+        if nonexistent == 'NaT':
+            return NaT
+        if isinstance(nonexistent, _dtm.timedelta):
+            return localize_us(w + nonexistent._us, tz, unit, ambiguous, 'raise')
+        raise ValueError('%s, nonexistent time, try using the \'nonexistent\' argument' % ts_from_us(w)._text())
+    r = ts_from_us(w, unit)
+    r.tzinfo = tz
+    r._offs = off
+    return r
+
+
 def _tick_us(freq):
     """freq (str / offset / Timedelta) -> microseconds of a fixed frequency"""
     if isinstance(freq, _dtm.timedelta):
@@ -862,6 +973,8 @@ class Timestamp(_dtm.datetime):
                  microsecond=None, tzinfo=None, nanosecond=None, tz=None, unit=None, fold=None):
         y = mo = d = hh = mi = ss = us = None
         un = 'us'
+        src_tz = None
+        src_off = 0
         if ts_input is _NO:
             y, mo, d, hh, mi, ss, us = year, month, day, hour, minute, second, microsecond
             if y is None or mo is None or d is None:
@@ -882,12 +995,23 @@ class Timestamp(_dtm.datetime):
                 if low == 'today':
                     hh = mi = ss = us = 0
             else:
-                y, mo, d, hh, mi, ss, us, reso = parse_datetime_string(ts_input)
+                core, soff = split_offset(ts_input)
+                y, mo, d, hh, mi, ss, us, reso = parse_datetime_string(core)
+                if soff is not None:
+                    src_off = soff
+                    src_tz = _dtm.timezone.utc if soff == 0 and ts_input.strip()[-1:] in 'Zz' else \
+                        _dtm.timezone(_dtm.timedelta(seconds=soff))
         elif isinstance(ts_input, _dtm.datetime):
             y, mo, d, hh, mi, ss, us = (ts_input.year, ts_input.month, ts_input.day, ts_input.hour,
                                         ts_input.minute, ts_input.second, ts_input.microsecond)
             if isinstance(ts_input, Timestamp):
                 un = ts_input._unit
+                if ts_input.tzinfo is not None:
+                    src_tz = ts_input.tzinfo
+                    src_off = ts_input._offs
+            elif ts_input.tzinfo is not None:
+                src_tz = ts_input.tzinfo
+                src_off = int(ts_input.utcoffset().total_seconds())
         elif isinstance(ts_input, _dtm.date):
             y, mo, d = ts_input.year, ts_input.month, ts_input.day
         elif _isnum(ts_input):
@@ -899,6 +1023,8 @@ class Timestamp(_dtm.datetime):
             else:
                 v = _num_to_us(ts_input, k)
             y, mo, d, hh, mi, ss, us = _us_to_fields(v)
+            if tz is not None or tzinfo is not None:
+                src_tz = _dtm.timezone.utc
             if unit is not None and k in ('D', 'h', 'min', 's'):
                 un = 's'
             elif unit is not None and k == 'ms':
@@ -915,8 +1041,28 @@ class Timestamp(_dtm.datetime):
             us = 0
         if nanosecond:
             us += _round_half_even(nanosecond / 1000.0)
+        want = get_tz(tz if tz is not None else tzinfo)
+        fin_tz = None
+        fin_off = 0
+        if src_tz is not None:
+            if want is None:
+                fin_tz = src_tz
+                fin_off = src_off
+            else:
+                u = _fields_us(y, mo, d, hh, mi, ss, us) - src_off * 1000000
+                off = _off_at_utc(want, u // 1000000)
+                y, mo, d, hh, mi, ss, us = _us_to_fields(u + off * 1000000)
+                fin_tz = want
+                fin_off = off
+        elif want is not None:
+            r = localize_us(_fields_us(y, mo, d, hh, mi, ss, us), want)
+            fin_tz = want
+            fin_off = r._offs
         _dtm.datetime.__init__(self, y, mo, d, hh, mi, ss, us, None)
         self._unit = un
+        if fin_tz is not None:
+            self.tzinfo = fin_tz
+            self._offs = fin_off
 
     # -- construction
     @classmethod
@@ -1037,9 +1183,51 @@ class Timestamp(_dtm.datetime):
     def is_year_end(self):
         return self.month == 12 and self.day == 31
 
+    _offs = 0
+
     @property
     def tz(self):
-        return None
+        return self.tzinfo
+
+    def utcoffset(self):
+        if self.tzinfo is None:
+            return None
+        return _dtm.timedelta(seconds=self._offs)
+
+    def tzname(self):
+        tz = self.tzinfo
+        if tz is None:
+            return None
+        if getattr(tz, '_rule', None) is not None:
+            return tz._dstname if self._offs != tz._off else tz._name
+        return tz.tzname(None)
+
+    def dst(self):
+        tz = self.tzinfo
+        if tz is None:
+            return None
+        if getattr(tz, '_rule', None) is not None and self._offs != tz._off:
+            return _dtm.timedelta(hours=1)
+        return _dtm.timedelta(0)
+
+    def _wall_us(self):
+        return _dtm.datetime._secs(self) * 1000000 + self.microsecond - _EPOCH_US
+
+    def _rewall(self, naive):
+        """a naive Timestamp holding wall fields -> the same wall time in this Timestamp's zone"""
+        tz = self.tzinfo
+        if tz is None:
+            return naive
+        w = naive._wall_us()
+        off = _off_at_utc(tz, (w - self._offs * 1000000) // 1000000)
+        off = _off_at_utc(tz, (w - off * 1000000) // 1000000)
+        naive.tzinfo = tz
+        naive._offs = off
+        return naive
+
+    def _naive(self):
+        r = ts_from_us(self._wall_us(), self._unit)
+        return r
 
     @property
     def freq(self):
@@ -1056,7 +1244,8 @@ class Timestamp(_dtm.datetime):
         return _MONTHS[self.month - 1]
 
     def to_pydatetime(self, warn=True):
-        return _dtm.datetime(self.year, self.month, self.day, self.hour, self.minute, self.second, self.microsecond)
+        return _dtm.datetime(self.year, self.month, self.day, self.hour, self.minute, self.second, self.microsecond,
+                             self.tzinfo)
 
     def to_datetime64(self):
         return self._epoch_us() * 1000
@@ -1066,20 +1255,28 @@ class Timestamp(_dtm.datetime):
 
     def tz_localize(self, tz, ambiguous='raise', nonexistent='raise'):
         if tz is None:
-            return self
-        raise NotImplementedError('time zones are not supported')
+            return self._naive() if self.tzinfo is not None else self
+        if self.tzinfo is not None:
+            raise TypeError('Cannot localize tz-aware Timestamp, use tz_convert for conversions')
+        return localize_us(self._wall_us(), get_tz(tz), self._unit, ambiguous, nonexistent)
 
     def tz_convert(self, tz):
-        raise NotImplementedError('time zones are not supported')
+        if self.tzinfo is None:
+            raise TypeError('Cannot convert tz-naive Timestamp, use tz_localize to localize')
+        if tz is None:
+            return ts_from_us(self._epoch_us(), self._unit)
+        return ts_from_utc_us(self._epoch_us(), get_tz(tz), self._unit)
 
     def as_unit(self, unit, round_ok=True):
+        if self.tzinfo is not None:
+            return ts_from_utc_us(self._epoch_us(), self.tzinfo, unit)
         r = ts_from_us(self._epoch_us(), unit)
         return r
 
     def normalize(self):
         r = Timestamp(self.year, self.month, self.day)
         r._unit = self._unit
-        return r
+        return self._rewall(r)
 
     def replace(self, year=None, month=None, day=None, hour=None, minute=None, second=None, microsecond=None,
                 nanosecond=None, tzinfo=True, fold=None):
@@ -1088,6 +1285,10 @@ class Timestamp(_dtm.datetime):
                       self.minute if minute is None else minute, self.second if second is None else second,
                       self.microsecond if microsecond is None else microsecond)
         r._unit = self._unit
+        if tzinfo is True:
+            return self._rewall(r)
+        if tzinfo is not None:
+            return Timestamp(r, tz=tzinfo) if False else localize_us(r._wall_us(), get_tz(tzinfo), r._unit)
         return r
 
     def date(self):
@@ -1101,7 +1302,7 @@ class Timestamp(_dtm.datetime):
 
     def _round(self, freq, how):
         step = _tick_us(freq)
-        us = self._epoch_us()
+        us = self._wall_us()
         if how == 'floor':
             r = (us // step) * step
         elif how == 'ceil':
@@ -1111,7 +1312,7 @@ class Timestamp(_dtm.datetime):
             if m * 2 > step or (m * 2 == step and q % 2 == 1):
                 q += 1
             r = q * step
-        return ts_from_us(r, self._unit)
+        return self._rewall(ts_from_us(r, self._unit))
 
     def floor(self, freq, ambiguous='raise', nonexistent='raise'):
         return self._round(freq, 'floor')
@@ -1126,10 +1327,12 @@ class Timestamp(_dtm.datetime):
         return self._epoch_us() / 1000000.0
 
     # -- text
-    def _text(self):
+    def _text(self, off=True):
         s = '%04d-%02d-%02d %02d:%02d:%02d' % (self.year, self.month, self.day, self.hour, self.minute, self.second)
         if self.microsecond:
             s += '.%06d' % self.microsecond
+        if off and self.tzinfo is not None:
+            s += _dtm._fmt_off(self._offs * 1000000, ':')
         return s
 
     @property
@@ -1137,6 +1340,9 @@ class Timestamp(_dtm.datetime):
         return '%04d-%02d-%02d' % (self.year, self.month, self.day)
 
     def __repr__(self):
+        if self.tzinfo is not None:
+            return "Timestamp('%s%s', tz='%s')" % (self._text(False), _dtm._fmt_off(self._offs * 1000000, ''),
+                                                  tz_label(self.tzinfo))
         return "Timestamp('%s')" % self._text()
 
     def __str__(self):
@@ -1150,10 +1356,17 @@ class Timestamp(_dtm.datetime):
     # -- arithmetic
     def __add__(self, o):
         if isinstance(o, _dtm.timedelta):
+            if self.tzinfo is not None:
+                return ts_from_utc_us(self._epoch_us() + o._us, self.tzinfo,
+                                      _finer(self._unit, getattr(o, '_unit', 'us')))
             return ts_from_us(self._epoch_us() + o._us, _finer(self._unit, getattr(o, '_unit', 'us')))
         if o is NaT:
             return NaT
         if isinstance(o, BaseOffset):
+            if self.tzinfo is not None:
+                if isinstance(o, Tick) and not isinstance(o, Day):
+                    return ts_from_utc_us(self._epoch_us() + o.n * o._tickus, self.tzinfo, self._unit)
+                return self._rewall(o._add_ts(self._naive()))
             return o._add_ts(self)
         if isinstance(o, (int, float)):
             raise TypeError('Addition/subtraction of integers and integer-arrays with Timestamp is no longer supported.  Instead of adding/subtracting `n`, use `n * obj.freq`')
@@ -1164,14 +1377,19 @@ class Timestamp(_dtm.datetime):
 
     def __sub__(self, o):
         if isinstance(o, _dtm.datetime):
+            if (o.tzinfo is None) != (self.tzinfo is None):
+                raise TypeError('Cannot subtract tz-naive and tz-aware datetime-like objects.')
             ou = o._epoch_us() if isinstance(o, Timestamp) else o._us() - _EPOCH_US
             return Timedelta._of(self._epoch_us() - ou, _finer(self._unit, getattr(o, '_unit', 'us')))
         if isinstance(o, _dtm.timedelta):
+            if self.tzinfo is not None:
+                return ts_from_utc_us(self._epoch_us() - o._us, self.tzinfo,
+                                      _finer(self._unit, getattr(o, '_unit', 'us')))
             return ts_from_us(self._epoch_us() - o._us, _finer(self._unit, getattr(o, '_unit', 'us')))
         if o is NaT:
             return NaT
         if isinstance(o, BaseOffset):
-            return (-o)._add_ts(self)
+            return self.__add__(-o)
         return NotImplemented
 
     def __rsub__(self, o):
@@ -1892,6 +2110,7 @@ def infer_datelike(vals):
     from .base import NA
     kind = None
     unit = None
+    tzl = _NO
     for x in vals:
         if x is None or x is NA or x is NaT or (type(x) is float and x != x):
             continue
@@ -1907,6 +2126,12 @@ def infer_datelike(vals):
             return None
         u = getattr(x, '_unit', 'us')
         unit = u if unit is None else _finer(unit, u)
+        if k == 'M':
+            xl = tz_label(x.tzinfo)
+            if tzl is _NO:
+                tzl = xl
+            elif tzl != xl:
+                return None
     if kind is None:
         return None
     out = []
@@ -1917,4 +2142,6 @@ def infer_datelike(vals):
             out.append(x if type(x) is Timestamp else Timestamp(x))
         else:
             out.append(x if type(x) is Timedelta else Timedelta._of(x._us))
+    if kind == 'M' and tzl is not _NO and tzl is not None:
+        return out, 'datetime64[%s, %s]' % (unit, tzl)
     return out, ('datetime64[%s]' if kind == 'M' else 'timedelta64[%s]') % unit

@@ -110,7 +110,20 @@ docall: procedure = .int
       if ob_c[f % 2] = 1 then return bmeth_unbound(ob_x[ob_y[f % 2] % 2], ob_x[f % 2], base, na, nk)
       return bmeth(ob_y[f % 2], ob_x[f % 2], base, na, nk)
     end
-    when k = K_CLASS then return instantiate(ob_x[f % 2], base, na, nk)
+    when k = K_CLASS then do
+      c = ob_x[f % 2]
+      if cl_meta[c] > 0 then do
+        /* a metaclass __call__ written in Python takes over (type.__call__ instantiates) */
+        m = cls_find(cl_meta[c], M___CALL__)
+        if m > 0 then do
+          if kind_of(m) = K_FUNC then do
+            call ast_insert base, na + nk, f
+            return docall(m, base, na + 1, nk)
+          end
+        end
+      end
+      return instantiate(c, base, na, nk)
+    end
     when k = K_INST then do
       m = cls_find(ob_c[f % 2], M___CALL__)
       if m = 0 then return raise_exc(C_TYPEERROR, "'" || type_name(f) || "' object is not callable")
@@ -454,7 +467,10 @@ getattr_obj: procedure = .int
     if nid = M___DICT__ then return cls_dict(c)
     if nid = M___MODULE__ then return mkstr(modname_of(cl_mod[c]))
     if nid = M___DOC__ then return NONE_OOP
-    if nid = M___CLASS__ then return cl_obj[C_TYPE]
+    if nid = M___CLASS__ then do
+      if cl_meta[c] > 0 then return cl_obj[cl_meta[c]]
+      return cl_obj[C_TYPE]
+    end
     if cl_meta[c] > 0 then do
       v = cls_find(cl_meta[c], nid)
       if v > 0 then return bind_attr(v, o, cl_meta[c])

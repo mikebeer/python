@@ -4,7 +4,10 @@ from http import HTTPStatus
 
 HTTP_PORT = 80
 HTTPS_PORT = 443
-from http import _TABLE
+from http import HTTPStatus as _HS
+_TABLE = {}
+for _m in _HS:
+    _TABLE[int(_m)] = (_m.phrase, _m.description)
 responses = {}
 for _k in _TABLE:
     responses[_k] = _TABLE[_k][0]

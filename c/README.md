@@ -144,7 +144,7 @@ instance `__dict__`, and the interpreter's own operations honour overrides: `m[-
 subclasses, and `repr`/`str` as CPython (`S({1})` for set subclasses, plain `repr` of the value
 for number/str/tuple subclasses). `collections.namedtuple` classes are real tuple subclasses
 (`isinstance(p, tuple)`). Gaps: `frozenset` is still the same class as `set` (mutable, so a
-`frozenset` subclass behaves like a `set` subclass); metaclass `__call__` is ignored; `int`
+`frozenset` subclass behaves like a `set` subclass); `int`
 subclasses of `bool` and `__slots__` are not special; `OSError(2, 'x')` does not turn into
 `FileNotFoundError`.
 

@@ -444,7 +444,7 @@ init: procedure = .void
   ob_f = .float[]
   ob_g = .float[]
   nat_skip = 0
-  bm_names = " append extend insert remove pop clear index count sort reverse copy keys values items get popitem setdefault update fromkeys add discard union intersection difference symmetric_difference issubset issuperset isdisjoint difference_update intersection_update symmetric_difference_update upper lower strip lstrip rstrip split rsplit join replace find rfind startswith endswith format capitalize title swapcase center ljust rjust zfill splitlines partition rpartition isdigit isalpha isalnum isspace isupper islower istitle isnumeric isdecimal isidentifier isprintable encode decode expandtabs casefold translate removeprefix removesuffix maketrans format_map bit_length bit_count to_bytes from_bytes conjugate is_integer hex fromhex as_integer_ratio real imag __init__ __new__ __setitem__ __getitem__ __delitem__ __len__ __iter__ __contains__ __repr__ __str__ __eq__ __ne__ __hash__ __add__ __radd__ __mul__ __rmul__ __lt__ __le__ __gt__ __ge__ __format__ __bool__ __sub__ __mod__ __neg__ __abs__ __int__ __float__ "
+  bm_names = " append extend insert remove pop clear index count sort reverse copy keys values items get popitem setdefault update fromkeys add discard union intersection difference symmetric_difference issubset issuperset isdisjoint difference_update intersection_update symmetric_difference_update upper lower strip lstrip rstrip split rsplit join replace find rfind startswith endswith format capitalize title swapcase center ljust rjust zfill splitlines partition rpartition isdigit isalpha isalnum isspace isupper islower istitle isnumeric isdecimal isidentifier isprintable encode decode expandtabs casefold translate removeprefix removesuffix maketrans format_map bit_length bit_count to_bytes from_bytes conjugate is_integer hex fromhex as_integer_ratio real imag __init__ __new__ __call__ __setitem__ __getitem__ __delitem__ __len__ __iter__ __contains__ __repr__ __str__ __eq__ __ne__ __hash__ __add__ __radd__ __mul__ __rmul__ __lt__ __le__ __gt__ __ge__ __format__ __bool__ __sub__ __mod__ __neg__ __abs__ __int__ __float__ "
   npcx_f = 0
   npcx_d = 0
   cx_re = 0.0
@@ -4245,6 +4245,12 @@ set_bases: procedure = .int
     if fl > 2 then fl = 2
   end
   cl_flags[c] = fl
+  /* the metaclass is inherited from the first base that has one (class IntEnum(int, Enum)) */
+  if cl_meta[c] = 0 then do
+    do i = 1 to n
+      if cl_meta[c] = 0 then cl_meta[c] = cl_meta[bl_a[i]]
+    end
+  end
   ns = n + 1
   tot = 0
   do i = 1 to n
@@ -8539,7 +8545,20 @@ docall: procedure = .int
       if ob_c[f % 2] = 1 then return bmeth_unbound(ob_x[ob_y[f % 2] % 2], ob_x[f % 2], base, na, nk)
       return bmeth(ob_y[f % 2], ob_x[f % 2], base, na, nk)
     end
-    when k = 16 then return instantiate(ob_x[f % 2], base, na, nk)
+    when k = 16 then do
+      c = ob_x[f % 2]
+      if cl_meta[c] > 0 then do
+        /* a metaclass __call__ written in Python takes over (type.__call__ instantiates) */
+        m = cls_find(cl_meta[c], 153)
+        if m > 0 then do
+          if kind_of(m) = 12 then do
+            call ast_insert base, na + nk, f
+            return docall(m, base, na + 1, nk)
+          end
+        end
+      end
+      return instantiate(c, base, na, nk)
+    end
     when k = 17 then do
       m = cls_find(ob_c[f % 2], 153)
       if m = 0 then return raise_exc(38, "'" || type_name(f) || "' object is not callable")
@@ -8883,7 +8902,10 @@ getattr_obj: procedure = .int
     if nid = 162 then return cls_dict(c)
     if nid = 192 then return mkstr(modname_of(cl_mod[c]))
     if nid = 164 then return 2
-    if nid = 155 then return cl_obj[2]
+    if nid = 155 then do
+      if cl_meta[c] > 0 then return cl_obj[cl_meta[c]]
+      return cl_obj[2]
+    end
     if cl_meta[c] > 0 then do
       v = cls_find(cl_meta[c], nid)
       if v > 0 then return bind_attr(v, o, cl_meta[c])
@@ -13752,7 +13774,12 @@ bcall_type: procedure = .int
     end
     when c = 1 then return inst_new(1)
     when c = 2 then do
-      if na = 1 then return cl_obj[cls_of(ast[base + 1])]
+      if na = 1 then do
+        if kind_of(ast[base + 1]) = 16 then do
+          if cl_meta[ob_x[ast[base + 1] % 2]] > 0 then return cl_obj[cl_meta[ob_x[ast[base + 1] % 2]]]
+        end
+        return cl_obj[cls_of(ast[base + 1])]
+      end
       if na = 3 then return type_new(ast[base + 1], ast[base + 2], ast[base + 3])
       return raise_exc(38, "type() takes 1 or 3 arguments")
     end
@@ -13985,6 +14012,12 @@ bmeth_unbound: procedure = .int
     return c
   end
   if nid = 198 then return cls_new(c, base, na, nk)
+  if nid = 153 & c = 2 then do
+    /* type.__call__(cls, *args, **kw) */
+    if na < 1 then return raise_exc(38, "descriptor '__call__' of 'type' object needs an argument")
+    if kind_of(ast[base + 1]) \= 16 then return raise_exc(38, "descriptor '__call__' requires a 'type' object")
+    return instantiate(ob_x[ast[base + 1] % 2], base + 1, na - 1, nk)
+  end
   if nid = 41 & (c = 83 | c = 84) then do
     if c = 84 then return bytes_fromhex(1, base, na)
     return bytes_fromhex(0, base, na)

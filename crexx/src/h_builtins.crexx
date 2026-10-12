@@ -1431,7 +1431,12 @@ bcall_type: procedure = .int
     end
     when c = C_OBJECT then return inst_new(C_OBJECT)
     when c = C_TYPE then do
-      if na = 1 then return cl_obj[cls_of(ast[base + 1])]
+      if na = 1 then do
+        if kind_of(ast[base + 1]) = K_CLASS then do
+          if cl_meta[ob_x[ast[base + 1] % 2]] > 0 then return cl_obj[cl_meta[ob_x[ast[base + 1] % 2]]]
+        end
+        return cl_obj[cls_of(ast[base + 1])]
+      end
       if na = 3 then return type_new(ast[base + 1], ast[base + 2], ast[base + 3])
       return raise_exc(C_TYPEERROR, "type() takes 1 or 3 arguments")
     end

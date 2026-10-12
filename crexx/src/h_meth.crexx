@@ -51,6 +51,12 @@ bmeth_unbound: procedure = .int
     return c
   end
   if nid = M___NEW__ then return cls_new(c, base, na, nk)
+  if nid = M___CALL__ & c = C_TYPE then do
+    /* type.__call__(cls, *args, **kw) */
+    if na < 1 then return raise_exc(C_TYPEERROR, "descriptor '__call__' of 'type' object needs an argument")
+    if kind_of(ast[base + 1]) \= K_CLASS then return raise_exc(C_TYPEERROR, "descriptor '__call__' requires a 'type' object")
+    return instantiate(ob_x[ast[base + 1] % 2], base + 1, na - 1, nk)
+  end
   if nid = M_FROMHEX & (c = C_BYTES | c = C_BYTEARRAY) then do
     if c = C_BYTEARRAY then return bytes_fromhex(1, base, na)
     return bytes_fromhex(0, base, na)

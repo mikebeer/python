@@ -23,7 +23,57 @@ def _unit_of(dt):
     k = dt.find('[')
     if k < 0:
         return 'us'
-    return dt[k + 1:dt.find(']')]
+    e = dt.find(']')
+    c = dt.find(',')
+    if 0 < c < e:
+        e = c
+    return dt[k + 1:e]
+
+
+def _tz_of_dt(dt):
+    """'datetime64[us, Europe/Zurich]' -> tzinfo (None for naive dtypes)"""
+    c = dt.find(', ')
+    if c < 0 or not dt.startswith('datetime'):
+        return None
+    return T.get_tz(dt[c + 2:dt.find(']')])
+
+
+def _dt_name(unit, tz):
+    if tz is None:
+        return 'datetime64[%s]' % unit
+    return 'datetime64[%s, %s]' % (unit, T.tz_label(tz))
+
+
+def tz_localize_vals(vals, tz, ambiguous='raise', nonexistent='raise'):
+    """list of Timestamp -> (list, tzinfo) with the wall times placed in tz (None removes the zone)"""
+    tzo = T.get_tz(tz)
+    out = []
+    for x in vals:
+        if x is NaT or x != x:
+            out.append(NaT)
+        elif tzo is None:
+            out.append(x._naive() if x.tzinfo is not None else x)
+        else:
+            if x.tzinfo is not None:
+                raise TypeError('Already tz-aware, use tz_convert to convert.')
+            out.append(T.localize_us(x._wall_us(), tzo, x._unit, ambiguous, nonexistent))
+    return out, tzo
+
+
+def tz_convert_vals(vals, tz):
+    tzo = T.get_tz(tz)
+    out = []
+    for x in vals:
+        if x is NaT or x != x:
+            out.append(NaT)
+            continue
+        if x.tzinfo is None:
+            raise TypeError('Cannot convert tz-naive timestamps, use tz_localize to localize')
+        if tzo is None:
+            out.append(T.ts_from_us(x._epoch_us(), x._unit))
+        else:
+            out.append(T.ts_from_utc_us(x._epoch_us(), tzo, x._unit))
+    return out, tzo
 
 
 def _mkdt(vals, unit='us'):
@@ -148,6 +198,8 @@ def _to_ts(x, dayfirst=False, yearfirst=False, unit=None, fmt=None, errors='rais
         if t == '' or t.lower() in ('nat', 'nan', 'none', 'null'):
             return NaT
         try:
+            if fmt is None and T.split_offset(t)[1] is not None:
+                return Timestamp(t)
             if fmt is not None and fmt != 'mixed' and fmt != 'ISO8601':
                 try:
                     return Timestamp(_dtm.datetime.strptime(t, fmt))
@@ -269,10 +321,26 @@ def to_datetime(arg, errors='raise', dayfirst=False, yearfirst=False, utc=False,
                 return arg
         conv = convert_list(list(vals), errors, dayfirst, yearfirst, format, unit, origin, exact)
         un = _unit_label(unit) if _numeric_input(vals) else _inferred_unit(conv, arg)
+        dtn = 'datetime64[%s]' % un
+        if utc:
+            conv2 = []
+            for x in conv:
+                if x is NaT:
+                    conv2.append(x)
+                elif x.tzinfo is None:
+                    conv2.append(T.localize_us(x._wall_us(), _dtm.timezone.utc, x._unit))
+                else:
+                    conv2.append(x.tz_convert('UTC'))
+            conv = conv2
+            dtn = 'datetime64[%s, UTC]' % un
+        else:
+            r = T.infer_datelike(conv)
+            if r is not None and ', ' in r[1]:
+                dtn = 'datetime64[%s, %s]' % (un, r[1][r[1].find(', ') + 2:-1])
         if isinstance(arg, Series):
-            return Series(conv, arg._idx, name=arg.name, _dt='datetime64[%s]' % un)
+            return Series(conv, arg._idx, name=arg.name, _dt=dtn)
         name = getattr(arg, 'name', None)
-        return DatetimeIndex(conv, name=name, _dt='datetime64[%s]' % un, _raw=True)
+        return DatetimeIndex(conv, name=name, _dt=dtn, _raw=True)
     if isinstance(arg, dict):
         raise TypeError('dict input is not supported')
     r = convert_list([arg], errors, dayfirst, yearfirst, format, unit, origin, exact)[0]
@@ -374,7 +442,7 @@ def _is_dates_only(vals, freq):
             return False
     for x in vals:
         if x is not NaT and x == x:
-            if x.hour or x.minute or x.second or x.microsecond:
+            if x.hour or x.minute or x.second or x.microsecond or x.tzinfo is not None:
                 return False
     return True
 
@@ -558,7 +626,7 @@ class DatetimeMethods:
         if name in _DT_INT_FIELDS or name in _DT_BOOL_FIELDS or name in ('date', 'time', 'timetz'):
             return self._field(name)
         if name == 'tz' or name == 'tzinfo':
-            return None
+            return _tz_of_dt(self.s._dt)
         if name == 'freq':
             return getattr(self.s, 'freq', None) if self._isidx else None
         if name == 'unit':
@@ -591,15 +659,15 @@ class DatetimeMethods:
         return ObjArray([(NaT if x is NaT else x.to_pydatetime()) for x in self.s._v])
 
     def tz_localize(self, tz, ambiguous='raise', nonexistent='raise'):
-        if tz is None:
-            return self.s
-        raise NotImplementedError('time zones are not supported')
+        v, tzo = tz_localize_vals(self.s._v, tz, ambiguous, nonexistent)
+        return self._ret(v, _dt_name(_unit_of(self.s._dt), tzo))
 
     def tz_convert(self, tz):
-        raise NotImplementedError('time zones are not supported')
+        v, tzo = tz_convert_vals(self.s._v, tz)
+        return self._ret(v, _dt_name(_unit_of(self.s._dt), tzo))
 
     def as_unit(self, unit):
-        return self._ret(list(self.s._v), 'datetime64[%s]' % unit)
+        return self._ret(list(self.s._v), _dt_name(unit, _tz_of_dt(self.s._dt)))
 
     def isocalendar(self):
         from .core import DataFrame
@@ -850,11 +918,11 @@ class _DTLike(Index):
 
     @property
     def tz(self):
-        return None
+        return _tz_of_dt(self._dt)
 
     @property
     def tzinfo(self):
-        return None
+        return _tz_of_dt(self._dt)
 
     @property
     def inferred_freq(self):
@@ -1159,7 +1227,10 @@ class _DTLike(Index):
 
     @property
     def asi8(self):
-        return np.array([x._epoch_us() * 1000 if self._kind == 'M' else x._us * 1000 for x in self._v])
+        if self._kind == 'M':
+            k = {'ns': 1000, 'us': 1, 'ms': 0.001, 's': 0.000001}.get(_unit_of(self._dt), 1)
+            return np.array([int(x._epoch_us() * k) for x in self._v])
+        return np.array([x._us * 1000 for x in self._v])
 
     def is_(self, other):
         return self is other
@@ -1323,7 +1394,17 @@ class DatetimeIndex(_DTLike):
             if isinstance(data, (Index,)) or hasattr(data, '_dt'):
                 if getattr(data, '_dt', '').startswith('datetime'):
                     un = _unit_of(data._dt)
-            dt = 'datetime64[%s]' % un
+            tzo = T.get_tz(tz)
+            if tzo is not None:
+                if any((x is not NaT and x.tzinfo is not None) for x in vals):
+                    vals, tzo = tz_convert_vals(vals, tzo)
+                else:
+                    vals, tzo = tz_localize_vals(vals, tzo)
+            else:
+                r = T.infer_datelike(vals)
+                if r is not None and ', ' in r[1]:
+                    tzo = _tz_of_dt(r[1])
+            dt = _dt_name(un, tzo)
             if dtype is not None:
                 dn = norm_dtype(dtype)
                 if dn.startswith('datetime64'):
@@ -1400,15 +1481,21 @@ class DatetimeIndex(_DTLike):
         return DatetimeMethods(self).to_pydatetime()
 
     def tz_localize(self, tz, ambiguous='raise', nonexistent='raise'):
-        if tz is None:
-            return self
-        raise NotImplementedError('time zones are not supported')
+        v, tzo = tz_localize_vals(self._v, tz, ambiguous, nonexistent)
+        fr = self._freq
+        if fr is not None and tzo is not None and getattr(tzo, '_rule', None) is not None:
+            fr = None
+        return self._clone(v, self.name, fr, _dt_name(_unit_of(self._dt), tzo))
 
     def tz_convert(self, tz):
-        raise NotImplementedError('time zones are not supported')
+        v, tzo = tz_convert_vals(self._v, tz)
+        fr = self._freq
+        if fr is not None and (not isinstance(fr, Tick) or isinstance(fr, T.Day)):
+            fr = None
+        return self._clone(v, self.name, fr, _dt_name(_unit_of(self._dt), tzo))
 
     def as_unit(self, unit):
-        return self._clone(list(self._v), self.name, self._freq, 'datetime64[%s]' % unit)
+        return self._clone(list(self._v), self.name, self._freq, _dt_name(unit, _tz_of_dt(self._dt)))
 
     def to_period(self, freq=None):
         raise NotImplementedError('Period is not supported')
@@ -1701,6 +1788,30 @@ def date_range(start=None, end=None, periods=None, freq=None, tz=None, normalize
         freq = 'D'
     s = None if start is None else _to_ts(start)
     e = None if end is None else _to_ts(end)
+    tzo = T.get_tz(tz)
+    if tzo is None:
+        for q in (s, e):
+            if q is not None and q is not NaT and q.tzinfo is not None:
+                tzo = q.tzinfo
+                break
+    if tzo is not None:
+        off0 = to_offset(freq) if freq is not None else None
+        absolute = off0 is None or (isinstance(off0, Tick) and not isinstance(off0, T.Day))
+
+        def prep(q):
+            if q is None:
+                return None
+            if absolute:
+                if q.tzinfo is None:
+                    q = q.tz_localize(tzo)
+                return q.tz_convert(None)
+            return q._naive() if q.tzinfo is not None else q
+        r0 = date_range(prep(s), prep(e), periods, freq, None, normalize, name, inclusive, unit)
+        if absolute:
+            vv = [T.ts_from_utc_us(x._epoch_us(), tzo, x._unit) for x in r0._v]
+        else:
+            vv = [T.localize_us(x._wall_us(), tzo, x._unit) for x in r0._v]
+        return DatetimeIndex(vv, name=name, _raw=True, _dt=_dt_name(_unit_of(r0._dt), tzo), freq=r0._freq)
     if (s is NaT) or (e is NaT):
         raise ValueError('Neither `start` nor `end` can be NaT')
     if normalize:

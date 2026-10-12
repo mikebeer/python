@@ -832,6 +832,12 @@ class datetime(date):
             u = self._secs() * 1000000 + self.microsecond
         else:
             u = self._us()
+        fu = getattr(tz, 'fromutc', None)
+        if fu is not None:
+            secs, us = divmod(u, 1000000)
+            days, rem = divmod(secs, 86400)
+            y, m, d = _ord2ymd(days)
+            return fu(datetime(y, m, d, rem // 3600, (rem % 3600) // 60, rem % 60, us, tz))
         off = tz.utcoffset(None)
         if off is not None:
             u += off._us

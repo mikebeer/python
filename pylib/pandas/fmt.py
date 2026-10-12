@@ -124,7 +124,7 @@ def dt_strings(vals):
     milli = False
     for x in vals:
         if x == x:
-            if x.hour or x.minute or x.second or x.microsecond:
+            if x.hour or x.minute or x.second or x.microsecond or x.tzinfo is not None:
                 full = True
             if x.microsecond % 1000:
                 micro = True
@@ -142,8 +142,16 @@ def dt_strings(vals):
                 t += '.%06d' % x.microsecond
             elif milli:
                 t += '.%03d' % (x.microsecond // 1000)
+            if x.tzinfo is not None:
+                t += _dtm_off(x._offs)
             out.append(t)
     return out
+
+
+def _dtm_off(secs):
+    sg = '-' if secs < 0 else '+'
+    secs = abs(secs)
+    return '%s%02d:%02d' % (sg, secs // 3600, (secs % 3600) // 60)
 
 
 def td_strings(vals):

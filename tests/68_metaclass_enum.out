@@ -1,0 +1,11 @@
+5 1 7 2 ['A', 'B']
+True True True
+True 3
+200 404 Not Found Request fulfilled
+True True <Status.OK: 200>
+(5.976e+24, 6378140.0) 9.8 Planet.MERCURY
+(3, 4) 3 2 True ['P', 'Q']
+6 True False False 2
+3 2 3
+5 True True True False True
+True 11 True

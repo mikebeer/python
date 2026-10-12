@@ -61,6 +61,16 @@ class Enum(metaclass=EnumMeta):
         cls._member_list_ = []
         cls._member_names_ = []
         cust_init = "__init__" in dict(items)
+        cust_new = None
+        for k in cls.__mro__:
+            if k is Enum or k is object:
+                break
+            kd = vars(k)
+            if "__new__" in kd:
+                cust_new = kd["__new__"]
+                if hasattr(cust_new, "__func__"):
+                    cust_new = cust_new.__func__
+                break
         last = []
         for name, value in items:
             if not _is_member_candidate(name, value):
@@ -79,9 +89,30 @@ class Enum(metaclass=EnumMeta):
                 setattr(cls, name, canon)
                 cls._member_map_[name] = canon
                 continue
-            m = object.__new__(cls)
+            if cust_new is not None:
+                if isinstance(value, tuple):
+                    m = cust_new(cls, *value)
+                else:
+                    m = cust_new(cls, value)
+                if not hasattr(m, "_value_"):
+                    m._value_ = value
+                value = m._value_
+                canon = None
+                try:
+                    canon = cls._value2member_map_.get(value)
+                except TypeError:
+                    pass
+                if canon is not None:
+                    setattr(cls, name, canon)
+                    cls._member_map_[name] = canon
+                    continue
+            else:
+                if isinstance(value, int) and issubclass(cls, int):
+                    m = int.__new__(cls, value)
+                else:
+                    m = object.__new__(cls)
+                m._value_ = value
             m._name_ = name
-            m._value_ = value
             m.name = name
             m.value = value
             if cust_init:
@@ -157,12 +188,12 @@ class Enum(metaclass=EnumMeta):
         return self
 
 
-class IntEnum(Enum):
+class IntEnum(int, Enum):
     def __int__(self):
         return self._value_
 
-    def __index__(self):
-        return self._value_
+    def __repr__(self):
+        return "<%s.%s: %r>" % (type(self).__name__, self._name_, self._value_)
 
     def __str__(self):
         return str(self._value_)
@@ -367,6 +398,39 @@ class IntFlag(Flag):
 
     def __eq__(self, o):
         return self._value_ == (o._value_ if isinstance(o, Enum) else o)
+
+    def __ne__(self, o):
+        return self._value_ != (o._value_ if isinstance(o, Enum) else o)
+
+    def __lt__(self, o):
+        return self._value_ < (o._value_ if isinstance(o, Enum) else o)
+
+    def __le__(self, o):
+        return self._value_ <= (o._value_ if isinstance(o, Enum) else o)
+
+    def __gt__(self, o):
+        return self._value_ > (o._value_ if isinstance(o, Enum) else o)
+
+    def __ge__(self, o):
+        return self._value_ >= (o._value_ if isinstance(o, Enum) else o)
+
+    def __ror__(self, o):
+        return self.__or__(o)
+
+    def __rand__(self, o):
+        return self.__and__(o)
+
+    def __xor__(self, o):
+        return type(self)._make(self._value_ ^ (o._value_ if isinstance(o, Enum) else o))
+
+    def __rxor__(self, o):
+        return self.__xor__(o)
+
+    def __add__(self, o):
+        return self._value_ + (o._value_ if isinstance(o, Enum) else o)
+
+    def __radd__(self, o):
+        return (o._value_ if isinstance(o, Enum) else o) + self._value_
 
     def __hash__(self):
         return hash(self._value_)

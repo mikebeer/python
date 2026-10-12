@@ -333,6 +333,12 @@ set_bases: procedure = .int
     if fl > 2 then fl = 2
   end
   cl_flags[c] = fl
+  /* the metaclass is inherited from the first base that has one (class IntEnum(int, Enum)) */
+  if cl_meta[c] = 0 then do
+    do i = 1 to n
+      if cl_meta[c] = 0 then cl_meta[c] = cl_meta[bl_a[i]]
+    end
+  end
   ns = n + 1
   tot = 0
   do i = 1 to n

@@ -1783,6 +1783,11 @@ static long norm_index(long i, long n, const char *what)
 static void slice_del(Value o, Value lo, Value hi, Value st);
 static Value subscr(Value o, Value idx)
 {
+    if (idx.t == T_INST && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR || o.t == T_BYTES ||
+                            o.t == T_BARR || o.t == T_RANGE) &&
+        (AS_INST(idx)->pay.t == T_INT || AS_INST(idx)->pay.t == T_BIG ||
+         class_find(AS_INST(idx)->cls, S_index)))
+        idx = need_intv(idx, "index");
     if (idx.t == T_BIG && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR || o.t == T_BYTES ||
                            o.t == T_BARR))
         throw_new(cls_IndexError, "cannot fit 'int' into an index-sized integer");
@@ -1977,6 +1982,11 @@ static void slice_set(Value o, Value lo, Value hi, Value st, Value v)
 }
 static void setitem(Value o, Value idx, Value v)
 {
+    if (idx.t == T_INST && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR || o.t == T_BYTES ||
+                            o.t == T_BARR || o.t == T_RANGE) &&
+        (AS_INST(idx)->pay.t == T_INT || AS_INST(idx)->pay.t == T_BIG ||
+         class_find(AS_INST(idx)->cls, S_index)))
+        idx = need_intv(idx, "index");
     if (idx.t == T_BIG && (o.t == T_LIST || o.t == T_TUPLE || o.t == T_STR || o.t == T_BYTES ||
                            o.t == T_BARR))
         throw_new(cls_IndexError, "cannot fit 'int' into an index-sized integer");
