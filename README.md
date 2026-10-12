@@ -6,14 +6,14 @@ A Python 3 subset (see [SPEC.md](SPEC.md)) in two implementations that share one
 | Dir | Language | Notes |
 |-----|----------|-------|
 | `c/` | strict C89, one amalgamated file | portable (VM/370 target); `make -C c`, `./c/py file.py` |
-| `crexx/` | CREXX Level B | `./crexx/py file.py` (compiles on first use, ~2 min) |
+| `crexx/` | CREXX Level B | `./crexx/py file.py` (compiles on first use, a few minutes; later runs about 0.4 s with the patched VM, see `crexx/STARTUP.md`) |
 
-Test: `tests/run_tests.sh ./c/py` or `tests/run_tests.sh ./crexx/py` (both 21/21).
+Test: `tests/run_tests.sh ./c/py` or `tests/run_tests.sh ./crexx/py` (both 29/29). `make -C c test embed-test deck-test deck-embed-test strict` runs the portability checks as well.
 
-Speed of the C version against CPython 3.13: fib(27) 0.10 s vs 0.08 s, 3M-iteration loop 0.58 s vs 1.35 s,
-list/dict work 0.40 s vs 0.39 s. The CREXX version is a teaching/scripting tool (fib(22) about 1.9 s).
-Gaps are listed in each subdirectory README.
+Features (both interpreters unless noted): the language incl. classes, generators, comprehensions, `__new__` and subclasses of the built-in types, complex numbers, `bytes`/`bytearray`, `struct`, `cmath`, `re` and `json` (native C code in `c/`, Python in `pylib/` for CREXX), `socket`/`select` (C: only with `-DPY_POSIX`; CREXX: rxsocket), the usual standard library, NumPy (dtype objects, complex128, `numpy.fft`, complex eigenvalues), pandas (incl. Timestamp, Timedelta, DatetimeIndex, `date_range`, `to_datetime`, `.dt`, `resample`) and SciPy (incl. `scipy.fft`, `signal.freqz/hilbert/spectrogram/welch`). For VM/370 the C version builds as 71-column card decks (`make deck`), with the Python libraries embedded in the binary (`-DPY_EMBED_LIBS`, `make embed`) and a host adapter for the operating-system calls; see `c/PORTING.md`.
+
+Speed of the C version against CPython 3.13: fib(27) 0.06 s vs 0.05 s (fib(25): 0.02 s vs 0.03 s), 3M-iteration loop 0.53 s vs 0.95 s, list/dict work 0.23 s vs 0.27 s, native `re` and `json` about as fast as CPython's. The CREXX version is a teaching/scripting tool (fib(25) about 4.7 s). Set `CREXX_VM` to the patched virtual machine to cut its start-up from about 3 s to 0.4 s. Gaps are listed in each subdirectory README and in the manual (Chapter 12).
 
 ## Manual
 
-The user manual, [Python-CREXX-Guide.pdf](docs/Python-CREXX-Guide.pdf) (also as .docx), covers both interpreters: installing, the language, built-ins, standard library, NumPy, pandas, SciPy, errors, internals, measured performance, restrictions and the C/CREXX differences.
+The user manual, [Python-CREXX-Guide.pdf](docs/Python-CREXX-Guide.pdf) (also as .docx), covers both interpreters: installing, the language, built-ins, standard library, NumPy, pandas, SciPy, errors, internals, measured performance, restrictions, the C/CREXX differences and porting to VM/370 (13 chapters, about 120 pages).
