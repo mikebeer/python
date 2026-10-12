@@ -61,7 +61,7 @@ linecheck:
 	    src/p[0-9]*.c src/py.c tools/*.sh | grep . || (echo "linecheck: lines over 100 columns"; exit 1)
 	@echo "linecheck: ok"
 
-test: py
+test: posix
 	sh ../tests/run_tests.sh ./py
 
 # build the deck with strict flags and run the whole suite against it
