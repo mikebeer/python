@@ -473,7 +473,7 @@ static Value int_from_double(double d)
     if (d != d) throw_new(cls_ValueError, "cannot convert float NaN to integer");
     if (d > DBL_MAX || d < -DBL_MAX)
         throw_new(cls_OverflowError, "cannot convert float infinity to integer");
-    if (d < 1e17 && d > -1e17) return mkint((long)d);
+    if (d < (double)SI_MAX && d > -(double)SI_MAX) return mkint((long)d);  /* 32-bit long too */
     sprintf(b, "%.0f", d);
     if (parse_int(b, (long)strlen(b), 10, &r)) return r;
     return mkint(0);

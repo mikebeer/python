@@ -406,7 +406,8 @@ static unsigned long py_hash(Value v)
     case T_BOOL: case T_INT: case T_BIG: return int_hash(v);
     case T_FLOAT: {
         double d = v.u.d;
-        if (d == floor(d) && d < 1e17 && d > -1e17) return int_hash(mkint((long)d));
+        if (d == floor(d) && d < (double)SI_MAX && d > -(double)SI_MAX)
+            return int_hash(mkint((long)d));
         if (d != d) return 0;
         {
             unsigned char *p = (unsigned char *)&d;

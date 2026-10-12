@@ -2331,7 +2331,9 @@ static Value int_from_double(double d)
     if (d > DBL_MAX || d < -DBL_MAX)
         throw_new(cls_OverflowError,
             "cannot convert float infinity to integer");
-    if (d < 1e17 && d > -1e17) return mkint((long)d);
+    if (d < (double)SI_MAX && d > -(double)SI_MAX)
+        return mkint((long)d);
+    /* 32-bit long too */
     sprintf(b, "%.0f", d);
     if (parse_int(b, (long)strlen(b), 10, &r)) return r;
     return mkint(0);
@@ -5217,7 +5219,7 @@ static unsigned long py_hash(Value v)
     case T_BOOL: case T_INT: case T_BIG: return int_hash(v);
     case T_FLOAT: {
         double d = v.u.d;
-        if (d == floor(d) && d < 1e17 && d > -1e17)
+        if (d == floor(d) && d < (double)SI_MAX && d > -(double)SI_MAX)
             return int_hash(mkint((long)d));
         if (d != d) return 0;
         {
