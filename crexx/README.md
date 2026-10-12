@@ -148,7 +148,8 @@ results of any type, `__abs__ __round__ __format__ __call__ __enter__ __exit__`,
 - `sys.exc_info()` (from `exc_cur`), `sys._getframe(n)` (frame chain from `cs_*`, `f_locals` via `ns_scope_dict`), `raise X from Y`
   (`__cause__`, `__suppress_context__`), `__context__` set in `exec_try` when a handler raises, `Class.__new__(Class)`.
 - `os.mkdir rmdir remove unlink rename listdir` (`os_fs` in `h_imp`, over `rxfs`), `os.path.normcase`.
-- Tests 65 and 67 pass; 64 (time natives) and 66 (live `__dict__`, `__init_subclass__`, GenericAlias, ...) stay in `tests/crexx_skip.txt`.
+- Tests 64 to 67 pass (Build 11). Only `34_hash64` stays in `tests/crexx_skip.txt`.
+- Text-mode `open()` reads the whole file with `bin_load` and turns CRLF into LF; a last line without a newline gets none appended (test 44). A generic alias as a base class (`class X(list[int])`) stands for its origin class (`exec_class`).
 
 ## Hash values
 

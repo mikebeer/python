@@ -1226,6 +1226,11 @@ exec_class: procedure = .void
     bl_n = 0
     do i = 0 to ob_n[bo % 2] - 1
       b = sl[ob_p[bo % 2] + i]
+      /* class X(list[int]): a generic alias stands for its origin class */
+      if kind_of(b) = K_INST then do
+        r = inst_get(b, nameid("__origin__"))
+        if r > 0 then b = r
+      end
       if kind_of(b) \= K_CLASS then do
         r = raise_exc(C_TYPEERROR, "bases must be types")
         return

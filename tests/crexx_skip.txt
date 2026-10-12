@@ -1,5 +1,3 @@
 # tests the CREXX port is expected to skip (read by run_tests.sh when the interpreter path contains 'crexx')
 # 34_hash64: set iteration order of objects with a user __hash__ (CPython open-addressing table; CREXX sets keep insertion order). The hash values themselves are tested by 34b_hash_values
 34_hash64
-# 44_pathlib_fs: text-mode open() of a file without a final newline gets one appended on CREXX (the read path uses freadline; bin_load in h_mod.crexx would fix it)
-44_pathlib_fs

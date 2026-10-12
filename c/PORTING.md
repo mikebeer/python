@@ -26,7 +26,7 @@ On the build host (needs `python3` only for the generator tools; the C
 sources need nothing):
 
     make posix            # development build, ./py (uses pylib/ on disk)
-    make test             # 32 tests
+    make test             # 67 tests
     make embed            # ./py_embed with pylib/ compiled in (-DPY_EMBED_LIBS)
     make embed-test       # runs the tests from an EMPTY directory, PYLIB unset, bogus PY_LIBDIR
     make deck             # deck/py_deck.c, every line <= 71 columns
@@ -167,7 +167,7 @@ with `-DPY_U64_EMUL`, and the emulation checked against 64-bit arithmetic on
 made overridable.
 
 Simulating a 32-bit `long` on a 64-bit host: `-DPY_SI32 -DPY_U64_EMUL` (small
-ints limited to +-999999999, 64-bit emulation) passes all 32 tests. This simulation limits the small-int range but the host
+ints limited to +-999999999, 64-bit emulation) passes all 67 tests. This simulation limits the small-int range but the host
 `long` stays 64 bits, so it does not catch code that casts a double to `long` without
 testing against `SI_MAX` (that was the bug fixed in commit 6e4a7a5: `int(1e10)`
 and `Fraction(0.25)` saturated at 2147483647 on VM/370plus CMS, GCC 13 `-m31`).
@@ -224,7 +224,7 @@ Differences that are inherent to a 32-bit `long`: `len(range(n))` and `sys.maxsi
 numpy integer arrays are `long` (int64 arithmetic wraps at 32 bits), `-m32` without SSE2 uses the
 x87 (extended precision, `-0.0`).
 
-Sizes and results at this revision (32 tests; measured with `wc -l` and `make`):
+Sizes and results at this revision (67 tests; measured with `wc -l` and `make`):
 
 | file | lines (cards) | bytes | note |
 |---|---|---|---|

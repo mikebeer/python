@@ -8,7 +8,7 @@ A Python 3 subset (see [SPEC.md](SPEC.md)) in two implementations that share one
 | `c/` | strict C89, one amalgamated file | portable (VM/370 target); `make -C c`, `./c/py file.py` |
 | `crexx/` | CREXX Level B | `./crexx/py file.py` (compiles on first use, a few minutes; later runs about 0.4 s with the patched VM, see `crexx/STARTUP.md`) |
 
-Test: `tests/run_tests.sh ./c/py` or `tests/run_tests.sh ./crexx/py` (both 29/29). `make -C c test embed-test deck-test deck-embed-test strict` runs the portability checks as well.
+Test: `tests/run_tests.sh ./c/py` or `tests/run_tests.sh ./crexx/py` (67 numbered tests, 68 programs with the companion 34b: the C version passes all, the CREXX version all but `34_hash64`, a C-only set-order test listed in `tests/crexx_skip.txt`). `make -C c test embed-test deck-test deck-embed-test strict` runs the portability checks as well.
 
 Features (both interpreters unless noted): the language incl. classes, generators, comprehensions, `__new__` and subclasses of the built-in types, complex numbers, `bytes`/`bytearray`, `struct`, `cmath`, `re` and `json` (native C code in `c/`, Python in `pylib/` for CREXX), `socket`/`select` (C: only with `-DPY_POSIX`; CREXX: rxsocket), the usual standard library, NumPy (dtype objects, complex128, `numpy.fft`, complex eigenvalues), pandas (incl. Timestamp, Timedelta, DatetimeIndex, `date_range`, `to_datetime`, `.dt`, `resample`) and SciPy (incl. `scipy.fft`, `signal.freqz/hilbert/spectrogram/welch`). For VM/370 the C version builds as 71-column card decks (`make deck`), with the Python libraries embedded in the binary (`-DPY_EMBED_LIBS`, `make embed`) and a host adapter for the operating-system calls; see `c/PORTING.md`.
 
@@ -16,4 +16,4 @@ Speed of the C version against CPython 3.13: fib(27) 0.06 s vs 0.05 s (fib(25): 
 
 ## Manual
 
-The user manual, [Python-CREXX-Guide.pdf](docs/Python-CREXX-Guide.pdf) (also as .docx), covers both interpreters: installing, the language, built-ins, standard library, NumPy, pandas, SciPy, errors, internals, measured performance, restrictions, the C/CREXX differences and porting to VM/370 (13 chapters, about 120 pages).
+The user manual, [Python-CREXX-Guide.pdf](docs/Python-CREXX-Guide.pdf) (also as .docx), covers both interpreters: installing, the language, built-ins, standard library, NumPy, pandas, SciPy, errors, internals, measured performance, restrictions, the C/CREXX differences and porting to VM/370 (13 chapters and appendices, about 129 pages, Build 11).

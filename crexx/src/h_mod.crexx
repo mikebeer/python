@@ -150,25 +150,21 @@ bi_open: procedure = .int
       nfl = nfl - 1
       return raise_exc(C_FILENOTFOUNDERROR, "[Errno 2] No such file or directory: " || repr_str(fn))
     end
-    acc = ""
-    chunk = ""
-    nl = 0
-    eof = 0
-    do while eof = 0
-      line = ""
-      assembler freadline line, fid
-      assembler feof eof, fid
-      if eof > 0 & length(line) = 0 then leave
-      chunk = chunk || line || '0a'x
-      nl = nl + 1
-      if nl >= 100 then do
-        acc = acc || chunk
-        chunk = ""
-        nl = 0
-      end
-    end
     assembler fclose rcx, fid
-    fl_txt[id] = acc || chunk
+    acc = bin_load(fn)
+    /* universal newlines: CRLF becomes LF; nothing is added to a last line without one */
+    if pos('0d0a'x, acc) > 0 then do
+      chunk = ""
+      nl = 1
+      do forever
+        eof = pos('0d0a'x, acc, nl)
+        if eof = 0 then leave
+        chunk = chunk || substr(acc, nl, eof - nl) || '0a'x
+        nl = eof + 2
+      end
+      acc = chunk || substr(acc, nl)
+    end
+    fl_txt[id] = acc
     fl_h[id] = 0
   end
   else do
