@@ -1147,10 +1147,13 @@ class _LazySub:
     def _load(self):
         if self._mod is None:
             import sys
-            try:
-                import numpy._overlay.fft as m
-            except ImportError:
-                import numpy.fft as m
+            if self._name == 'fft':
+                try:
+                    import numpy._overlay.fft as m
+                except ImportError:
+                    import numpy.fft as m
+            else:
+                import numpy.random as m
             sys.modules['numpy.' + self._name] = m
             self._mod = m
         return self._mod
@@ -1165,6 +1168,7 @@ class _LazySub:
 
 
 fft = _LazySub('fft')
+random = _LazySub('random')
 complex128 = complex
 floating = float
 integer = int

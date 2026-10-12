@@ -1,0 +1,5 @@
+''
+'INFO a\nINFO b\nERROR boom\n'
+2 hello x
+'INFO a\nINFO b\nERROR boom\nWARNING w\n'
+2 ENOENT True -rw-r--r-- 493

@@ -36,9 +36,11 @@ Uncaught exceptions print a traceback and exit with status 1.
     src/p7_np.c     numpy subset: native ndarray, ufuncs, reductions, indexing, printing
     src/p7_la.c     numpy.linalg (LU, LAPACK-style eig/eigh/svd/qr ports, lstsq, norm ...)
     src/p7_np2.c    more numpy: diff/gradient/percentile/histogram/cov/polyfit/convolve/...
-    src/p7_rnd.c    numpy.random (xoshiro256**; legacy functions, default_rng, RandomState)
+    src/p7_rnd.c    numpy.random, bit-exact with numpy 2.x (MT19937, PCG64 + SeedSequence, ziggurat,
+                    legacy and Generator distributions); u64 helpers and the MT19937 core
+    src/p7_pyrand.c random module, bit-exact with CPython 3.13 (MT19937, native SHA-512 seeding)
     src/p7_imp.c    import system (files, packages, relative imports), exec/eval/globals, os
-    src/p7_mod.c    math, random, sys, time; exception hierarchy
+    src/p7_mod.c    math, sys, time; exception hierarchy
     src/p7_re.c     native re: parser (CPython messages), compiler, explicit-stack backtracking VM
     src/p7_json.c   native json: dumps/loads/dump/load, JSONEncoder/JSONDecoder, JSONDecodeError
     src/p7_sock.c   socket and select modules (IPv4 TCP) on the host_sock_* adapter of p0_os.c
@@ -108,7 +110,12 @@ dict)`, `__slots__` ignored, `__getattr__`/`__setattr__`/`__new__`, reflected/in
 dunders with `NotImplemented`, `__getitem__/__setitem__/__delitem__` with slice objects,
 `__iter__/__next__`, `__contains__ __len__ __bool__ __call__ __format__ __enter__/__exit__`,
 `property` with setter/deleter, `staticmethod`, `classmethod`, `x = yield`, `send`/`throw`/`close`, `StopIteration.value`, walrus `:=`
-(also in comprehensions), `Ellipsis`, live dict views, function attributes,
+(also in comprehensions), the `match` statement (literal, value, capture, wildcard, sequence with
+`*rest`, mapping with `**rest`, class, `|` and `as` patterns, guards; `match` and `case` stay ordinary
+names elsewhere), positional-only `/` and keyword-only parameters, variable and function
+annotations (`__annotations__` of modules, classes and functions; evaluated eagerly), star
+expressions in list/tuple/set displays, `ExceptionGroup` / `BaseExceptionGroup` (`split`, `subgroup`,
+`derive`, nesting rules) and `except*`, `Ellipsis`, live dict views, function attributes,
 nested-quote f-strings and `{x=}`, `print(file=)`, `%` with mapping keys, `dict | dict`.
 `io.StringIO` and `warnings` are small pure-Python modules in `../pylib`.
 
@@ -116,10 +123,11 @@ nested-quote f-strings and `{x=}`, `print(file=)`, `%` with mapping keys, `dict 
 
 Strings are bytes (len/index count UTF-8 bytes, case ops ASCII only); sets iterate in
 insertion order (their repr differs from CPython for mixed hash orders); `frozenset` is an alias
-of `set` (unhashable); no match statement, async, metaclass `__call__`; `r = yield from g()` (as an
+of `set` (unhashable); no async, metaclass `__call__`; `except*` inside a generator is not resumable; `r = yield from g()` (as an
 expression) and chained assignment with `yield` are not supported; no generator finalization
-on garbage collection; random does not reproduce CPython's sequence (nor numpy's);
-`math.erf/erfc/gamma/lgamma` are within about 1e-15 of libm, not bit-identical.
+on garbage collection; `math.erf/erfc/gamma/lgamma` are within about 1e-15 of libm, not bit-identical
+(so `random.binomialvariate` for `n*p >= 10` can differ in the last digit through `lgamma`, and a
+float that numpy computes with glibc's FMA-compiled `log1p/expm1/pow` can differ by one ulp).
 
 ## Subclassing builtin types and `__new__`
 
@@ -291,10 +299,35 @@ integer matrices (orders 2 to 6): identical verdicts for orders 2 to 5, 7 of 613
 (5) Matrices that are close to singular (condition
 number above about 1e10) give `pinv`/`lstsq`/`cond` results that agree only to a few digits.
 
-`numpy.random`: `seed rand randn random random_sample randint choice permutation shuffle normal
-uniform standard_normal exponential poisson binomial`, `default_rng(seed)` and `RandomState(seed)`
-objects with the same methods (`integers`, `random`, ...). The generator is xoshiro256** seeded with
-splitmix64, so sequences are reproducible per seed but do not match numpy's.
+`numpy.random` reproduces numpy 2.x exactly (checked against numpy 2.5.3: tests/36_random.py and
+about 600 further sequences). Legacy: `seed` / `RandomState(seed)` on MT19937 (`init_genrand` for an
+int, `init_by_array` for an array), `rand random_sample randint` (masked rejection) `randn` (polar
+Box-Muller with its cached value) `shuffle permutation choice` and the distributions `normal uniform
+exponential standard_* gamma beta chisquare noncentral_* f standard_t pareto weibull power laplace
+gumbel logistic lognormal rayleigh wald vonmises triangular poisson binomial geometric
+negative_binomial logseries zipf hypergeometric multinomial dirichlet bytes`, `get_state` / `set_state`. Generator: `default_rng(seed)` is
+`SeedSequence` + `PCG64` (128-bit state held as two u64), with ziggurat normals / exponentials, Lemire
+bounded integers, `integers(endpoint=)`, `random`, `choice` (Floyd, tail shuffle, `p=`),
+`permutation`, `shuffle`, the same distributions, and `PCG64` / `MT19937` / `SeedSequence`
+(`generate_state`, `spawn`) objects with `random_raw` and the `state` dict. The six ziggurat tables
+cannot be regenerated bit for bit (numpy computes them with its own build-time double arithmetic),
+so they are embedded as constants (as is the log-factorial table of the Generator's hypergeometric).
+Not provided: `multivariate_normal` and array-valued `n` of `multinomial`; `Generator.integers` with array bounds; 8/16-bit dtypes of `integers` draw
+like numpy but are returned as int64; `wald` and the `pareto`/`power`/`rayleigh` family can differ in
+the last digit where numpy's build contracts multiply-add or uses glibc's FMA `log1p`/`expm1`.
+
+`random` is CPython's algorithms on CPython's generator (src/p7_pyrand.c): MT19937 seeded by
+`init_by_array` over the 32-bit chunks of `abs(int)`, `str`/`bytes`/`bytearray` seeds through
+version 2 (`int.from_bytes(a + sha512(a).digest())`, SHA-512 is native and written on the u64
+helpers), a float seed through its hash (`float_hash_exact`, as an unsigned 64-bit number), `None`
+from `/dev/urandom`; `random getrandbits randbytes randrange randint choice shuffle sample(counts=)
+choices uniform triangular normalvariate gauss lognormvariate expovariate vonmisesvariate
+gammavariate betavariate paretovariate weibullvariate binomialvariate`, `getstate` / `setstate`
+(version 3 and 2 states, `gauss_next`), `random.Random(seed)` instances with independent state, a
+subclass may override `random` / `getrandbits` / `_randbelow` / `seed` (the algorithm
+`Random.__init_subclass__` picks is reproduced) and `SystemRandom`. Output is identical to CPython
+3.13 for all of them (tests/36_random.py, tests/51_random_exact.py, and a 300-seed sweep of every
+function). A hidden `random._sha512(bytes)` exposes the digest for testing.
 
 More numpy functions (p7_np2.c): `isclose arctan2 hypot linspace(retstep) meshgrid outer inner
 vdot cross diff ediff1d gradient percentile quantile median(axis) histogram bincount cov

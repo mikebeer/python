@@ -813,6 +813,21 @@ hk_set: procedure = .string
       end
       return s || ")"
 
+/* dict key text of an object with a user __hash__ m: its result must be an integer */
+hk_user: procedure = .string
+  arg m = .int, x = .int
+  r = .int
+  r = call0(m, x)
+  if r = 0 then return "?"
+  if r // 2 = 0 then do
+    if ob_k[r % 2] = K_BOOL then return "h" || ival(r)
+    if ob_k[r % 2] \= K_BIG then do
+      r = raise_exc(C_TYPEERROR, "__hash__ method should return an integer")
+      return "?"
+    end
+  end
+  return "h" || num_str(r)
+
 /* key of an unhashable list / dict / set / bytearray: a subclass may define __hash__ */
 hk_unhash: procedure = .string
   arg x = .int
@@ -820,11 +835,7 @@ hk_unhash: procedure = .string
   r = .int
   if ob_c[x % 2] > 0 then do
     m = cls_find(ob_c[x % 2], M___HASH__)
-    if m > 0 then do
-      r = call0(m, x)
-      if r = 0 then return "?"
-      return "h" || num_str(r)
-    end
+    if m > 0 then return hk_user(m, x)
   end
   r = raise_exc(C_TYPEERROR, "unhashable type: '" || type_name(x) || "'")
   return "?"
@@ -901,9 +912,7 @@ hashkey: procedure = .string
           end
           if unw > 0 then return "?"
         end
-        r = call0(m, x)
-        if r = 0 then return "?"
-        return "h" || num_str(r)
+        return hk_user(m, x)
       end
       return "o" || x
     end

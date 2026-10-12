@@ -251,6 +251,9 @@ init: procedure = .void
   pe = 0
   pe_msg = ""
   nnode = 0
+  pm_cnt = 0
+  sp_m = 0
+  sp_r = 0
   n_t = .int[]
   n_a = .int[]
   n_b = .int[]
@@ -289,6 +292,11 @@ init: procedure = .void
   npq = 0
   pq_name = .string[]
   pq_def = .int[]
+  pq_ann = .int[]
+  pq_po = .int[]
+  pr_po = .int[]
+  pr_ann = .int[]
+  fd_ret = .int[]
   pq_kind = .int[]
   nfd = 0
   fd_np = .int[]
@@ -521,7 +529,7 @@ init: procedure = .void
   imp_ispkg = 0
   imp_pdir = ""
   imp_quiet = 0
-  natives = " math random sys time typing __future__ os os.path numpy numpy.linalg numpy.random warnings abc "
+  natives = " math sys time typing __future__ os os.path numpy numpy.linalg warnings abc "
   shadow = " functools.wraps functools.lru_cache functools.cache "
   /* ---- class linearisation ---- */
   cl_mod = .int[]
@@ -728,6 +736,8 @@ boot: procedure = .void
   cmpr[CMP_GT] = nameid("__lt__")
   cmpr[CMP_GE] = nameid("__le__")
   call cls_set C_BASEEXCEPTION, M___INIT__, bi_oop[BI__EXC_INIT]
+  call cls_set C_BASEEXCEPTIONGROUP, M_SPLIT, bi_oop[BI__EG_SPLIT]
+  call cls_set C_BASEEXCEPTIONGROUP, M_SUBGROUP, bi_oop[BI__EG_SUBGROUP]
   call cls_set C_OBJECT, M___INIT__, bi_oop[BI__OBJ_INIT]
   /* module constants */
   modattr["math.pi"] = mkfloat(parse_flt("3.141592653589793")) as .string
@@ -764,7 +774,6 @@ boot: procedure = .void
   call setup_path
   modattr["os.path"] = native_mod("os.path") as .string
   modattr["numpy.linalg"] = native_mod("numpy.linalg") as .string
-  modattr["numpy.random"] = native_mod("numpy.random") as .string
   modattr["abc.ABC"] = cl_obj[C_ABC] as .string
   modattr["abc.ABCMeta"] = cl_obj[C_ABC] as .string
   bimap["IOError"] = cl_obj[C_OSERROR] as .string

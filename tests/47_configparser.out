@@ -1,0 +1,54 @@
+['paths', 'server'] {'base': '/opt', 'user': 'bob'} ['DEFAULT', 'paths', 'server'] 3
+/opt/home/log %(home)s/log /opt/home value with spaces 'line one\nline two' '' None
+8080 0.75 True 30 8080 True
+['port', 'ratio', 'debug', 'timeout', 'base', 'user'] False True True True False
+[('base', '/opt'), ('user', 'bob'), ('port', '8080'), ('ratio', '0.75'), ('debug', 'yes'), ('timeout', '30')] [('base', '/opt'), ('user', 'bob'), ('home', '%(base)s/home')]
+fb 5 d None None
+NoSectionError No section: 'nosec'
+NoOptionError No option 'zzz' in section: 'server'
+DuplicateSectionError Section 'server' already exists
+ValueError invalid literal for int() with base 10: 'value with spaces'
+KeyError 'q'
+TypeError option values must be strings
+ValueError Not a boolean: 8080
+[DEFAULT]
+base = /opt
+user = bob
+
+[server]
+port = 8080
+debug = yes
+timeout = 30
+new = val
+
+[extra]
+a = 1
+b = 2
+c = three
+
+
+[DEFAULT]
+base=/opt
+user=bob
+
+[server]
+port=8080
+debug=yes
+timeout=30
+new=val
+
+[extra]
+a=1
+b=2
+c=three
+
+%(y)s 1 ['s']
+1-q
+MissingSectionHeaderError File contains no section headers.|file: '<string>', line: 1|'k = v\n'
+DuplicateOptionError While reading from '<string>' [line  3]: option 'k' in section 'a' already exists
+DuplicateSectionError While reading from '<string>' [line  2]: section 'a' already exists
+ParsingError Source contains parsing errors: '<string>'|	[line  2]: 'novalue\n'
+InterpolationMissingOptionError Bad value substitution: option 'x' in section 'a' contains an interpolation key 'nope' which is not a valid option name. Raw value: '%(nope)s'
+{'a': '1', 'b': 'x#y', 'c: d': 'e'} s True <Section: s>
+2 v abc
+['CamelCase', 'k']

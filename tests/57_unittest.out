@@ -1,0 +1,195 @@
+['test_a_basic', 'test_b_raises', 'test_c_fail_messages', 'test_d_subtest', 'test_e_skipif', 'test_f_skipunless', 'test_g_expected', 'test_h_unexpected', 'test_i_skiptest']
+---
+1 != 2
+---
+'a' != 'b'
+- a
++ b
+ : custom msg
+---
+Lists differ: [1, 2, 3] != [1, 2, 4]
+
+First differing element 2:
+3
+4
+
+- [1, 2, 3]
+?        ^
+
++ [1, 2, 4]
+?        ^
+
+---
+{'a': 1, 'b': 2} != {'a': 1, 'b': 3}
+- {'a': 1, 'b': 2}
+?               ^
+
++ {'a': 1, 'b': 3}
+?               ^
+
+---
+Tuples differ: (1, 2) != (1, 2, 3)
+
+Second tuple contains 1 additional elements.
+First extra element 2:
+3
+
+- (1, 2)
++ (1, 2, 3)
+?      +++
+
+---
+Items in the first set but not the second:
+1
+Items in the second set but not the first:
+3
+---
+'a\nb\nc' != 'a\nx\nc'
+  a
+- b
++ x
+  c
+
+---
+0 is not true
+---
+1 is not false
+---
+1 not found in [2]
+---
+1 unexpectedly found in [1]
+---
+1 is not 2
+---
+5 is not None
+---
+unexpectedly None
+---
+1 is not an instance of <class 'str'>
+---
+1 not greater than 2
+---
+3 not less than or equal to 2
+---
+1.0 != 1.5 within 7 places (0.5 difference)
+---
+1.0 == 1.0 within 7 places
+---
+Regex didn't match: 'z+' not found in 'abc'
+---
+Regex matched: 'b' matches 'b' in 'abc'
+---
+Element counts were not equal:
+First has 1, Second has 0:  2
+First has 0, Second has 1:  3
+---
+ValueError not raised by <lambda>
+---
+"zzz" does not match "invalid literal for int() with base 10: 'x'"
+---
+explicit
+---
+Lists differ: [1] != [2]
+
+First differing element 0:
+1
+2
+
+- [1]
++ [2]
+---
+{} != {'a': 1}
+- {}
++ {'a': 1}
+tearDownClass ['setUpClass', 'setUp test_a_basic', 'cleanup test_a_basic', 'setUp test_b_raises', 'cleanup test_b_raises', 'setUp test_c_fail_messages', 'cleanup test_c_fail_messages', 'setUp test_d_subtest', 'cleanup test_d_subtest', 'setUp test_g_expected', 'cleanup test_g_expected', 'setUp test_h_unexpected', 'cleanup test_h_unexpected', 'setUp test_i_skiptest', 'cleanup test_i_skiptest']
+test_a_basic (__main__.Calc.test_a_basic) ... ok
+test_b_raises (__main__.Calc.test_b_raises) ... ok
+test_c_fail_messages (__main__.Calc.test_c_fail_messages) ... ok
+test_d_subtest (__main__.Calc.test_d_subtest) ... 
+  test_d_subtest (__main__.Calc.test_d_subtest) (i=1) ... FAIL
+test_e_skipif (__main__.Calc.test_e_skipif) ... skipped 'always'
+test_f_skipunless (__main__.Calc.test_f_skipunless) ... skipped 'never'
+test_g_expected (__main__.Calc.test_g_expected) ... expected failure
+test_h_unexpected (__main__.Calc.test_h_unexpected) ... unexpected success
+test_i_skiptest (__main__.Calc.test_i_skiptest) ... skipped 'dyn skip'
+
+======================================================================
+FAIL: test_d_subtest (__main__.Calc.test_d_subtest) (i=1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+AssertionError: 1 == 1
+
+======================================================================
+UNEXPECTED SUCCESS: test_h_unexpected (__main__.Calc.test_h_unexpected)
+----------------------------------------------------------------------
+Ran 9 tests in Xs
+
+FAILED (failures=1, skipped=3, expected failures=1, unexpected successes=1)
+
+9 1 0 3 1 1 False
+E
+======================================================================
+ERROR: test_x (__main__.Fixture.test_x)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+RuntimeError: setup broke
+
+----------------------------------------------------------------------
+Ran 1 test in Xs
+
+FAILED (errors=1)
+
+1 0 1 0 0 0 False
+3
+...
+----------------------------------------------------------------------
+Ran 3 tests in Xs
+
+OK
+
+3 0 0 0 0 0 True
+test_1 (__main__.Fn.test_1) ... ok
+test_2 (__main__.Fn.test_2) ... ok
+test_1 (__main__.Fn.test_1) ... ok
+test_2 (__main__.Fn.test_2) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in Xs
+
+OK
+
+4 0 0 0 0 0 True
+2 True
+__main__.Fn.test_1 test_1 (__main__.Fn.test_1) None
+test_a (__main__.Skipped.test_a) ... skipped 'class skipped'
+
+----------------------------------------------------------------------
+Ran 1 test in Xs
+
+OK (skipped=1)
+
+1 0 0 1 0 0 True
+test_ctx (__main__.Ctx.test_ctx) ... ok
+test_nested_sub (__main__.Ctx.test_nested_sub) ... 
+  test_nested_sub (__main__.Ctx.test_nested_sub) (b=2, a=1) ... FAIL
+
+======================================================================
+FAIL: test_nested_sub (__main__.Ctx.test_nested_sub) (b=2, a=1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+AssertionError: False is not true
+
+----------------------------------------------------------------------
+Ran 2 tests in Xs
+
+FAILED (failures=1)
+
+2 1 0 0 0 0 False
+..
+----------------------------------------------------------------------
+Ran 2 tests in Xs
+
+OK
+
+True
+2

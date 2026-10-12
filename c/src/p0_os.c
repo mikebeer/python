@@ -365,6 +365,27 @@ static unsigned long host_seed(void)
 {
     return (unsigned long)time(NULL) * 1000003UL + (unsigned long)clock();
 }
+/* n unpredictable bytes (random seeding, os.urandom): /dev/urandom with PY_POSIX, else a
+   generator mixed from the clock, the cpu time and an address */
+static void host_urandom(unsigned char *buf, long n)
+{
+    long i = 0;
+#ifdef PY_POSIX
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        i = (long)fread(buf, 1, (size_t)n, f);
+        fclose(f);
+        if (i < 0) i = 0;
+    }
+#endif
+    if (i < n) {
+        unsigned long s = host_seed() ^ (unsigned long)(size_t)buf;
+        for (; i < n; i++) {
+            s = s * 1103515245UL + 12345UL;
+            buf[i] = (unsigned char)((s >> 16) & 255UL);
+        }
+    }
+}
 
 /* ---- sockets (IPv4 TCP) -------------------------------------------------
    The whole network interface of the interpreter.  Descriptors are small

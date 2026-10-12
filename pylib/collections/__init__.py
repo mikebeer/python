@@ -659,13 +659,13 @@ class ChainMap(_MapBase):
         return False
 
     def keys(self):
-        return list(self._merged())
+        return list(iter(self))
 
     def values(self):
-        return [self[k] for k in self._merged()]
+        return [self[k] for k in iter(self)]
 
     def items(self):
-        return [(k, self[k]) for k in self._merged()]
+        return [(k, self[k]) for k in iter(self)]
 
     def __setitem__(self, k, v):
         self.maps[0][k] = v
@@ -710,14 +710,14 @@ class ChainMap(_MapBase):
     def new_child(self, m=None):
         if m is None:
             m = {}
-        return ChainMap(m, *self.maps)
+        return self.__class__(m, *self.maps)
 
     @property
     def parents(self):
-        return ChainMap(*self.maps[1:])
+        return self.__class__(*self.maps[1:])
 
     def copy(self):
-        return ChainMap(self.maps[0].copy(), *self.maps[1:])
+        return self.__class__(self.maps[0].copy(), *self.maps[1:])
 
     def __eq__(self, other):
         if isinstance(other, (list, tuple, set, int, float, str)) or other is None:
@@ -799,3 +799,6 @@ class UserList:
 
     def __repr__(self):
         return repr(self.data)
+
+
+import collections.abc as abc

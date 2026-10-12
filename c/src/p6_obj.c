@@ -1264,13 +1264,20 @@ static Value get_attr(Value o, Str *nm)
     case T_FUNC:
         p = amap_get(&AS_FUNC(o)->attrs, nm);
         if (p) return *p;
+        if (nm == intern_c("__annotations__")) {
+            Value av = mkobj(dict_new(), T_DICT);
+            amap_set(&AS_FUNC(o)->attrs, nm, av);
+            return av;
+        }
         if (nm == S_dict) {
             Dict *d = dict_new();
             int k;
             Value dv = mkobj(d, T_DICT);
             VPUSH(dv);
-            for (k = 0; k < AS_FUNC(o)->attrs.n; k++)
+            for (k = 0; k < AS_FUNC(o)->attrs.n; k++) {
+                if (AS_FUNC(o)->attrs.k[k] == intern_c("__annotations__")) continue;
                 dict_set(d, mkobj(AS_FUNC(o)->attrs.k[k], T_STR), AS_FUNC(o)->attrs.v[k]);
+            }
             vsp--;
             return dv;
         }

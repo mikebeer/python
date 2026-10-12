@@ -825,6 +825,42 @@ strhash: procedure = .int
   end
   return h
 
+/* the result of a user __hash__: an int that fits 64 bits is kept (-1 becomes -2), a larger one is reduced like hash(int) */
+hash_ret: procedure = .int
+  arg r = .int
+  k = .int
+  if r = 0 then return 0
+  if r // 2 \= 0 then do
+    if r = -1 then return -3
+    return r
+  end
+  k = ob_k[r % 2]
+  if k = K_BOOL then return mkint(ival(r))
+  if k = K_BIG then do
+    if big_fits64(ob_s[r % 2]) = 1 then return r
+    return mkint(hash_bigstr(ob_s[r % 2]))
+  end
+  return raise_exc(C_TYPEERROR, "__hash__ method should return an integer")
+
+big_fits64: procedure = .int
+  arg s = .string
+  m = .string
+  neg = .int
+  m = s
+  neg = 0
+  if left(m, 1) == "-" then do
+    neg = 1
+    m = substr(m, 2)
+  end
+  if length(m) < 19 then return 1
+  if length(m) > 19 then return 0
+  if neg = 1 then do
+    if m >> "9223372036854775808" then return 0
+    return 1
+  end
+  if m >> "9223372036854775807" then return 0
+  return 1
+
 bi_hash: procedure = .int
   arg x = .int
   k = .int
@@ -840,7 +876,7 @@ bi_hash: procedure = .int
   k = ob_k[x % 2]
   if ob_c[x % 2] > 0 then do
     m = nsov(x, M___HASH__)
-    if m > 0 then return call1(m, x)
+    if m > 0 then return hash_ret(call1(m, x))
   end
   select
     when k = K_STR then return mkint(strhash(ob_s[x % 2]))
@@ -889,7 +925,7 @@ bi_hash: procedure = .int
     when k = K_LIST | k = K_DICT then return raise_exc(C_TYPEERROR, "unhashable type: '" || type_name(x) || "'")
     when k = K_INST then do
       m = cls_find(ob_c[x % 2], M___HASH__)
-      if m > 0 then return call1(m, x)
+      if m > 0 then return hash_ret(call1(m, x))
       return mkint(x)
     end
     otherwise return mkint(x)
@@ -1005,6 +1041,7 @@ bi_format: procedure = .int
 bi_exc_init: procedure = .int
   arg base = .int, na = .int
   call inst_set ast[base + 1], M_ARGS, tup_from_ast(base + 2, base + na)
+  if cls_issub(ob_c[ast[base + 1] % 2], C_BASEEXCEPTIONGROUP) = 1 then return eg_init(ast[base + 1], base, na)
   return NONE_OOP
 
 bi_super: procedure = .int
@@ -1537,6 +1574,8 @@ bcall: procedure = .int
     when bid = BI_SUPER then return bi_super(base, na)
     when bid = BI__EXC_INIT then return bi_exc_init(base, na)
     when bid = BI__OBJ_INIT then return NONE_OOP
+    when bid = BI__EG_SPLIT then return bi_eg_split(base, na, 1)
+    when bid = BI__EG_SUBGROUP then return bi_eg_split(base, na, 2)
     when bid = BI_GLOBALS then return bi_globals()
     when bid = BI_EVAL then return bi_evalexec(1, base, na)
     when bid = BI_EXEC then return bi_evalexec(0, base, na)

@@ -250,6 +250,16 @@ p_test: procedure = .int
   f = .int
   if at("lambda") = 1 then return p_lambda()
   e = p_or()
+  if at(":=") = 1 then do
+    if n_t[e] \= N_NAME then do
+      call perr "cannot use assignment expressions with this target"
+      return e
+    end
+    tpp = tpp + 1
+    call walrus_bind n_s[e]
+    c = p_test()
+    return mk(N_WALRUS, e, c, 0)
+  end
   if at("if") = 1 then do
     tpp = tpp + 1
     c = p_or()
@@ -258,6 +268,23 @@ p_test: procedure = .int
     return mk(N_IFEXP, c, e, f)
   end
   return e
+
+/* the target of ':=' lives in the nearest enclosing non-comprehension scope */
+walrus_bind: procedure = .void
+  arg nm = .string
+  s = .int
+  sv = .int
+  dmy = .int
+  s = cursc
+  do while sc_kind[s] = SK_COMP & sc_par[s] > 0
+    scm[s || "|" || nm] = "-2"
+    s = sc_par[s]
+  end
+  sv = cursc
+  cursc = s
+  dmy = bind_name(nm)
+  cursc = sv
+  return
 
 p_or: procedure = .int
   l = .int
@@ -1263,6 +1290,8 @@ p_params: procedure = .int
   mode = .int
   nm = .string
   d = .int
+  an = .int
+  k = .int
   kind = .int
   base = npq
   mode = 0
@@ -1272,31 +1301,45 @@ p_params: procedure = .int
       mode = 2
       if tk_t[tpp] = T_NAME then do
         nm = expect_name()
-        if ann = 1 & accept(":") = 1 then d = p_test()
+        an = 0
+        if ann = 1 & accept(":") = 1 then an = p_test()
         npq = npq + 1
         pq_name[npq] = nm
         pq_def[npq] = 0
+        pq_ann[npq] = an
+        pq_po[npq] = 0
         pq_kind[npq] = 1
       end
     end
     else if at("**") = 1 then do
       tpp = tpp + 1
       nm = expect_name()
-      if ann = 1 & accept(":") = 1 then d = p_test()
+      an = 0
+      if ann = 1 & accept(":") = 1 then an = p_test()
       npq = npq + 1
       pq_name[npq] = nm
       pq_def[npq] = 0
+      pq_ann[npq] = an
+      pq_po[npq] = 0
       pq_kind[npq] = 3
     end
-    else if at("/") = 1 then tpp = tpp + 1
+    else if at("/") = 1 then do
+      tpp = tpp + 1
+      do k = base + 1 to npq
+        pq_po[k] = 1
+      end
+    end
     else do
       nm = expect_name()
-      if ann = 1 & accept(":") = 1 then d = p_test()
+      an = 0
+      if ann = 1 & accept(":") = 1 then an = p_test()
       d = 0
       if accept("=") = 1 then d = p_test()
       npq = npq + 1
       pq_name[npq] = nm
       pq_def[npq] = d
+      pq_ann[npq] = an
+      pq_po[npq] = 0
       pq_kind[npq] = mode
     end
     if accept(",") = 0 then leave
@@ -1320,6 +1363,8 @@ setup_params: procedure = .void
     npr = npr + 1
     pr_name[npr] = pq_name[i]
     pr_def[npr] = pq_def[i]
+    pr_ann[npr] = pq_ann[i]
+    pr_po[npr] = pq_po[i]
     pr_kind[npr] = pq_kind[i]
     pr_slot[npr] = bind_name(pq_name[i])
     k = pq_kind[i]
@@ -1455,6 +1500,14 @@ p_stmt: procedure = .void
         return
       end
       otherwise nop
+    end
+  end
+  if t = T_NAME & s == "match" then do
+    if is_match() = 1 then do
+      n = p_match()
+      psp = psp + 1
+      ps[psp] = n
+      return
     end
   end
   if t = T_OP & s == "@" then do
@@ -1606,6 +1659,7 @@ p_try: procedure = .int
   base = .int
   y = .int
   i = .int
+  star = .int
   tpp = tpp + 1
   call expect ":"
   body = p_suite()
@@ -1617,6 +1671,11 @@ p_try: procedure = .int
     tpp = tpp + 1
     ty = 0
     nm = 0
+    star = 0
+    if at("*") = 1 then do
+      tpp = tpp + 1
+      star = 1
+    end
     if at(":") = 0 then do
       ty = p_test()
       if accept("as") = 1 then do
@@ -1631,6 +1690,7 @@ p_try: procedure = .int
     hb = p_suite()
     if n_y[hb] = 1 then y = 1
     h = mk(N_HANDLER, ty, nm, hb)
+    n_d[h] = star
     psp = psp + 1
     ps[psp] = h
   end
@@ -1653,6 +1713,357 @@ p_try: procedure = .int
   n_e[n] = fin
   n_y[n] = y
   return n
+
+/* ---- match statement ---- */
+/* 'match' starts a statement when the line ends with ':' and the next token cannot continue an expression statement */
+is_match: procedure = .int
+  i = .int
+  t = .int
+  nx = .string
+  if tk_t[tpp + 1] = T_NL | tk_t[tpp + 1] = T_EOF then return 0
+  if tk_t[tpp + 1] = T_OP then do
+    nx = tk_s[tpp + 1]
+    if nx == "=" | nx == "." | nx == "," | nx == ")" | nx == ":" | nx == ";" | nx == ":=" then return 0
+    if length(nx) >= 2 & right(nx, 1) == "=" then return 0
+  end
+  i = tpp + 1
+  do forever
+    t = tk_t[i]
+    if t = T_NL | t = T_EOF then leave
+    i = i + 1
+  end
+  if tk_t[i - 1] = T_OP & tk_s[i - 1] == ":" then do
+    if tk_t[i + 1] = T_IND then return 1
+  end
+  return 0
+
+p_match: procedure = .int
+  subj = .int
+  tmpn = .string
+  tn = .int
+  asg = .int
+  base = .int
+  base2 = .int
+  pat = .int
+  guard = .int
+  body = .int
+  cond = .int
+  pm = .int
+  ncase = .int
+  i = .int
+  e = .int
+  ifn = .int
+  y = .int
+  st = .int
+  cnt = .int
+  dmy = .int
+  seq = .int
+  tpp = tpp + 1
+  subj = p_testlist()
+  call expect ":"
+  if tk_t[tpp] = T_NL then tpp = tpp + 1
+  if tk_t[tpp] \= T_IND then do
+    call perr "expected an indented block"
+    return mk(N_PASS, 0, 0, 0)
+  end
+  tpp = tpp + 1
+  pm_cnt = pm_cnt + 1
+  tmpn = ".m" || pm_cnt
+  tn = mkname(tmpn)
+  call mk_target tn
+  base = psp
+  psp = psp + 1
+  ps[psp] = tn
+  st = plist(base)
+  asg = mk(N_ASSIGN, subj, st, 1)
+  n_y[asg] = n_y[subj]
+  base = psp
+  ncase = 0
+  y = 0
+  do while tk_t[tpp] \= T_DED & tk_t[tpp] \= T_EOF
+    if tk_t[tpp] = T_NL then do
+      tpp = tpp + 1
+      iterate
+    end
+    if tk_t[tpp] \= T_NAME | tk_s[tpp] \== "case" then do
+      call perr "expected 'case'"
+      leave
+    end
+    tpp = tpp + 1
+    pat = p_patterns()
+    guard = 0
+    if accept("if") = 1 then guard = p_test()
+    call expect ":"
+    body = p_suite()
+    if n_y[body] = 1 then y = 1
+    pm = mk(N_PMATCH, pat, mkname(tmpn), 0)
+    cond = pm
+    if guard > 0 then cond = mk(N_AND, pm, guard, 0)
+    psp = psp + 1
+    ps[psp] = cond
+    psp = psp + 1
+    ps[psp] = body
+    ncase = ncase + 1
+  end
+  if tk_t[tpp] = T_DED then tpp = tpp + 1
+  e = 0
+  do i = ncase to 1 by -1
+    cond = ps[base + 2 * i - 1]
+    body = ps[base + 2 * i]
+    ifn = mk(N_IF, cond, body, e)
+    n_y[ifn] = 0
+    if n_y[body] = 1 then n_y[ifn] = 1
+    if e > 0 then do
+      if n_y[e] = 1 then n_y[ifn] = 1
+    end
+    e = ifn
+  end
+  psp = base
+  base = psp
+  psp = psp + 1
+  ps[psp] = asg
+  if e > 0 then do
+    psp = psp + 1
+    ps[psp] = e
+  end
+  cnt = psp - base
+  st = plist(base)
+  return mkseq(st, cnt)
+
+/* top level of a case: a pattern or an open sequence pattern */
+p_patterns: procedure = .int
+  base = .int
+  x = .int
+  comma = .int
+  base = psp
+  comma = 0
+  do forever
+    x = p_pat_star()
+    psp = psp + 1
+    ps[psp] = x
+    if at(",") = 1 then do
+      tpp = tpp + 1
+      comma = 1
+      if at(":") = 1 | at("if") = 1 then leave
+    end
+    else leave
+  end
+  if comma = 0 & n_t[ps[psp]] \= N_PSTAR then do
+    x = ps[psp]
+    psp = base
+    return x
+  end
+  return mk_pseq(base)
+
+/* the entries on ps above base become a sequence pattern node */
+mk_pseq: procedure = .int
+  arg base = .int
+  cnt = .int
+  st = .int
+  n = .int
+  i = .int
+  star = .int
+  star = 0
+  cnt = psp - base
+  do i = 1 to cnt
+    if n_t[ps[base + i]] = N_PSTAR then do
+      if star > 0 then call perr "multiple starred names in sequence pattern"
+      star = i
+    end
+  end
+  st = plist(base)
+  n = mk(N_PSEQ, st, cnt, star)
+  return n
+
+p_pat_star: procedure = .int
+  nm = .string
+  x = .int
+  if at("*") = 1 then do
+    tpp = tpp + 1
+    nm = expect_name()
+    if nm == "_" then x = mk(N_PWILD, 0, 0, 0)
+    else do
+      x = mkname(nm)
+      call mk_target x
+      x = mk(N_PCAP, x, 0, 0)
+    end
+    return mk(N_PSTAR, x, 0, 0)
+  end
+  return p_pattern()
+
+p_pattern: procedure = .int
+  x = .int
+  nm = .string
+  n = .int
+  x = p_or_pat()
+  if accept("as") = 1 then do
+    nm = expect_name()
+    n = mkname(nm)
+    call mk_target n
+    return mk(N_PAS, x, n, 0)
+  end
+  return x
+
+p_or_pat: procedure = .int
+  base = .int
+  x = .int
+  cnt = .int
+  st = .int
+  x = p_closed_pat()
+  if at("|") = 0 then return x
+  base = psp
+  psp = psp + 1
+  ps[psp] = x
+  do while accept("|") = 1
+    x = p_closed_pat()
+    psp = psp + 1
+    ps[psp] = x
+  end
+  cnt = psp - base
+  st = plist(base)
+  return mk(N_POR, st, cnt, 0)
+
+p_closed_pat: procedure = .int
+  t = .int
+  s = .string
+  x = .int
+  y = .int
+  nm = .string
+  base = .int
+  cnt = .int
+  st = .int
+  npos = .int
+  nkw = .int
+  kw = .int
+  sub = .int
+  t = tk_t[tpp]
+  s = tk_s[tpp]
+  if t = T_NUM | t = T_BIG | t = T_FLT | (t = T_OP & s == "-") then do
+    x = p_bin(5)
+    return mk(N_PVAL, x, 0, 0)
+  end
+  if t = T_STR then do
+    x = p_strings()
+    return mk(N_PVAL, x, 0, 0)
+  end
+  if t = T_KW & (s == "None" | s == "True" | s == "False") then do
+    x = p_atom()
+    return mk(N_PSING, x, 0, 0)
+  end
+  if t = T_NAME then do
+    if tk_t[tpp + 1] = T_OP & (tk_s[tpp + 1] == "." | tk_s[tpp + 1] == "(") then do
+      x = mkname(s)
+      tpp = tpp + 1
+      do while at(".") = 1
+        tpp = tpp + 1
+        x = mk(N_ATTR, x, 0, 0)
+        n_s[x] = expect_name()
+        n_b[x] = nameid(n_s[x])
+      end
+      if at("(") = 0 then return mk(N_PVAL, x, 0, 0)
+      /* class pattern */
+      tpp = tpp + 1
+      base = psp
+      npos = 0
+      nkw = 0
+      do while at(")") = 0 & tk_t[tpp] \= T_EOF
+        if tk_t[tpp] = T_NAME & tk_t[tpp + 1] = T_OP & tk_s[tpp + 1] == "=" then do
+          nm = tk_s[tpp]
+          tpp = tpp + 2
+          sub = p_pattern()
+          kw = mk(N_PKW, sub, 0, 0)
+          n_s[kw] = nm
+          nkw = nkw + 1
+          psp = psp + 1
+          ps[psp] = kw
+        end
+        else do
+          if nkw > 0 then call perr "positional patterns follow keyword patterns"
+          sub = p_pattern()
+          npos = npos + 1
+          psp = psp + 1
+          ps[psp] = sub
+        end
+        if accept(",") = 0 then leave
+      end
+      call expect ")"
+      st = plist(base)
+      y = mk(N_PCLS, x, st, npos)
+      n_d[y] = nkw
+      return y
+    end
+    tpp = tpp + 1
+    if s == "_" then return mk(N_PWILD, 0, 0, 0)
+    x = mkname(s)
+    call mk_target x
+    return mk(N_PCAP, x, 0, 0)
+  end
+  if t = T_OP & s == "(" then do
+    tpp = tpp + 1
+    if at(")") = 1 then do
+      tpp = tpp + 1
+      return mk(N_PSEQ, 0, 0, 0)
+    end
+    base = psp
+    x = p_pat_star()
+    psp = psp + 1
+    ps[psp] = x
+    if at(",") = 0 & n_t[x] \= N_PSTAR then do
+      psp = base
+      call expect ")"
+      return x
+    end
+    do while accept(",") = 1
+      if at(")") = 1 then leave
+      x = p_pat_star()
+      psp = psp + 1
+      ps[psp] = x
+    end
+    call expect ")"
+    return mk_pseq(base)
+  end
+  if t = T_OP & s == "[" then do
+    tpp = tpp + 1
+    base = psp
+    do while at("]") = 0 & tk_t[tpp] \= T_EOF
+      x = p_pat_star()
+      psp = psp + 1
+      ps[psp] = x
+      if accept(",") = 0 then leave
+    end
+    call expect "]"
+    return mk_pseq(base)
+  end
+  if t = T_OP & s == "{" then do
+    tpp = tpp + 1
+    base = psp
+    y = 0
+    do while at("}") = 0 & tk_t[tpp] \= T_EOF
+      if at("**") = 1 then do
+        tpp = tpp + 1
+        nm = expect_name()
+        y = mkname(nm)
+        call mk_target y
+      end
+      else do
+        x = p_closed_pat()
+        if n_t[x] \= N_PVAL & n_t[x] \= N_PSING then call perr "mapping pattern keys may only be literals or attribute lookups"
+        psp = psp + 1
+        ps[psp] = n_a[x]
+        call expect ":"
+        sub = p_pattern()
+        psp = psp + 1
+        ps[psp] = sub
+      end
+      if accept(",") = 0 then leave
+    end
+    call expect "}"
+    cnt = psp - base
+    st = plist(base)
+    return mk(N_PMAP, st, cnt % 2, y)
+  end
+  call perr "invalid pattern near '" || s || "'"
+  return mk(N_PWILD, 0, 0, 0)
 
 p_with: procedure = .int
   ctx = .int
@@ -1729,6 +2140,7 @@ p_def: procedure = .int
   body = .int
   n = .int
   dmy = .int
+  ra = .int
   tpp = tpp + 1
   name = expect_name()
   tn = mkname(name)
@@ -1736,7 +2148,8 @@ p_def: procedure = .int
   call expect "("
   base = p_params(")", 1)
   call expect ")"
-  if accept("->") = 1 then dmy = p_test()
+  ra = 0
+  if accept("->") = 1 then ra = p_test()
   call expect ":"
   nfd = nfd + 1
   fd = nfd
@@ -1744,6 +2157,7 @@ p_def: procedure = .int
   sc = scope_push(SK_FUNC)
   sc_id[sc] = fd
   call setup_params fd, base
+  fd_ret[fd] = ra
   fd_name[fd] = name
   npq = base
   body = p_suite()
@@ -1825,6 +2239,7 @@ p_simple: procedure = .int
   st = .int
   op = .int
   dmy = .int
+  an = .int
   nm = .string
   t = tk_t[tpp]
   s = tk_s[tpp]
@@ -1933,6 +2348,12 @@ p_simple: procedure = .int
       /* annotated assignment */
       tpp = tpp + 1
       dmy = p_test()
+      an = 0
+      if n_t[x] = N_NAME & (sc_kind[cursc] = SK_MODULE | sc_kind[cursc] = SK_CLASS) then do
+        an = mkname("__annotations__")
+        call mk_target an
+        an = mk(N_ANNOT, an, mkc(mkstr(n_s[x])), dmy)
+      end
       if accept("=") = 1 then do
         y = p_testlist()
         call mk_target x
@@ -1940,8 +2361,17 @@ p_simple: procedure = .int
         psp = psp + 1
         ps[psp] = x
         st = plist(base)
-        return mk(N_ASSIGN, y, st, 1)
+        n = mk(N_ASSIGN, y, st, 1)
+        if an = 0 then return n
+        base = psp
+        psp = psp + 1
+        ps[psp] = an
+        psp = psp + 1
+        ps[psp] = n
+        st = plist(base)
+        return mkseq(st, 2)
       end
+      if an > 0 then return an
       return mk(N_PASS, 0, 0, 0)
     end
   end

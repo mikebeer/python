@@ -196,6 +196,8 @@ def dataclass(cls=None, *, init=True, repr=True, eq=True, order=False, unsafe_ha
         flds = list(fields.values())
         cls.__dataclass_fields__ = fields
         cls.__dataclass_params__ = (init, repr, eq, order, unsafe_hash, frozen)
+        if match_args:
+            cls.__match_args__ = tuple([f.name for f in flds if f.init and not f.kw_only])
         if init:
             cls.__init__ = _make_init(flds, frozen, cls.__name__)
         if repr:

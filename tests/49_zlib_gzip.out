@@ -1,0 +1,16 @@
+222957957 0 222957957 436929629 1 16863375 19267780
+b'hello world hello world'
+b'lorem ipsum dolor sit amet, co' 849 True
+b'' b'a'
+roundtrips ok True 7801
+b'part one part two' True b''
+b'part one part two' b'tail'
+zlib.error Error -5 while decompressing data: incomplete or truncated s
+zlib.error Error -3 while decompressing data: incorrect header check
+zlib.error Error -5 while decompressing data: incomplete or truncated s
+zlib.error Error -3 while decompressing data: incorrect data check
+zlib.error Bad compression level
+1f8b08 b'hello gziphello gziphello gziphello gziphello gzip' b'hello gzip hello gzip'
+b'line1\n' b'line2\n'
+BadGzipFile Not a gzipped file (b'no')
+b'a' b'b\n' 3 b'ab\ncd' 2 b'ab\nXY' 0 [b'ab\n', b'XY']

@@ -6,7 +6,15 @@ class ABCMeta(type):
 
 
 class ABC:
-    pass
+    @classmethod
+    def register(cls, subclass):
+        # virtual subclass registration is recorded but does not affect isinstance()
+        reg = cls.__dict__.get('_abc_registry')
+        if reg is None:
+            reg = []
+            cls._abc_registry = reg
+        reg.append(subclass)
+        return subclass
 
 
 def abstractmethod(f):

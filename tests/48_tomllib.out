@@ -1,0 +1,76 @@
+'title' = 'TOML éxample'
+'int1' = 42
+'int2' = -1000
+'hex' = 3735928559
+'oct' = 493
+'bin' = 13
+'f1' = 3.14
+'f2' = -0.002
+'f3' = 6.022e+23
+'inf' = inf
+'b1' = True
+'b2' = False
+'lit' = 'C:\\path\\n'
+'ml' = 'Roses\nred violets'
+'mll' = 'raw\\n\ntext'
+'d1' = datetime.date(1979, 5, 27)
+'t1' = datetime.time(7, 32)
+'dt1' = datetime.datetime(1979, 5, 27, 7, 32)
+'dt2' = datetime.datetime(1979, 5, 27, 7, 32, tzinfo=datetime.timezone.utc)
+'dt3' = datetime.datetime(1979, 5, 27, 0, 32, 0, 500000, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=61200)))
+'arr':
+  - 1
+  - 2
+  -
+    - 3
+    - 4
+  - 'x'
+'multi':
+  - 1
+  - 2
+'quoted key' = 1
+'dot':
+  'b':
+    'c' = 'dotted'
+'inline':
+  'x' = 1
+  'y':
+    'z' = 'deep'
+  'k k':
+    - 1
+    - 2
+'server':
+  'host' = 'localhost'
+  'ports':
+    - 8001
+    - 8002
+  'limits':
+    'max' = 10
+'products':
+  -
+    'name' = 'Hammer'
+    'sku' = 738594937
+  -
+  -
+    'name' = 'Nail'
+    'tags':
+      - 'a'
+      - 'b'
+'a':
+  'sub':
+    'x' = 1
+  'y' = 2
+{'x': '1.5'} {} {'a': [], 'b': {}}
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TOMLDecodeError
+TypeError

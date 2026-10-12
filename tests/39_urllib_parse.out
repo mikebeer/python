@@ -1,0 +1,42 @@
+ParseResult(scheme='http', netloc='user:pw@Example.com:8080', path='/a/b;p=1/c.html', params='', query='x=1&y=2', fragment='frag')
+http user:pw@Example.com:8080 /a/b;p=1/c.html  x=1&y=2 frag example.com 8080 user pw
+SplitResult(scheme='http', netloc='user:pw@Example.com:8080', path='/a/b;p=1/c.html', query='x=1&y=2', fragment='frag') True http://user:pw@Example.com:8080/a/b;p=1/c.html?x=1&y=2#frag
+ParseResult(scheme='https', netloc='example.com', path='', params='', query='', fragment='')
+https example.com     example.com None None None
+SplitResult(scheme='https', netloc='example.com', path='', query='', fragment='') True https://example.com
+ParseResult(scheme='', netloc='', path='/relative/path', params='', query='q=1', fragment='')
+  /relative/path  q=1  None None None None
+SplitResult(scheme='', netloc='', path='/relative/path', query='q=1', fragment='') True /relative/path?q=1
+ParseResult(scheme='mailto', netloc='', path='a@b.c', params='', query='', fragment='')
+mailto  a@b.c    None None None None
+SplitResult(scheme='mailto', netloc='', path='a@b.c', query='', fragment='') True mailto:a@b.c
+ParseResult(scheme='file', netloc='', path='/etc/hosts', params='', query='', fragment='')
+file  /etc/hosts    None None None None
+SplitResult(scheme='file', netloc='', path='/etc/hosts', query='', fragment='') True file:///etc/hosts
+ParseResult(scheme='http', netloc='[::1]:80', path='/x', params='', query='', fragment='')
+http [::1]:80 /x    ::1 80 None None
+SplitResult(scheme='http', netloc='[::1]:80', path='/x', query='', fragment='') True http://[::1]:80/x
+ParseResult(scheme='', netloc='host', path='/path', params='', query='', fragment='')
+ host /path    host None None None
+SplitResult(scheme='', netloc='host', path='/path', query='', fragment='') True //host/path
+ParseResult(scheme='', netloc='', path='a/b/c', params='', query='', fragment='')
+  a/b/c    None None None None
+SplitResult(scheme='', netloc='', path='a/b/c', query='', fragment='') True a/b/c
+ParseResult(scheme='http', netloc='h', path='/p', params='', query='a=1;b=2', fragment='')
+http h /p  a=1;b=2  h None None None
+SplitResult(scheme='http', netloc='h', path='/p', query='a=1;b=2', fragment='') True http://h/p?a=1;b=2
+ParseResult(scheme='ftp', netloc='ftp.x.org', path='/pub/file', params='type=a', query='', fragment='')
+ftp ftp.x.org /pub/file type=a   ftp.x.org None None None
+SplitResult(scheme='ftp', netloc='ftp.x.org', path='/pub/file;type=a', query='', fragment='') True ftp://ftp.x.org/pub/file;type=a
+ParseResultBytes(scheme=b'http', netloc=b'a', path=b'/b', params=b'', query=b'c=d', fragment=b'')
+http://a/b/c/g http://a/b/g http://a/g http://g http://a/b/c/d;p?y http://a/b/c/d;p?q#s http://a/g http://x/y http://a/b/c/e
+DefragResult(url='http://a/b', fragment='c') DefragResult(url='http://a/b', fragment='')
+/a%20b/%C3%BC%3F%26%3D~ a%20b a+b%26c%3Dd%2Fe %FF%00 x y
+a bü%zz%4 a b+c b'\xffA' A
+a=1&b=x+y&c=%C3%BC a=1&a=2&b=z a=%5B1%2C+2%5D
+{'a': ['1', '3'], 'b': ['2']} {'a': ['1'], 'c': ['']} [('x', 'a b'), ('y', 'A;z=1')]
+{'a': ['1'], 'b': ['2']}
+ParseResult(scheme='http', netloc='x.com', path='/new', params='', query='q=1', fragment='') https://x.com/p?q=1 ParseResultBytes(scheme=b'http', netloc=b'x.com', path=b'/p', params=b'', query=b'q=1', fragment=b'')
+ValueError Invalid IPv6 URL
+ValueError Port out of range 0-65535
+http://h/p?q=1#f x

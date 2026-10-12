@@ -1156,6 +1156,182 @@ BI(exc_repr)
     exc_str_buf(AS_INST(A(0)), &b, 1);
     return buf_value(&b);
 }
+/* ---- BaseExceptionGroup / ExceptionGroup ------------------------------------------ */
+static int eg_is_group(Value v)
+{
+    return v.t == T_INST && class_isa(AS_INST(v)->cls, cls_BaseExceptionGroup);
+}
+static Value eg_attr(Value eg, const char *nm)
+{
+    Value *p = amap_get(&AS_INST(eg)->a, intern_c(nm));
+    return p ? *p : NONE_V;
+}
+/* validate (message, exceptions); returns the exceptions as a tuple (all Exception: *all_exc) */
+static Value eg_check(Class *c, Value msg, Value seq, int *all_exc)
+{
+    long i;
+    List *l;
+    if (msg.t != T_STR)
+        throw_new(cls_TypeError, "argument 1 must be str, not %.40s", type_name(msg));
+    if (seq.t != T_LIST && seq.t != T_TUPLE)
+        throw_new(cls_TypeError, "second argument (exceptions) must be a sequence");
+    l = AS_LIST(seq);
+    if (l->n == 0)
+        throw_new(cls_ValueError, "second argument (exceptions) must be a non-empty sequence");
+    *all_exc = 1;
+    for (i = 0; i < l->n; i++) {
+        Value e = l->a[i];
+        if (e.t != T_INST || !(AS_INST(e)->cls->flags & CF_EXC))
+            throw_new(cls_ValueError,
+                "Item %ld of second argument (exceptions) is not an exception",
+                i);
+        if (!class_isa(AS_INST(e)->cls, cls_Exception)) *all_exc = 0;
+    }
+    if (c && class_isa(c, cls_ExceptionGroup) && !*all_exc)
+        throw_new(cls_TypeError, "Cannot nest BaseExceptions in an ExceptionGroup");
+    return mktuple_from(l->a, l->n);
+}
+static void eg_fill(Value iv, Value msg, Value seq, Value tup)
+{
+    amap_set(&AS_INST(iv)->a, intern_c("message"), msg);
+    amap_set(&AS_INST(iv)->a, intern_c("exceptions"), tup);
+    amap_set(&AS_INST(iv)->a, S_args, mktuple2(msg, seq));
+}
+static Value eg_new(Class *c, Value msg, Value seq)
+{
+    int all;
+    Value tup, iv;
+    Value *base = vsp;
+    tup = eg_check(c, msg, seq, &all);
+    VPUSH(tup);
+    if (c == cls_BaseExceptionGroup && all) c = cls_ExceptionGroup;
+    iv = mkobj(new_inst(c), T_INST);
+    VPUSH(iv);
+    eg_fill(iv, msg, seq, tup);
+    vsp = base;
+    return iv;
+}
+BI(beg_ctor)
+{
+    need(x, 2, 2, "BaseExceptionGroup");
+    return eg_new(cls_BaseExceptionGroup, A(0), A(1));
+}
+BI(eg_ctor)
+{
+    need(x, 2, 2, "ExceptionGroup");
+    return eg_new(cls_ExceptionGroup, A(0), A(1));
+}
+BI(beg_init)
+{
+    int all;
+    Value tup;
+    if (x->n != 3 || A(0).t != T_INST)
+        throw_new(cls_TypeError, "BaseExceptionGroup.__init__ takes exactly 2 arguments");
+    tup = eg_check(AS_INST(A(0))->cls, A(1), A(2), &all);
+    VPUSH(tup);
+    eg_fill(A(0), A(1), A(2), tup);
+    vsp--;
+    return NONE_V;
+}
+BI(beg_str)
+{
+    Value ex = eg_attr(A(0), "exceptions");
+    Buf b;
+    char t[48];
+    long n = ex.t == T_TUPLE ? AS_LIST(ex)->n : 0;
+    buf_init(&b);
+    str_buf(eg_attr(A(0), "message"), &b);
+    sprintf(t, " (%ld sub-exception%s)", n, n == 1 ? "" : "s");
+    buf_add(&b, t);
+    return buf_value(&b);
+}
+BI(beg_derive)
+{
+    need(x, 2, 2, "derive");
+    if (A(1).t != T_LIST && A(1).t != T_TUPLE)
+        throw_new(cls_TypeError, "second argument (exceptions) must be a sequence");
+    return eg_new(cls_BaseExceptionGroup, eg_attr(A(0), "message"), A(1));
+}
+static int eg_cond(Value cond, Value exc)
+{
+    if (cond.t == T_CLASS || cond.t == T_TUPLE) return isinst(exc, cond);
+    return py_truthy(call1(cond, exc));
+}
+static Value eg_derive(Value eg, List *items)
+{
+    Value *base = vsp, fn, lv, r;
+    List *l = list_new(items->n);
+    long i;
+    for (i = 0; i < items->n; i++) list_push(l, items->a[i]);
+    lv = mklist(l);
+    VPUSH(lv);
+    fn = get_attr(eg, intern_c("derive"));
+    VPUSH(fn);
+    r = call1(fn, lv);
+    vsp = base;
+    return r;
+}
+/* split an exception (group or not) by cond into *m and *r (NONE_V when empty) */
+static void eg_split(Value eg, Value cond, Value *m, Value *r)
+{
+    Value *base = vsp;
+    VPUSH(eg);
+    if (eg_cond(cond, eg)) { *m = eg; *r = NONE_V; vsp = base; return; }
+    if (!eg_is_group(eg)) { *m = NONE_V; *r = eg; vsp = base; return; }
+    {
+        Value ex = eg_attr(eg, "exceptions"), mv, rv;
+        List *ml = list_new(4), *rl = list_new(4);
+        long i;
+        VPUSH(mklist(ml));
+        VPUSH(mklist(rl));
+        for (i = 0; ex.t == T_TUPLE && i < AS_LIST(ex)->n; i++) {
+            Value a, b;
+            eg_split(AS_LIST(ex)->a[i], cond, &a, &b);
+            if (a.t != T_NONE) list_push(ml, a);
+            if (b.t != T_NONE) list_push(rl, b);
+        }
+        if (ml->n == 0) { *m = NONE_V; *r = eg; vsp = base; return; }
+        if (rl->n == 0) { *m = eg; *r = NONE_V; vsp = base; return; }
+        mv = eg_derive(eg, ml);
+        VPUSH(mv);
+        rv = rl->n ? eg_derive(eg, rl) : NONE_V;
+        *m = mv; *r = rv;
+    }
+    vsp = base;
+}
+BI(beg_split)
+{
+    Value m, r;
+    need(x, 2, 2, "split");
+    eg_split(A(0), A(1), &m, &r);
+    return mktuple2(m, r);
+}
+BI(beg_subgroup)
+{
+    Value m, r;
+    need(x, 2, 2, "subgroup");
+    eg_split(A(0), A(1), &m, &r);
+    return m;
+}
+static void eg_init_classes(void)
+{
+    Class **bl;
+    cls_BaseExceptionGroup = new_class("BaseExceptionGroup", cls_BaseException,
+        CF_BUILTIN | CF_EXC);
+    bl = (Class **)xmalloc(sizeof(Class *) * 2);
+    bl[0] = cls_BaseExceptionGroup;
+    bl[1] = cls_Exception;
+    cls_ExceptionGroup = make_class(intern_c("ExceptionGroup"), bl, 2, NULL);
+    cls_ExceptionGroup->flags |= CF_BUILTIN;
+    set_global(intern_c("ExceptionGroup"), mkobj(cls_ExceptionGroup, T_CLASS));
+    cls_BaseExceptionGroup->ctor = beg_ctor;
+    cls_ExceptionGroup->ctor = eg_ctor;
+    def_bi(cls_BaseExceptionGroup, "__init__", beg_init);
+    def_bi(cls_BaseExceptionGroup, "__str__", beg_str);
+    def_bi(cls_BaseExceptionGroup, "derive", beg_derive);
+    def_bi(cls_BaseExceptionGroup, "split", beg_split);
+    def_bi(cls_BaseExceptionGroup, "subgroup", beg_subgroup);
+}
 BI(obj_init)
 {
     (void)x;

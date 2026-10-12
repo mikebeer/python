@@ -1,0 +1,12 @@
+b'PK\x03\x04' True False
+['a.txt', 'dir/b.bin', 'empty.txt', 'stored.txt'] None
+a.txt 29 8 True False 0x3853d2f6
+dir/b.bin 200 8 True False 0xed086180
+empty.txt 0 8 True False 0x0
+stored.txt 11 0 True False 0xfaf01b5
+b'hello hello hello hello hello' b'\x00\x01\x02\x03\x04' b'' 11
+b'hello'
+KeyError "There is no item named 'missing' in the archive"
+['a.txt', 'b.txt'] b'hello world\nhello world\n' b'x'
+BadZipFile File is not a zip file
+a.txt

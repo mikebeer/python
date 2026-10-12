@@ -1,0 +1,10 @@
+200 OK text/plain dflt b'hello' 11
+404 Not Found b'abcde' True
+Not Found OK Not Found 200 I'm a Teapot
+example.com 8080
+b'GET /x?y=1 HTTP/1.1\r\nHost: example.com:8080\r\nAccept-Encoding: identity\r\nA: b\r\n\r\n'
+204 b''
+POST http://h.test/p?q=1 /p?q=1 h.test t
+HTTP Error 500: bad <HTTPError 500: 'bad'> 500
+<urlopen error boom>
+RemoteDisconnected

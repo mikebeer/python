@@ -1,0 +1,228 @@
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+
+Process some integers.
+
+positional arguments:
+  N                   an integer for the accumulator
+
+options:
+  -h, --help          show this help message and exit
+  --sum               sum the integers (default: find the max)
+  -v, --verbose       verbosity
+  -o, --output FILE   output file
+  --mode {fast,slow}
+  -t, --tag TAG
+  --no-color
+  --ratio RATIO
+  --version           show program's version number and exit
+
+bye
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+
+Namespace(integers=[1, 2, 3], accumulate=<built-in function sum>, verbose=2, output='out.txt', mode='slow', tag=['a', 'b'], color=False, ratio=0.5) 6
+Namespace(integers=[4], accumulate=<built-in function max>, verbose=0, output=None, mode='fast', tag=[], color=True, ratio=None)
+SystemExit 2
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+tool: error: the following arguments are required: N
+SystemExit 2
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+tool: error: argument N: invalid int value: 'x'
+SystemExit 2
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+tool: error: argument --mode: invalid choice: 'medium' (choose from 'fast', 'slow')
+SystemExit 2
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+tool: error: unrecognized arguments: --bogus
+SystemExit 2
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+tool: error: argument -o/--output: expected one argument
+SystemExit 2
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+tool: error: argument --ratio: invalid float value: 'abc'
+SystemExit 2
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+tool: error: ambiguous option: --ver could match --verbose, --version
+tool 1.2
+SystemExit 0
+
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+
+Process some integers.
+
+positional arguments:
+  N                   an integer for the accumulator
+
+options:
+  -h, --help          show this help message and exit
+  --sum               sum the integers (default: find the max)
+  -v, --verbose       verbosity
+  -o, --output FILE   output file
+  --mode {fast,slow}
+  -t, --tag TAG
+  --no-color
+  --ratio RATIO
+  --version           show program's version number and exit
+
+bye
+SystemExit 0
+
+OK [('accumulate', <built-in function max>), ('color', True), ('integers', [1]), ('mode', 'slow'), ('output', None), ('ratio', None), ('tag', []), ('verbose', 0)]
+SystemExit 2
+usage: tool [-h] [--sum] [-v] [-o FILE] [--mode {fast,slow}] [-t TAG]
+            [--no-color] [--ratio RATIO] [--version]
+            N [N ...]
+tool: error: unrecognized arguments: -q
+(Namespace(integers=[1], accumulate=<built-in function max>, verbose=0, output=None, mode='fast', tag=[], color=True, ratio=None), ['--zzz', '2'])
+Namespace(integers=[1, 2], accumulate=<built-in function max>, verbose=1, output=None, mode='fast', tag=[], color=True, ratio=None)
+usage: q --req REQ [--pair A B] [--opt [OPT]] [--many [MANY ...]] [--hex HEX]
+         [--choice {0,1,2}]
+         [pos]
+
+positional arguments:
+  pos
+
+options:
+  --req REQ
+  --pair A B
+  --opt [OPT]
+  --many [MANY ...]
+  --hex HEX
+  --choice {0,1,2}
+
+OK [('choice', None), ('hex', None), ('many', None), ('opt', 'D'), ('pair', None), ('pos', 'dflt'), ('req', 'r')]
+OK [('choice', None), ('hex', None), ('many', None), ('opt', 'D'), ('pair', [1, 2]), ('pos', 'P'), ('req', 'r')]
+OK [('choice', None), ('hex', None), ('many', None), ('opt', 'C'), ('pair', None), ('pos', 'dflt'), ('req', 'r')]
+OK [('choice', None), ('hex', None), ('many', ['a', 'b', 'c']), ('opt', 'z'), ('pair', None), ('pos', 'dflt'), ('req', 'r')]
+OK [('choice', None), ('hex', 255), ('many', None), ('opt', 'D'), ('pair', None), ('pos', 'dflt'), ('req', 'r')]
+SystemExit 2
+usage: q --req REQ [--pair A B] [--opt [OPT]] [--many [MANY ...]] [--hex HEX]
+         [--choice {0,1,2}]
+         [pos]
+q: error: argument --pair: expected 2 arguments
+SystemExit 2
+usage: q --req REQ [--pair A B] [--opt [OPT]] [--many [MANY ...]] [--hex HEX]
+         [--choice {0,1,2}]
+         [pos]
+q: error: argument --choice: invalid choice: '5' (choose from '0', '1', '2')
+OK [('choice', None), ('hex', None), ('many', []), ('opt', 'D'), ('pair', None), ('pos', 'dflt'), ('req', 'r')]
+OK [('choice', None), ('hex', None), ('many', None), ('opt', 'D'), ('pair', None), ('pos', '--weird'), ('req', '1')]
+usage: git [-h] [--debug] CMD ...
+
+fake git
+
+options:
+  -h, --help  show this help message and exit
+  --debug
+
+commands:
+  CMD         sub-command help
+    add (a)   add files
+    commit    commit changes
+usage: git add [-h] [-f] paths [paths ...]
+
+positional arguments:
+  paths
+
+options:
+  -h, --help   show this help message and exit
+  -f, --force
+OK [('cmd', 'add'), ('debug', False), ('force', True), ('paths', ['x', 'y'])]
+OK [('cmd', 'a'), ('debug', False), ('force', False), ('paths', ['z'])]
+OK [('cmd', 'commit'), ('debug', False), ('func', 'do_commit'), ('message', 'msg')]
+OK [('cmd', 'commit'), ('debug', True), ('func', 'do_commit'), ('message', 'q')]
+SystemExit 2
+usage: git commit [-h] -m MESSAGE
+git commit: error: the following arguments are required: -m/--message
+SystemExit 2
+usage: git [-h] [--debug] CMD ...
+git: error: argument CMD: invalid choice: 'nope' (choose from 'add', 'a', 'commit')
+OK [('cmd', None), ('debug', False)]
+SystemExit 2
+usage: git add [-h] [-f] paths [paths ...]
+git add: error: the following arguments are required: paths
+usage: g [-h] [--in INP] (--a | --b)
+
+options:
+  -h, --help  show this help message and exit
+  --a         mode a (default: False)
+  --b         mode b (default: False)
+
+input options:
+  how to read
+
+  --in INP    input source (default: stdin)
+OK [('a', True), ('b', False), ('inp', 'stdin')]
+SystemExit 2
+usage: g [-h] [--in INP] (--a | --b)
+g: error: argument --b: not allowed with argument --a
+SystemExit 2
+usage: g [-h] [--in INP] (--a | --b)
+g: error: one of the arguments --a --b is required
+OK [('a', False), ('b', True), ('inp', 'f')]
+usage: r [-h] [+x] [--feat | --no-feat] [--up UP] [--ext EXT [EXT ...]]
+
+line1
+  line2
+
+options:
+  -h, --help           show this help message and exit
+  +x                   plus
+                       flag
+  --feat, --no-feat
+  --up UP
+  --ext EXT [EXT ...]
+OK [('ext', None), ('feat', False), ('up', 'ABC'), ('x', True), ('zzz', 1)]
+OK [('ext', ['a', 'b', 'c']), ('feat', True), ('up', None), ('x', False), ('zzz', 1)]
+SystemExit 2
+usage: r [-h] [+x] [--feat | --no-feat] [--up UP] [--ext EXT [EXT ...]]
+r: error: unrecognized arguments: --fe
+OK [('ext', None), ('feat', False), ('up', None), ('x', False), ('zzz', 1)]
+Namespace(a=1, b='x') 1 True True {'a': 1, 'b': 'x'}
+ArgumentError argument --x: conflicting option string: --x
+ArgumentError argument --n: invalid int value: 'q'
+usage: very-long-program-name-for-wrapping-test [-h]
+                                                [--aaaaaaaaaaaaaaa AAAAAAAAAAAAAAA]
+                                                [--bbbbbbbbbbbbbbb LONGMETAVAR [LONGMETAVAR ...]]
+                                                [--ccccccccccccccc {one,two,three}]
+                                                [positional_with_long_name ...]
+
+positional arguments:
+  positional_with_long_name
+
+options:
+  -h, --help            show this help message and exit
+  --aaaaaaaaaaaaaaa AAAAAAAAAAAAAAA
+                        hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+                        hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+  --bbbbbbbbbbbbbbb LONGMETAVAR [LONGMETAVAR ...]
+  --ccccccccccccccc {one,two,three}
+usage: very-long-program-name-for-wrapping-test [-h]
+                                                [--aaaaaaaaaaaaaaa AAAAAAAAAAAAAAA]
+                                                [--bbbbbbbbbbbbbbb LONGMETAVAR [LONGMETAVAR ...]]
+                                                [--ccccccccccccccc {one,two,three}]
+                                                [positional_with_long_name ...]
+usage: u [custom]
+
+options:
+  -h, --help  show this help message and exit
+

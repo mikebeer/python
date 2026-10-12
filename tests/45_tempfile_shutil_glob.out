@@ -1,0 +1,10 @@
+True tmp
+True True True False
+True True
+False
+True
+/tmp/_sh_dst.txt True
+['line1', 'line2']
+SameFileError
+True None
+True False a[*]b[?][[]c] [] ['/tmp']

@@ -394,6 +394,28 @@ static unsigned long host_seed(void)
     return (unsigned long)time(NULL) * 1000003UL
         + (unsigned long)clock();
 }
+/* n unpredictable bytes (random seeding, os.urandom): /dev/urandom
+   with PY_POSIX, else a generator mixed from the clock, the cpu time
+   and an address */
+static void host_urandom(unsigned char *buf, long n)
+{
+    long i = 0;
+#ifdef PY_POSIX
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        i = (long)fread(buf, 1, (size_t)n, f);
+        fclose(f);
+        if (i < 0) i = 0;
+    }
+#endif
+    if (i < n) {
+        unsigned long s = host_seed() ^ (unsigned long)(size_t)buf;
+        for (; i < n; i++) {
+            s = s * 1103515245UL + 12345UL;
+            buf[i] = (unsigned char)((s >> 16) & 255UL);
+        }
+    }
+}
 
 /* ---- sockets (IPv4 TCP) --------------------------------------------
    The whole network interface of the interpreter. Descriptors are
@@ -988,6 +1010,13 @@ typedef struct FuncDef {
     int npos;            /* positional parameters */
     int ndefaults;
     int nkwonly;
+    int nposonly;
+    /* leading parameters that cannot be passed by keyword */
+    int nanns;
+    /* annotations: names, expressions, return annotation */
+    Str **anames;
+    struct Node **aexprs;
+    struct Node *retann;
     int va_slot, kw_slot;
     Str **pnames;        /* npos + nkwonly names */
     Node **defaults;     /* ndefaults nodes */
@@ -1062,7 +1091,8 @@ static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float,
     *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice,
         *cls_dview[3], *cls_notimpl,
         *cls_bytes, *cls_bytearray, *cls_complex, *cls_frozenset;
-static Class *cls_MemoryError;
+static Class *cls_MemoryError, *cls_BaseExceptionGroup,
+    *cls_ExceptionGroup;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError,
     *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError,
@@ -3704,13 +3734,15 @@ enum {
         N_UNARY, N_AND, N_OR,
     N_NOT, N_CMP, N_IFEXP, N_LIST, N_TUPLE, N_DICT, N_SET, N_LAMBDA,
         N_COMP, N_FSTR, N_FPART,
-    N_STAR, N_DSTAR, N_KW, N_WALRUS,
+    N_STAR, N_DSTAR, N_KW, N_WALRUS, N_MATCH, P_LIT, P_VAL, P_CAP,
+        P_SEQ, P_STAR, P_MAP, P_CLS,
+    P_OR, P_AS,
     S_EXPR, S_ASSIGN, S_AUG, S_IF, S_WHILE, S_FOR, S_BREAK, S_CONTINUE,
         S_RETURN, S_PASS,
     S_DEF, S_CLASS, S_TRY, S_EXCEPT, S_RAISE, S_ASSERT, S_DEL,
         S_IMPORT, S_FROM, S_WITH,
     S_BLOCK, S_YIELD, S_YIELDFROM, S_LISTAPP, S_SETADD, S_DICTSET,
-        S_NOP
+        S_NOP, S_ANNOT
 };
 enum {
     C_LT = 1, C_LE, C_GT, C_GE, C_EQ, C_NE, C_IN, C_NOTIN, C_IS,
@@ -3903,7 +3935,20 @@ typedef struct Params {
     Str **names; Node **defs; int n, ndef;
     Str **kwnames; Node **kwdefs; int nkw;
     Str *vararg, *varkw;
+    int nposonly;
+    Str **an; Node **ae; int nan;
+    Node *retann;
 } Params;
+
+static void note_annot(Params *p, Str *nm, Node *e)
+{
+    p->an = (Str **)xrealloc(p->an,
+        sizeof(Str *) * (size_t)(p->nan + 1));
+    p->ae = (Node **)xrealloc(p->ae,
+        sizeof(Node *) * (size_t)(p->nan + 1));
+    p->an[p->nan] = nm;
+    p->ae[p->nan++] = e;
+}
 
 static void parse_params(Params *p, int closer, int annot)
 {
@@ -3915,21 +3960,27 @@ static void parse_params(Params *p, int closer, int annot)
             star = 1;
             if (at(TK_NAME)) {
                 p->vararg = TOK.s; pp++;
-                if (annot && p_accept(':')) parse_test();
+                if (annot && p_accept(':'))
+                    note_annot(p, p->vararg, parse_test());
             }
         } else if (at(TK_POW)) {
             pp++;
             if (!at(TK_NAME)) perr("expected name");
             p->varkw = TOK.s; pp++;
-            if (annot && p_accept(':')) parse_test();
+            if (annot && p_accept(':'))
+                note_annot(p, p->varkw, parse_test());
         } else if (at('/')) {
+            if (star || p->n == 0 || p->nposonly)
+                perr("invalid syntax");
+            p->nposonly = p->n;
             pp++;
         } else {
             Str *nm;
             Node *def = NULL;
             if (!at(TK_NAME)) perr("expected parameter name");
             nm = TOK.s; pp++;
-            if (annot && p_accept(':')) parse_test();
+            if (annot && p_accept(':'))
+                note_annot(p, nm, parse_test());
             if (p_accept('=')) def = parse_test();
             if (!star) {
                 p->names = (Str **)xrealloc(p->names,
@@ -3968,6 +4019,11 @@ static FuncDef *fd_new(Str *name, Params *p, int line)
     fd->npos = p->n;
     fd->ndefaults = p->ndef;
     fd->nkwonly = p->nkw;
+    fd->nposonly = p->nposonly;
+    fd->nanns = p->nan;
+    fd->anames = p->an;
+    fd->aexprs = p->ae;
+    fd->retann = p->retann;
     fd->defaults = p->defs;
     fd->kwdefaults = p->kwdefs;
     fd->pnames
@@ -4009,7 +4065,7 @@ static Node *parse_funcdef(void)
     expect('(', "(");
     parse_params(&p, ')', 1);
     expect(')', ")");
-    if (p_accept(TK_ARROW)) parse_test();
+    if (p_accept(TK_ARROW)) p.retann = parse_test();
     expect(':', ":");
     n->name = name;
     n->var = scope_var(cur_scope, name);
@@ -5115,16 +5171,35 @@ static Node *parse_simple(void)
             return a;
         }
         if (at(':') ) {
-            /* annotation: x: int [= v] */
+            /* annotation: x: int [= v]; stored in __annotations__ at
+               module / class level */
+            Node *an = NULL, *ann, *as = NULL;
             pp++;
-            parse_test();
+            ann = parse_test();
+            if (e->kind == N_NAME
+                && (cur_scope->kind == SC_MOD
+                || cur_scope->kind == SC_CLASS)) {
+                an = node_new(S_ANNOT, line);
+                an->name = e->name;
+                an->a = ann;
+                an->var = scope_var(cur_scope,
+                    intern_c("__annotations__"));
+                an->var->defined = 1;
+            }
             if (p_accept('=')) {
-                Node *as = node_new(S_ASSIGN, line);
+                as = node_new(S_ASSIGN, line);
                 to_target(e, line);
                 node_add(as, e);
                 as->a = parse_testlist(1);
-                return as;
             }
+            if (as && an) {
+                Node *bl = new_block(line);
+                node_add(bl, as);
+                node_add(bl, an);
+                return bl;
+            }
+            if (as) return as;
+            if (an) return an;
             return node_new(S_NOP, line);
         }
         n = node_new(S_EXPR, line);
@@ -5179,6 +5254,245 @@ static Node *parse_if(void)
     return n;
 }
 
+/* ---- match statement: desugared to an if/elif chain of N_MATCH tests
+   ---- */
+static int match_count;
+static Node *pat_as(void);
+
+static Node *pat_target(Str *nm, int line)
+{
+    Node *t = mk_name(nm, line);
+    t->var->defined = 1;
+    return t;
+}
+static Node *pat_name_expr(void)
+{
+    Node *e = mk_name(TOK.s, TOK.line);
+    pp++;
+    while (at('.')) {
+        Node *n = mk(N_ATTR);
+        pp++;
+        if (!at(TK_NAME)) perr("expected attribute name");
+        n->a = e;
+        n->name = TOK.s;
+        pp++;
+        e = n;
+    }
+    return e;
+}
+static Node *pat_maybe_star(void)
+{
+    if (at('*')) {
+        Node *st = mk(P_STAR);
+        pp++;
+        if (!at(TK_NAME)) perr("expected name after '*' in pattern");
+        if (TOK.s != intern_c("_"))
+            st->a = pat_target(TOK.s, st->line);
+        pp++;
+        return st;
+    }
+    return pat_as();
+}
+static Node *pat_closed(void)
+{
+    int line = TOK.line;
+    int t = TOK.type;
+    Node *n;
+    if (t == TK_NUM || t == TK_FLOAT || t == TK_IMAG || t == TK_STR
+        || t == TK_FSTR || t == '-') {
+        n = node_new(P_LIT, line);
+        n->a = parse_arith();
+        return n;
+    }
+    if (t == TK_KW
+        && (TOK.kw == KW_NONE_ || TOK.kw == KW_TRUE
+        || TOK.kw == KW_FALSE)) {
+        n = node_new(P_LIT, line);
+        n->a = parse_atom();
+        n->op = 1;
+        return n;
+    }
+    if (t == TK_NAME) {
+        if (toks[pp + 1].type != '.' && toks[pp + 1].type != '(') {
+            n = node_new(P_CAP, line);
+            if (TOK.s != intern_c("_")) n->a = pat_target(TOK.s, line);
+            pp++;
+            return n;
+        }
+        {
+            Node *e = pat_name_expr();
+            if (!at('(')) {
+                n = node_new(P_VAL, line);
+                n->a = e;
+                return n;
+            }
+            n = node_new(P_CLS, line);
+            n->a = e;
+            n->b = node_new(N_TUPLE, line);
+            n->c = node_new(N_TUPLE, line);
+            pp++;
+            while (!at(')')) {
+                if (at(TK_NAME) && toks[pp + 1].type == '=') {
+                    node_add(n->b,
+                        mk_const(perm_str(TOK.s->s, TOK.s->len),
+                        line));
+                    pp += 2;
+                    node_add(n->c, pat_as());
+                } else {
+                    if (n->c->n > 0)
+                        perr("positional patterns follow keyword "
+                        "patterns");
+                    node_add(n, pat_as());
+                }
+                if (!p_accept(',')) break;
+            }
+            expect(')', ")");
+            return n;
+        }
+    }
+    if (t == '(' || t == '[') {
+        int closer = t == '(' ? ')' : ']';
+        int comma = 0;
+        pp++;
+        n = node_new(P_SEQ, line);
+        while (!at(closer)) {
+            node_add(n, pat_maybe_star());
+            if (!p_accept(',')) break;
+            comma = 1;
+        }
+        expect(closer, t == '(' ? ")" : "]");
+        if (t == '(' && n->n == 1 && !comma
+            && n->list[0]->kind != P_STAR) return n->list[0];
+        return n;
+    }
+    if (t == '{') {
+        n = node_new(P_MAP, line);
+        pp++;
+        while (!at('}')) {
+            if (at(TK_POW)) {
+                pp++;
+                if (!at(TK_NAME)) perr("expected name after '**'");
+                n->a = pat_target(TOK.s, line);
+                pp++;
+            } else {
+                Node *k;
+                if (at(TK_NAME)) k = pat_name_expr();
+                else k = parse_arith();
+                expect(':', ":");
+                node_add(n, k);
+                node_add(n, pat_as());
+            }
+            if (!p_accept(',')) break;
+        }
+        expect('}', "}");
+        return n;
+    }
+    perr("invalid pattern");
+    return NULL;
+}
+static Node *pat_or(void)
+{
+    Node *first = pat_closed();
+    if (at('|')) {
+        Node *o = node_new(P_OR, first->line);
+        node_add(o, first);
+        while (p_accept('|')) node_add(o, pat_closed());
+        return o;
+    }
+    return first;
+}
+static Node *pat_as(void)
+{
+    Node *p = pat_or();
+    if (atkw(KW_AS)) {
+        Node *a = mk(P_AS);
+        pp++;
+        if (!at(TK_NAME)) perr("expected name after 'as'");
+        a->a = p;
+        a->b = pat_target(TOK.s, a->line);
+        pp++;
+        return a;
+    }
+    return p;
+}
+static int is_match_stmt(void)
+{
+    int i = pp + 1, depth = 0;
+    if (TOK.s != intern_c("match")) return 0;
+    for (;; i++) {
+        int t = toks[i].type;
+        if (t == TK_EOF) return 0;
+        if (t == '(' || t == '[' || t == '{') depth++;
+        else if (t == ')' || t == ']' || t == '}') depth--;
+        else if (t == TK_NEWLINE && depth <= 0) break;
+    }
+    return i > pp + 1 && toks[i - 1].type == ':'
+        && toks[i + 1].type == TK_INDENT &&
+        toks[i + 2].type == TK_NAME
+            && toks[i + 2].s == intern_c("case");
+}
+static Node *parse_match(void)
+{
+    int line = TOK.line;
+    Node *blk = new_block(line);
+    Node *as, *subj, *cases[256], *chain = NULL;
+    Str *tmp;
+    char nm[32];
+    int nc = 0, i;
+    pp++;
+    sprintf(nm, ".m%d", match_count++);
+    tmp = intern_c(nm);
+    subj = parse_testlist(1);
+    expect(':', ":");
+    expect(TK_NEWLINE, "newline");
+    if (!p_accept(TK_INDENT)) perr("expected an indented block");
+    as = node_new(S_ASSIGN, line);
+    as->a = subj;
+    node_add(as, pat_target(tmp, line));
+    node_add(blk, as);
+    while (at(TK_NAME) && TOK.s == intern_c("case")) {
+        Node *c = mk(S_IF), *test, *pat;
+        if (nc >= 255) perr("too many case blocks");
+        pp++;
+        pat = pat_maybe_star();
+        if (at(',') || pat->kind == P_STAR) {
+            Node *sq = node_new(P_SEQ, pat->line);
+            node_add(sq, pat);
+            while (p_accept(',')) {
+                if (at(':') || atkw(KW_IF)) break;
+                node_add(sq, pat_maybe_star());
+            }
+            pat = sq;
+        }
+        test = node_new(N_MATCH, c->line);
+        test->a = mk_name(tmp, c->line);
+        test->b = pat;
+        if (accept_kw(KW_IF)) {
+            Node *g = node_new(N_AND, c->line);
+            g->a = test;
+            g->b = parse_test();
+            test = g;
+        }
+        expect(':', ":");
+        c->sidx = cur_scope->nstate++;
+        c->a = test;
+        c->b = parse_block();
+        cases[nc++] = c;
+    }
+    if (nc == 0) perr("expected 'case' block");
+    if (!p_accept(TK_DEDENT) && !at(TK_EOF)) perr("invalid syntax");
+    for (i = nc - 1; i >= 0; i--) {
+        if (chain) {
+            Node *eb = new_block(cases[i]->line);
+            node_add(eb, chain);
+            cases[i]->c = eb;
+        }
+        chain = cases[i];
+    }
+    node_add(blk, chain);
+    return blk;
+}
+
 static Node *parse_stmt(void)
 {
     int line = TOK.line;
@@ -5225,6 +5539,14 @@ static Node *parse_stmt(void)
             while (atkw(KW_EXCEPT)) {
                 Node *h = mk(S_EXCEPT);
                 pp++;
+                if (at('*')) {
+                    pp++;
+                    if (n->n > 0 && !n->level)
+                        perr
+                        ("cannot have both 'except' and 'except*'");
+                    n->level = 1;
+                } else if (n->level)
+                    perr("cannot have both 'except' and 'except*'");
                 if (!at(':')) {
                     h->a = parse_test();
                     if (accept_kw(KW_AS)) {
@@ -5301,6 +5623,7 @@ static Node *parse_stmt(void)
         return d;
     }
     if (at(TK_INDENT)) perr("unexpected indent");
+    if (at(TK_NAME) && is_match_stmt()) return parse_match();
     n = parse_simple();
     if (n->kind == S_DEF || n->kind == S_CLASS) return n;
     end_simple();
@@ -6943,14 +7266,22 @@ static Value get_attr(Value o, Str *nm)
     case T_FUNC:
         p = amap_get(&AS_FUNC(o)->attrs, nm);
         if (p) return *p;
+        if (nm == intern_c("__annotations__")) {
+            Value av = mkobj(dict_new(), T_DICT);
+            amap_set(&AS_FUNC(o)->attrs, nm, av);
+            return av;
+        }
         if (nm == S_dict) {
             Dict *d = dict_new();
             int k;
             Value dv = mkobj(d, T_DICT);
             VPUSH(dv);
-            for (k = 0; k < AS_FUNC(o)->attrs.n; k++)
+            for (k = 0; k < AS_FUNC(o)->attrs.n; k++) {
+                if (AS_FUNC(o)->attrs.k[k]
+                    == intern_c("__annotations__")) continue;
                 dict_set(d, mkobj(AS_FUNC(o)->attrs.k[k], T_STR),
                     AS_FUNC(o)->attrs.v[k]);
+            }
             vsp--;
             return dv;
         }
@@ -8896,6 +9227,18 @@ static Func *make_function(Frame *f, Node *def)
             if (fd->kwdefaults[i])
                 fn->kwdefs[i] = eval(f, fd->kwdefaults[i]);
     }
+    if (fd->nanns > 0 || fd->retann) {
+        Dict *ad = dict_new();
+        Value av = mkobj(ad, T_DICT);
+        VPUSH(av);
+        for (i = 0; i < fd->nanns; i++)
+            dict_set(ad, mkobj(fd->anames[i], T_STR),
+                eval(f, fd->aexprs[i]));
+        if (fd->retann)
+            dict_set(ad, mkcstr("return"), eval(f, fd->retann));
+        amap_set(&fn->attrs, intern_c("__annotations__"), av);
+        vsp--;
+    }
     vsp--;
     return fn;
 }
@@ -8916,7 +9259,9 @@ static Value *bind_args(Func *fn, FuncDef *fd, int n, Value *a, int nk,
     Value *loc = vsp;
     int i, npos = fd->npos, ncopy;
     Dict *kd = NULL;
+    Buf po;
     vcheck(fd->nlocals + 8);
+    buf_init(&po);
     vsp += fd->nlocals;
     for (i = 0; i < fd->nlocals; i++) loc[i] = UNSET_V;
     ncopy = n < npos ? n : npos;
@@ -8948,6 +9293,16 @@ static Value *bind_args(Func *fn, FuncDef *fd, int n, Value *a, int nk,
         int j, found = -1;
         for (j = 0; j < npos + fd->nkwonly; j++)
             if (fd->pnames[j] == nm) { found = j; break; }
+        if (found >= 0 && found < fd->nposonly) {
+            if (kd) { dict_set(kd, kw[2 * i], kw[2 * i + 1]);
+                continue;
+            }
+            if (po.n) buf_add(&po, ", ");
+            buf_addc(&po, '\'');
+            buf_add(&po, nm->s);
+            buf_addc(&po, '\'');
+            continue;
+        }
         if (found >= 0) {
             if (loc[found].t != T_UNSET)
                 throw_new(cls_TypeError,
@@ -8963,6 +9318,16 @@ static Value *bind_args(Func *fn, FuncDef *fd, int n, Value *a, int nk,
                       fn->name->s, nm->s);
         }
     }
+    if (po.n) {
+        char b[400];
+        sprintf(b,
+            "%.80s() got some positional-only arguments passed as "
+            "keyword arguments: "
+            "%.200s", fn->name->s, po.s);
+        buf_free(&po);
+        throw_val(new_exc(cls_TypeError, b));
+    }
+    buf_free(&po);
     if (n < npos || nk > 0) {
         int miss = 0;
         Buf nb;
@@ -9567,6 +9932,225 @@ static void unpack_assign(Frame *f, Node *t, Value x)
     vsp = base;
 }
 
+/* ---- match statement patterns ----------------------------------- */
+static int isinst(Value v, Value c);
+static int try_attr(Value o, Str *nm, Value *out);
+static Value iter_to_list(Value o);
+static int pat_match(Frame *f, Node *p, Value v);
+static int pat_is_selfmatch(Class *c)
+{
+    return c == cls_bool || c == cls_bytearray || c == cls_bytes
+        || c == cls_dict ||
+        c == cls_float || c == cls_frozenset || c == cls_int
+            || c == cls_list || c == cls_set ||
+        c == cls_str || c == cls_tuple;
+}
+/* the list/tuple behind a sequence-pattern subject, or NULL (str/bytes
+   never match) */
+static List *pat_seq(Value v)
+{
+    if (v.t == T_LIST || v.t == T_TUPLE) return AS_LIST(v);
+    if (v.t == T_INST
+        && (AS_INST(v)->pay.t == T_LIST
+        || AS_INST(v)->pay.t == T_TUPLE))
+        return AS_LIST(AS_INST(v)->pay);
+    if (v.t == T_RANGE) {
+        Value l = iter_to_list(v);
+        VPUSH(l);
+        return AS_LIST(l);
+    }
+    return NULL;
+}
+static int pat_seq_match(Frame *f, Node *p, Value v)
+{
+    Value *base = vsp;
+    List *l = pat_seq(v);
+    long n, i, star = -1, nsub = p->n, before, after;
+    int ok = 0;
+    if (!l) return 0;
+    n = l->n;
+    for (i = 0; i < nsub; i++) if (p->list[i]->kind == P_STAR)
+        star = i;
+    if (star < 0) {
+        if (n != nsub) goto done;
+        for (i = 0; i < nsub; i++) {
+            if (i >= l->n || !pat_match(f, p->list[i], l->a[i]))
+                goto done;
+        }
+    } else {
+        before = star;
+        after = nsub - star - 1;
+        if (n < before + after) goto done;
+        for (i = 0; i < before; i++)
+            if (i >= l->n || !pat_match(f, p->list[i], l->a[i]))
+                goto done;
+        for (i = 0; i < after; i++)
+            if (n - after + i >= l->n
+                || !pat_match(f, p->list[star + 1 + i],
+                l->a[n - after + i]))
+                goto done;
+        if (p->list[star]->a) {
+            List *mid = list_new(n - before - after + 1);
+            Value mv;
+            for (i = before; i < n - after && i < l->n; i++)
+                list_push(mid, l->a[i]);
+            mv = mklist(mid);
+            VPUSH(mv);
+            store_var(f, p->list[star]->a->var, mv);
+        }
+    }
+    ok = 1;
+done:
+    vsp = base;
+    return ok;
+}
+static int pat_map_match(Frame *f, Node *p, Value v)
+{
+    Value *base = vsp;
+    Dict *d, *rest = NULL;
+    long i;
+    int ok = 0;
+    if (v.t == T_DICT) d = AS_DICT(v);
+    else if (v.t == T_INST && AS_INST(v)->pay.t == T_DICT)
+        d = AS_DICT(AS_INST(v)->pay);
+    else return 0;
+    if (p->a) {
+        Value rv;
+        rest = dict_new();
+        rv = mkobj(rest, T_DICT);
+        VPUSH(rv);
+        for (i = 0; i < d->used; i++)
+            if (d->e[i].k.t != T_UNSET)
+                dict_set(rest, d->e[i].k, d->e[i].v);
+    }
+    for (i = 0; i + 1 < p->n; i += 2) {
+        Value k = eval(f, p->list[i]), x;
+        VPUSH(k);
+        if (!dict_get(d, k, &x)) goto done;
+        if (!pat_match(f, p->list[i + 1], x)) goto done;
+        if (rest) dict_del(rest, k);
+    }
+    if (p->a) store_var(f, p->a->var, base[0]);
+    ok = 1;
+done:
+    vsp = base;
+    return ok;
+}
+static int pat_cls_match(Frame *f, Node *p, Value v)
+{
+    Value *base = vsp;
+    Value cv = eval(f, p->a), x;
+    Class *c;
+    long i;
+    int ok = 0;
+    VPUSH(cv);
+    if (cv.t != T_CLASS)
+        throw_new(cls_TypeError,
+        "called match pattern must be a class");
+    c = AS_CLASS(cv);
+    if (!isinst(v, cv)) goto done;
+    if (p->n > 0) {
+        if (pat_is_selfmatch(c)) {
+            if (p->n > 1)
+                throw_new(cls_TypeError,
+                    "%.60s() accepts 1 positional sub-pattern (%d "
+                    "given)",
+                    c->name->s, p->n);
+            if (!pat_match(f, p->list[0], v)) goto done;
+        } else {
+            Value ma;
+            if (!try_attr(cv, intern_c("__match_args__"), &ma)) {
+                Value df;
+                ma = mktuple_from(NULL, 0);
+                VPUSH(ma);
+                /* dataclass without __match_args__: the init fields
+                   that are not keyword-only */
+                if (try_attr(cv, intern_c("__dataclass_fields__"), &df)
+                    && df.t == T_DICT) {
+                    List *nl = list_new(4);
+                    Dict *dd = AS_DICT(df);
+                    long j;
+                    ma = mklist(nl);
+                    VPUSH(ma);
+                    for (j = 0; j < dd->used; j++) {
+                        Value fi, ko;
+                        if (dd->e[j].k.t == T_UNSET) continue;
+                        if (try_attr(dd->e[j].v, intern_c("init"), &fi)
+                            && fi.t == T_BOOL &&
+                            !fi.u.i) continue;
+                        if (try_attr(dd->e[j].v, intern_c("kw_only"),
+                            &ko) && ko.t == T_BOOL &&
+                            ko.u.i) continue;
+                        list_push(nl, dd->e[j].k);
+                    }
+                    ma = mktuple_from(nl->a, nl->n);
+                }
+            }
+            if (ma.t != T_TUPLE)
+                throw_new(cls_TypeError,
+                "__match_args__ must be a tuple");
+            if (AS_LIST(ma)->n < p->n)
+                throw_new(cls_TypeError,
+                    "%.60s() accepts %ld positional sub-pattern%s "
+                    "(%d given)",
+                    c->name->s, AS_LIST(ma)->n,
+                        AS_LIST(ma)->n == 1 ? "" : "s", p->n);
+            for (i = 0; i < p->n; i++) {
+                Value nm = AS_LIST(ma)->a[i];
+                if (nm.t != T_STR)
+                    throw_new(cls_TypeError,
+                        "__match_args__ elements must be strings");
+                if (!try_attr(v, intern_str(AS_STR(nm)), &x))
+                    goto done;
+                VPUSH(x);
+                if (!pat_match(f, p->list[i], x)) goto done;
+            }
+        }
+    }
+    for (i = 0; i < p->b->n; i++) {
+        Value nm = p->b->list[i]->val;
+        if (!try_attr(v, intern_str(AS_STR(nm)), &x)) goto done;
+        VPUSH(x);
+        if (!pat_match(f, p->c->list[i], x)) goto done;
+    }
+    ok = 1;
+done:
+    vsp = base;
+    return ok;
+}
+static int pat_match(Frame *f, Node *p, Value v)
+{
+    long i;
+    switch (p->kind) {
+    case P_CAP:
+        if (p->a) store_var(f, p->a->var, v);
+        return 1;
+    case P_LIT: {
+        Value l = eval(f, p->a);
+        if (p->op)
+            return l.t == v.t && (l.t == T_NONE || l.u.i == v.u.i);
+        return py_eq(v, l);
+    }
+    case P_VAL: {
+        Value l = eval(f, p->a);
+        return py_eq(v, l);
+    }
+    case P_AS:
+        if (!pat_match(f, p->a, v)) return 0;
+        store_var(f, p->b->var, v);
+        return 1;
+    case P_OR:
+        for (i = 0; i < p->n; i++) if (pat_match(f, p->list[i], v))
+            return 1;
+        return 0;
+    case P_SEQ: return pat_seq_match(f, p, v);
+    case P_MAP: return pat_map_match(f, p, v);
+    case P_CLS: return pat_cls_match(f, p, v);
+    default: break;
+    }
+    return 0;
+}
+
 static Value eval_binop_fast(Frame *f, Node *n)
 {
     Value l = eval(f, n->a), r;
@@ -9682,6 +10266,7 @@ static Value eval(Frame *f, Node *n)
         vsp--;
         return wv;
     }
+    case N_MATCH: return mkbool(pat_match(f, n->b, eval(f, n->a)));
     case N_IFEXP:
         return py_truthy(eval(f, n->a)) ? eval(f, n->b)
             : eval(f, n->c);
@@ -9902,11 +10487,95 @@ static void do_raise(Value v)
     throw_val(v);
 }
 
+static void eg_split(Value eg, Value cond, Value *m, Value *r);
+static Value eg_new(Class *c, Value msg, Value seq);
+static int eg_is_group(Value v);
+static Value eg_attr(Value eg, const char *nm);
+/* try / except* ... : not resumable inside generators (no yield in
+   handlers) */
+static int exec_try_star(Frame *f, Node *n)
+{
+    Value *sp0 = vsp, exc, rest, match, raised, pending = NONE_V;
+    int st = 0, k, naked = 0, fst;
+    List *rl;
+    VPUSH(NONE_V);
+    /* sp0[0]: pending exception, sp0[1]: saved return value */
+    VPUSH(NONE_V);
+    VPUSH(NONE_V);          /* sp0[2]: remaining group */
+    VPUSH(NONE_V);          /* sp0[3]: raised list */
+    if (protected_block(f, n->a, &st, &exc)) {
+        Value saved_h = handled_exc;
+        Value grp = exc;
+        st = 0;
+        if (!eg_is_group(exc)) {
+            Value one = mktuple_from(&exc, 1);
+            VPUSH(one);
+            grp = eg_new(cls_BaseExceptionGroup, mkstr("", 0), one);
+            naked = 1;
+        }
+        rest = grp;
+        sp0[2] = rest;
+        raised = mklist(list_new(4));
+        sp0[3] = raised;
+        rl = AS_LIST(raised);
+        for (k = 0; k < n->n && rest.t != T_NONE; k++) {
+            Node *h = n->list[k];
+            Value cond = eval(f, h->a), rest2, hexc;
+            VPUSH(cond);
+            eg_split(rest, cond, &match, &rest2);
+            if (match.t == T_NONE) continue;
+            VPUSH(match);
+            rest = rest2;
+            sp0[2] = rest;
+            if (h->b) store_var(f, h->b->var, match);
+            handled_exc = match;
+            if (protected_block(f, h->c, &st, &hexc)) {
+                list_push(rl, hexc);
+            } else if (st == ST_YIELD) {
+                throw_new(cls_RuntimeError,
+                    "yield inside except* is not supported");
+            }
+            handled_exc = saved_h;
+            if (h->b) store_var(f, h->b->var, UNSET_V);
+            if (st != 0) break;
+        }
+        if (rest.t != T_NONE) {
+            if (naked && rl->n == 0)
+                pending = AS_LIST(eg_attr(rest, "exceptions"))->a[0];
+            else if (rl->n == 0) pending = rest;
+            else list_push(rl, rest);
+        }
+        if (pending.t == T_NONE && rl->n > 0) {
+            if (rl->n == 1) pending = rl->a[0];
+            else pending = eg_new(cls_BaseExceptionGroup, mkstr("", 0),
+                raised);
+        }
+        sp0[0] = pending;
+        if (st) sp0[1] = f->ret;
+    } else if (st == 0 && n->c) {
+        Value e2;
+        if (protected_block(f, n->c, &st, &e2)) sp0[0] = e2;
+        else if (st) sp0[1] = f->ret;
+    } else if (st) {
+        sp0[1] = f->ret;
+    }
+    if (n->d) {
+        fst = exec_block(f, n->d);
+        if (fst != 0) { vsp = sp0; return fst; }
+    }
+    pending = sp0[0];
+    if (pending.t != T_NONE) { vsp = sp0; throw_val(pending); }
+    if (st) f->ret = sp0[1];
+    vsp = sp0;
+    return st;
+}
+
 static int exec_try(Frame *f, Node *n)
 {
     int phase = 0, pend = 0, st = 0, k;
     Value *sp0 = vsp, exc;
     Value *slot;
+    if (n->level) return exec_try_star(f, n);
     VPUSH(NONE_V);
     slot = sp0;
     if (f->resuming) {
@@ -10490,6 +11159,22 @@ static int exec(Frame *f, Node *n)
         vsp = base;
         return 0; }
     case S_CLASS: exec_class(f, n); return 0;
+    case S_ANNOT: {
+        Var *v = n->var;
+        Value av = UNSET_V, ann;
+        if (v->kind == VK_NS) {
+            Value *pv = f->ns ? amap_get(&f->ns->ns, v->name) : NULL;
+            if (pv) av = *pv;
+        } else if (v->kind == VK_GLOBAL) av = G[v->slot];
+        ann = eval(f, n->a);
+        VPUSH(ann);
+        if (av.t != T_DICT) {
+            av = mkobj(dict_new(), T_DICT);
+            store_var(f, v, av);
+        }
+        dict_set(AS_DICT(av), mkobj(n->name, T_STR), ann);
+        vsp--;
+        return 0; }
     case S_TRY: return exec_try(f, n);
     case S_RAISE:
         if (n->a) do_raise(eval(f, n->a));
@@ -12612,6 +13297,202 @@ BI(exc_repr)
     buf_init(&b);
     exc_str_buf(AS_INST(A(0)), &b, 1);
     return buf_value(&b);
+}
+/* ---- BaseExceptionGroup / ExceptionGroup ------------------------ */
+static int eg_is_group(Value v)
+{
+    return v.t == T_INST
+        && class_isa(AS_INST(v)->cls, cls_BaseExceptionGroup);
+}
+static Value eg_attr(Value eg, const char *nm)
+{
+    Value *p = amap_get(&AS_INST(eg)->a, intern_c(nm));
+    return p ? *p : NONE_V;
+}
+/* validate (message, exceptions); returns the exceptions as a tuple
+   (all Exception: *all_exc) */
+static Value eg_check(Class *c, Value msg, Value seq, int *all_exc)
+{
+    long i;
+    List *l;
+    if (msg.t != T_STR)
+        throw_new(cls_TypeError, "argument 1 must be str, not %.40s",
+            type_name(msg));
+    if (seq.t != T_LIST && seq.t != T_TUPLE)
+        throw_new(cls_TypeError,
+            "second argument (exceptions) must be a sequence");
+    l = AS_LIST(seq);
+    if (l->n == 0)
+        throw_new(cls_ValueError,
+            "second argument (exceptions) must be a non-empty "
+            "sequence");
+    *all_exc = 1;
+    for (i = 0; i < l->n; i++) {
+        Value e = l->a[i];
+        if (e.t != T_INST || !(AS_INST(e)->cls->flags & CF_EXC))
+            throw_new(cls_ValueError,
+                "Item %ld of second argument (exceptions) is "
+                    "not an exception",
+                i);
+        if (!class_isa(AS_INST(e)->cls, cls_Exception)) *all_exc = 0;
+    }
+    if (c && class_isa(c, cls_ExceptionGroup) && !*all_exc)
+        throw_new(cls_TypeError,
+            "Cannot nest BaseExceptions in an ExceptionGroup");
+    return mktuple_from(l->a, l->n);
+}
+static void eg_fill(Value iv, Value msg, Value seq, Value tup)
+{
+    amap_set(&AS_INST(iv)->a, intern_c("message"), msg);
+    amap_set(&AS_INST(iv)->a, intern_c("exceptions"), tup);
+    amap_set(&AS_INST(iv)->a, S_args, mktuple2(msg, seq));
+}
+static Value eg_new(Class *c, Value msg, Value seq)
+{
+    int all;
+    Value tup, iv;
+    Value *base = vsp;
+    tup = eg_check(c, msg, seq, &all);
+    VPUSH(tup);
+    if (c == cls_BaseExceptionGroup && all) c = cls_ExceptionGroup;
+    iv = mkobj(new_inst(c), T_INST);
+    VPUSH(iv);
+    eg_fill(iv, msg, seq, tup);
+    vsp = base;
+    return iv;
+}
+BI(beg_ctor)
+{
+    need(x, 2, 2, "BaseExceptionGroup");
+    return eg_new(cls_BaseExceptionGroup, A(0), A(1));
+}
+BI(eg_ctor)
+{
+    need(x, 2, 2, "ExceptionGroup");
+    return eg_new(cls_ExceptionGroup, A(0), A(1));
+}
+BI(beg_init)
+{
+    int all;
+    Value tup;
+    if (x->n != 3 || A(0).t != T_INST)
+        throw_new(cls_TypeError,
+            "BaseExceptionGroup.__init__ takes exactly 2 arguments");
+    tup = eg_check(AS_INST(A(0))->cls, A(1), A(2), &all);
+    VPUSH(tup);
+    eg_fill(A(0), A(1), A(2), tup);
+    vsp--;
+    return NONE_V;
+}
+BI(beg_str)
+{
+    Value ex = eg_attr(A(0), "exceptions");
+    Buf b;
+    char t[48];
+    long n = ex.t == T_TUPLE ? AS_LIST(ex)->n : 0;
+    buf_init(&b);
+    str_buf(eg_attr(A(0), "message"), &b);
+    sprintf(t, " (%ld sub-exception%s)", n, n == 1 ? "" : "s");
+    buf_add(&b, t);
+    return buf_value(&b);
+}
+BI(beg_derive)
+{
+    need(x, 2, 2, "derive");
+    if (A(1).t != T_LIST && A(1).t != T_TUPLE)
+        throw_new(cls_TypeError,
+            "second argument (exceptions) must be a sequence");
+    return eg_new(cls_BaseExceptionGroup, eg_attr(A(0), "message"),
+        A(1));
+}
+static int eg_cond(Value cond, Value exc)
+{
+    if (cond.t == T_CLASS || cond.t == T_TUPLE)
+        return isinst(exc, cond);
+    return py_truthy(call1(cond, exc));
+}
+static Value eg_derive(Value eg, List *items)
+{
+    Value *base = vsp, fn, lv, r;
+    List *l = list_new(items->n);
+    long i;
+    for (i = 0; i < items->n; i++) list_push(l, items->a[i]);
+    lv = mklist(l);
+    VPUSH(lv);
+    fn = get_attr(eg, intern_c("derive"));
+    VPUSH(fn);
+    r = call1(fn, lv);
+    vsp = base;
+    return r;
+}
+/* split an exception (group or not) by cond into *m and *r (NONE_V
+   when empty) */
+static void eg_split(Value eg, Value cond, Value *m, Value *r)
+{
+    Value *base = vsp;
+    VPUSH(eg);
+    if (eg_cond(cond, eg)) { *m = eg;
+        *r = NONE_V;
+        vsp = base;
+        return;
+    }
+    if (!eg_is_group(eg)) { *m = NONE_V; *r = eg; vsp = base; return; }
+    {
+        Value ex = eg_attr(eg, "exceptions"), mv, rv;
+        List *ml = list_new(4), *rl = list_new(4);
+        long i;
+        VPUSH(mklist(ml));
+        VPUSH(mklist(rl));
+        for (i = 0; ex.t == T_TUPLE && i < AS_LIST(ex)->n; i++) {
+            Value a, b;
+            eg_split(AS_LIST(ex)->a[i], cond, &a, &b);
+            if (a.t != T_NONE) list_push(ml, a);
+            if (b.t != T_NONE) list_push(rl, b);
+        }
+        if (ml->n == 0) { *m = NONE_V; *r = eg; vsp = base; return; }
+        if (rl->n == 0) { *m = eg; *r = NONE_V; vsp = base; return; }
+        mv = eg_derive(eg, ml);
+        VPUSH(mv);
+        rv = rl->n ? eg_derive(eg, rl) : NONE_V;
+        *m = mv; *r = rv;
+    }
+    vsp = base;
+}
+BI(beg_split)
+{
+    Value m, r;
+    need(x, 2, 2, "split");
+    eg_split(A(0), A(1), &m, &r);
+    return mktuple2(m, r);
+}
+BI(beg_subgroup)
+{
+    Value m, r;
+    need(x, 2, 2, "subgroup");
+    eg_split(A(0), A(1), &m, &r);
+    return m;
+}
+static void eg_init_classes(void)
+{
+    Class **bl;
+    cls_BaseExceptionGroup = new_class("BaseExceptionGroup",
+        cls_BaseException,
+        CF_BUILTIN | CF_EXC);
+    bl = (Class **)xmalloc(sizeof(Class *) * 2);
+    bl[0] = cls_BaseExceptionGroup;
+    bl[1] = cls_Exception;
+    cls_ExceptionGroup = make_class(intern_c("ExceptionGroup"), bl, 2,
+        NULL);
+    cls_ExceptionGroup->flags |= CF_BUILTIN;
+    set_global(intern_c("ExceptionGroup"),
+        mkobj(cls_ExceptionGroup, T_CLASS));
+    cls_BaseExceptionGroup->ctor = beg_ctor;
+    cls_ExceptionGroup->ctor = eg_ctor;
+    def_bi(cls_BaseExceptionGroup, "__init__", beg_init);
+    def_bi(cls_BaseExceptionGroup, "__str__", beg_str);
+    def_bi(cls_BaseExceptionGroup, "derive", beg_derive);
+    def_bi(cls_BaseExceptionGroup, "split", beg_split);
+    def_bi(cls_BaseExceptionGroup, "subgroup", beg_subgroup);
 }
 BI(obj_init)
 {
@@ -15973,20 +16854,185 @@ static double n_hypot(double a, double b)
     h = h + res / (2.0 * h);
     return ldexp(h, ea);
 }
+/* high 32 bits of the IEEE-754 representation of x (sign, 11 exponent
+   bits, 20 mantissa bits), computed arithmetically so that no byte
+   order or type punning is involved */
+static unsigned long dbl_hw(double x)
+{
+    unsigned long sign = 0, hw;
+    double m;
+    int e;
+    if (x != x) return 0x7ff80000UL;
+    if (x < 0.0) { sign = 0x80000000UL; x = -x; }
+    else if (x == 0.0) return 1.0 / x < 0.0 ? 0x80000000UL : 0UL;
+    if (x > 1.7976931348623157e308) return sign | 0x7ff00000UL;
+    m = frexp(x, &e);
+    /* x = m * 2**e, 0.5 <= m < 1 */
+    if (e + 1022 <= 0) hw = (unsigned long)ldexp(x, 1042);
+    else hw = ((unsigned long)(e + 1022) << 20)
+        | (unsigned long)((m * 2.0 - 1.0) * 1048576.0);
+    return sign | hw;
+}
+/* log1p(x), a transcription of fdlibm's s_log1p.c (what glibc
+   computes) */
 static double n_log1p(double x)
 {
-    double u = 1.0 + x;
-    if (u == 1.0) return x;
-    return log(u) * x / (u - 1.0);
+    static const double ln2_hi = 6.93147180369123816490e-01,
+        ln2_lo = 1.90821492927058770002e-10,
+        two54 = 1.80143985094819840000e+16,
+            Lp1 = 6.666666666666735130e-01,
+        Lp2 = 3.999999999940941908e-01, Lp3 = 2.857142874366239149e-01,
+        Lp4 = 2.222219843214978396e-01, Lp5 = 1.818357216161805012e-01,
+        Lp6 = 1.531383769920937332e-01, Lp7 = 1.479819860511658591e-01;
+    double hfsq, f = 0.0, c = 0.0, s, z, R, u, m;
+    unsigned long hx = dbl_hw(x), ax = hx & 0x7fffffffUL, hu = 0;
+    int neg = (hx & 0x80000000UL) != 0, k = 1, e;
+    if (x != x) return x;
+    if (neg || hx < 0x3FDA827AUL) {
+    /* x < 0.41422 */
+        if (ax >= 0x3ff00000UL) {
+        /* x <= -1.0 */
+            if (x == -1.0) return -HUGE_VAL;
+            return (x - x) / (x - x);
+        }
+        if (ax < 0x3e200000UL) {
+        /* |x| < 2**-29 */
+            if (two54 + x > 0.0 && ax < 0x3c900000UL) return x;
+            return x - x * x * 0.5;
+        }
+        if (!neg || ax <= 0x3fd2bec4UL) { k = 0;
+            f = x;
+            hu = 1;
+        }
+        /* -0.2929 < x < 0.41422 */
+    }
+    if (ax >= 0x7ff00000UL) return x + x;
+    if (k != 0) {
+        double uu;
+        if (ax < 0x43400000UL) {
+            uu = 1.0 + x;
+            frexp(uu, &e);
+            k = e - 1;
+            c = (k > 0) ? 1.0 - (uu - x) : x - (uu - 1.0);
+            c /= uu;
+        } else {
+            uu = x;
+            frexp(uu, &e);
+            k = e - 1;
+            c = 0.0;
+        }
+        m = ldexp(uu, -k);
+        /* 1 <= m < 2 */
+        hu = (unsigned long)((m - 1.0) * 1048576.0);
+        if (hu < 0x6a09eUL) {
+            u = m;
+        } else {
+            k += 1;
+            u = m * 0.5;
+            hu = (0x00100000UL - hu) >> 2;
+        }
+        f = u - 1.0;
+    }
+    hfsq = 0.5 * f * f;
+    if (hu == 0) {
+    /* |f| < 2**-20 */
+        if (f == 0.0) {
+            if (k == 0) return 0.0;
+            c += (double)k * ln2_lo;
+            return (double)k * ln2_hi + c;
+        }
+        R = hfsq * (1.0 - 0.66666666666666666 * f);
+        if (k == 0) return f - R;
+        return (double)k * ln2_hi
+            - ((R - ((double)k * ln2_lo + c)) - f);
+    }
+    s = f / (2.0 + f);
+    z = s * s;
+    R = z
+        * (Lp1 + z
+        * (Lp2 + z
+        * (Lp3 + z * (Lp4 + z * (Lp5 + z * (Lp6 + z * Lp7))))));
+    if (k == 0) return f - (hfsq - s * (hfsq + R));
+    return (double)k * ln2_hi
+        - ((hfsq - (s * (hfsq + R) + ((double)k * ln2_lo + c))) - f);
 }
+/* expm1(x), a transcription of fdlibm's s_expm1.c */
 static double n_expm1(double x)
 {
-    double u = exp(x), um1;
-    if (u == 1.0) return x;
-    um1 = u - 1.0;
-    if (um1 == -1.0) return -1.0;
-    if (u - u != 0) return u;
-    return um1 * x / log(u);
+    static const double o_threshold = 7.09782712893383973096e+02,
+        ln2_hi = 6.93147180369123816490e-01,
+            ln2_lo = 1.90821492927058770002e-10,
+        invln2 = 1.44269504088896338700e+00,
+            Q1 = -3.33333333333331316428e-02,
+        Q2 = 1.58730158725481460165e-03,
+            Q3 = -7.93650757867487942473e-05,
+        Q4 = 4.00821782732936239552e-06,
+            Q5 = -2.01099218183624371326e-07;
+    double y, hi, lo, c = 0.0, t, e, hxs, hfx, r1;
+    int k, xsb;
+    unsigned long hx = dbl_hw(x);
+    xsb = (hx & 0x80000000UL) != 0;
+    hx &= 0x7fffffffUL;
+    if (x != x) return x;
+    if (hx >= 0x4043687AUL) {
+    /* |x| >= 56*ln2 */
+        if (hx >= 0x40862E42UL) {
+        /* |x| >= 709.78... */
+            if (hx >= 0x7ff00000UL) return xsb ? -1.0 : x;
+            if (x > o_threshold) return HUGE_VAL;
+        }
+        if (xsb) return -1.0;
+    }
+    if (hx > 0x3fd62e42UL) {
+    /* |x| > 0.5 ln2 */
+        if (hx < 0x3FF0A2B2UL) {
+        /* and |x| < 1.5 ln2 */
+            if (!xsb) { hi = x - ln2_hi; lo = ln2_lo; k = 1; }
+            else { hi = x + ln2_hi; lo = -ln2_lo; k = -1; }
+        } else {
+            k = (int)(invln2 * x + (xsb ? -0.5 : 0.5));
+            t = (double)k;
+            hi = x - t * ln2_hi;
+            lo = t * ln2_lo;
+        }
+        x = hi - lo;
+        c = (hi - x) - lo;
+    } else if (hx < 0x3c900000UL) {
+    /* |x| < 2**-54 */
+        return x;
+    } else k = 0;
+    hfx = 0.5 * x;
+    hxs = x * hfx;
+    r1 = 1.0 + hxs
+        * (Q1 + hxs * (Q2 + hxs * (Q3 + hxs * (Q4 + hxs * Q5))));
+    t = 3.0 - r1 * hfx;
+    e = hxs * ((r1 - t) / (6.0 - x * t));
+    if (k == 0) return x - (x * e - hxs);
+    e = (x * (e - c) - c);
+    e -= hxs;
+    if (k == -1) return 0.5 * (x - e) - 0.5;
+    if (k == 1) {
+        if (x < -0.25) return -2.0 * (e - (x + 0.5));
+        return 1.0 + 2.0 * (x - e);
+    }
+    if (k <= -2 || k > 56) {
+    /* exp(x) - 1 = exp(x) */
+        y = 1.0 - (e - x);
+        y = ldexp(y, k);
+        return y - 1.0;
+    }
+    if (k < 20) {
+        t = 1.0 - ldexp(1.0, -k);
+        /* 1 - 2**-k */
+        y = t - (e - x);
+        y = ldexp(y, k);
+    } else {
+        t = ldexp(1.0, -k);                               /* 2**-k */
+        y = x - (e + t);
+        y += 1.0;
+        y = ldexp(y, k);
+    }
+    return y;
 }
 static double n_asinh(double v)
 {
@@ -24674,8 +25720,13 @@ static void np_init2(Module *m)
 }
 /* ===== p7_rnd.c ===== */
 /* ====================================================================
-   p7_rnd.c   numpy.random: xoshiro256** generator, legacy functions,
-              default_rng / Generator / RandomState objects
+   p7_rnd.c numpy.random with numpy's exact bit generators and
+   algorithms: MT19937 (legacy
+              RandomState, np.random.seed ...), PCG64 + SeedSequence
+              (default_rng / Generator), legacy and modern
+              distributions, ziggurat tables; the 64-bit arithmetic
+              helpers and the MT19937 core are also used by the random
+              module (p7_pyrand.c)
    ================================================================= */
 /* A 64-bit unsigned type without "long long": the native unsigned long
    where it has 64 bits, otherwise (VM/370: long is 32 bits) two 32-bit
@@ -24684,6 +25735,7 @@ static void np_init2(Module *m)
    for testing. */
 #define U32M 0xFFFFFFFFUL
 #if ULONG_MAX > 4294967295UL && !defined(PY_U64_EMUL)
+#define U64_NATIVE 1
 typedef unsigned long u64;
 static u64 u64_c(unsigned long hi, unsigned long lo) {
     return ((hi << 16) << 16) | lo;
@@ -24699,7 +25751,6 @@ static u64 u64_mul(u64 a, u64 b) { return a * b; }
 static u64 u64_shl(u64 a, int k) { return a << k; }
 static u64 u64_shr(u64 a, int k) { return a >> k; }
 static int u64_ge(u64 a, u64 b) { return a >= b; }
-static int u64_le1(u64 a) { return a <= 1; }
 static u64 u64_max(void) { return (u64)ULONG_MAX; }
 static u64 u64_mod(u64 a, u64 n) { return a % n; }
 #else
@@ -24769,7 +25820,6 @@ static u64 u64_shr(u64 a, int k)
 static int u64_ge(u64 a, u64 b) {
     return a.hi > b.hi || (a.hi == b.hi && a.lo >= b.lo);
 }
-static int u64_le1(u64 a) { return a.hi == 0 && a.lo <= 1; }
 static u64 u64_max(void) { return u64_c(U32M, U32M); }
 static u64 u64_mod(u64 a, u64 n)
 {
@@ -24783,89 +25833,1673 @@ static u64 u64_mod(u64 a, u64 n)
     return r;
 }
 #endif
-static u64 g_rs[4];
-static Class *cls_rng[2];
 
-static u64 splitmix(u64 *z)
-{
-    u64 r;
-    *z = u64_add(*z, u64_c(0x9E3779B9UL, 0x7F4A7C15UL));
-    r = *z;
-    r = u64_mul(u64_xor(r, u64_shr(r, 30)),
-        u64_c(0xBF58476DUL, 0x1CE4E5B9UL));
-    r = u64_mul(u64_xor(r, u64_shr(r, 27)),
-        u64_c(0x94D049BBUL, 0x133111EBUL));
-    return u64_xor(r, u64_shr(r, 31));
+#ifdef U64_NATIVE
+static u64 u64_and(u64 a, u64 b) { return a & b; }
+static u64 u64_or(u64 a, u64 b) { return a | b; }
+static unsigned long u64_lo(u64 a) {
+    return (unsigned long)(a & 0xFFFFFFFFUL);
 }
-static void nrng_seed(u64 *s, u64 seed)
+static unsigned long u64_hi(u64 a) {
+    return (unsigned long)((a >> 16) >> 16);
+}
+static int u64_lt(u64 a, u64 b) { return !u64_ge(a, b); }
+static int u64_eq(u64 a, u64 b) { return a == b; }
+static int u64_iszero(u64 a) { return a == 0; }
+#else
+static u64 u64_and(u64 a, u64 b) {
+    return u64_c(a.hi & b.hi, a.lo & b.lo);
+}
+static u64 u64_or(u64 a, u64 b) {
+    return u64_c(a.hi | b.hi, a.lo | b.lo);
+}
+static unsigned long u64_lo(u64 a) { return a.lo; }
+static unsigned long u64_hi(u64 a) { return a.hi; }
+static int u64_lt(u64 a, u64 b) { return !u64_ge(a, b); }
+static int u64_eq(u64 a, u64 b) { return a.hi == b.hi && a.lo == b.lo;
+}
+static int u64_iszero(u64 a) { return a.hi == 0 && a.lo == 0; }
+#endif
+/* high 64 bits of the 128-bit product */
+static u64 u64_mulhi(u64 a, u64 b)
+{
+    u64 m32 = u64_c(0UL, U32M);
+    u64 a0 = u64_and(a, m32), a1 = u64_shr(a, 32),
+        b0 = u64_and(b, m32), b1 = u64_shr(b, 32);
+    u64 p00 = u64_mul(a0, b0), p01 = u64_mul(a0, b1),
+        p10 = u64_mul(a1, b0), p11 = u64_mul(a1, b1);
+    u64 mid = u64_add(u64_add(u64_shr(p00, 32), u64_and(p01, m32)),
+        u64_and(p10, m32));
+    return u64_add(u64_add(p11, u64_shr(p01, 32)),
+        u64_add(u64_shr(p10, 32), u64_shr(mid, 32)));
+}
+/* 32 x 32 -> 64 bit product as (high, low) words */
+static void mul32(unsigned long a, unsigned long b, unsigned long *hi,
+    unsigned long *lo)
+{
+    unsigned long a0 = a & 0xFFFFUL, a1 = (a >> 16) & 0xFFFFUL,
+        b0 = b & 0xFFFFUL,
+        b1 = (b >> 16) & 0xFFFFUL;
+    unsigned long p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0,
+        p11 = a1 * b1;
+    unsigned long mid = (p00 >> 16) + (p01 & 0xFFFFUL)
+        + (p10 & 0xFFFFUL);
+    *lo = ((mid & 0xFFFFUL) << 16) | (p00 & 0xFFFFUL);
+    *hi = (p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16)) & U32M;
+}
+
+/* ---- bit generators: MT19937 (kind 0) and PCG64 (kind 1) -------- */
+#define MT_N 624
+#define MT_M 397
+typedef struct RG {
+    int kind;
+    unsigned long mt[MT_N];
+    int mpos;
+    u64 sh, sl, ih, il;
+    /* PCG64: 128-bit state and increment (high, low) */
+    int has32;
+    unsigned long u32;
+    int has_gauss;
+    /* legacy polar normal: cached second value */
+    double gauss;
+} RG;
+#define RG_LONGS \
+    ((long)((sizeof(RG) + sizeof(long) - 1) / sizeof(long)))
+
+/* init_genrand: Knuth's linear congruential seeding of the reference
+   MT19937 */
+static void mt_init32(unsigned long *mt, unsigned long s)
 {
     int i;
-    for (i = 0; i < 4; i++) s[i] = splitmix(&seed);
+    s &= U32M;
+    for (i = 0; i < MT_N; i++) {
+        mt[i] = s;
+        s = (1812433253UL * (s ^ (s >> 30)) + (unsigned long)i + 1UL)
+            & U32M;
+    }
 }
-static u64 rotl64(u64 v, int k)
+/* init_by_array of the reference implementation (key words are 32 bit)
+   */
+static void mt_init_array(unsigned long *mt, const unsigned long *key,
+    long klen)
 {
-    return u64_xor(u64_shl(v, k), u64_shr(v, 64 - k));
+    long i = 1, j = 0, k;
+    mt_init32(mt, 19650218UL);
+    k = MT_N > klen ? MT_N : klen;
+    for (; k; k--) {
+        mt[i]
+            = ((mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1664525UL))
+            + (key[j] & U32M) +
+            (unsigned long)j) & U32M;
+        i++; j++;
+        if (i >= MT_N) { mt[0] = mt[MT_N - 1]; i = 1; }
+        if (j >= klen) j = 0;
+    }
+    for (k = MT_N - 1; k; k--) {
+        mt[i]
+            =
+            ((mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1566083941UL))
+            -
+            (unsigned long)i) & U32M;
+        i++;
+        if (i >= MT_N) { mt[0] = mt[MT_N - 1]; i = 1; }
+    }
+    mt[0] = 0x80000000UL;
 }
-static u64 nrng_next(u64 *s)
+static unsigned long mt_next(RG *g)
 {
-    u64 r = u64_mul(rotl64(u64_mul(s[1], u64_ul(5UL)), 7),
-        u64_ul(9UL));
-    u64 t = u64_shl(s[1], 17);
-    s[2] = u64_xor(s[2], s[0]); s[3] = u64_xor(s[3], s[1]);
-    s[1] = u64_xor(s[1], s[2]); s[0] = u64_xor(s[0], s[3]);
-    s[2] = u64_xor(s[2], t);
-    s[3] = rotl64(s[3], 45);
-    return r;
+    unsigned long y;
+    unsigned long *mt = g->mt;
+    if (g->mpos >= MT_N) {
+        int kk;
+        for (kk = 0; kk < MT_N - MT_M; kk++) {
+            y = (mt[kk] & 0x80000000UL) | (mt[kk + 1] & 0x7fffffffUL);
+            mt[kk] = mt[kk + MT_M] ^ (y >> 1)
+                ^ ((y & 1UL) ? 0x9908b0dfUL : 0UL);
+        }
+        for (; kk < MT_N - 1; kk++) {
+            y = (mt[kk] & 0x80000000UL) | (mt[kk + 1] & 0x7fffffffUL);
+            mt[kk] = mt[kk + (MT_M - MT_N)] ^ (y >> 1)
+                ^ ((y & 1UL) ? 0x9908b0dfUL : 0UL);
+        }
+        y = (mt[MT_N - 1] & 0x80000000UL) | (mt[0] & 0x7fffffffUL);
+        mt[MT_N - 1] = mt[MT_M - 1] ^ (y >> 1)
+            ^ ((y & 1UL) ? 0x9908b0dfUL : 0UL);
+        g->mpos = 0;
+    }
+    y = mt[g->mpos++];
+    y ^= (y >> 11);
+    y ^= (y << 7) & 0x9d2c5680UL;
+    y ^= (y << 15) & 0xefc60000UL;
+    y ^= (y >> 18);
+    return y & U32M;
 }
-static double nrng_dbl(u64 *s)
+
+/* PCG64 (XSL RR 128/64) with the default multiplier */
+static void pcg_step(RG *g)
 {
-    return u64_dbl(u64_shr(nrng_next(s), 11))
+    u64 mh = u64_c(0x2360ED05UL, 0x1FC65DA4UL),
+        ml = u64_c(0x4385DF64UL, 0x9FCCF645UL);
+    u64 lo = u64_mul(g->sl, ml);
+    u64 hi = u64_add(u64_add(u64_mulhi(g->sl, ml), u64_mul(g->sl, mh)),
+        u64_mul(g->sh, ml));
+    u64 lo2 = u64_add(lo, g->il);
+    g->sh = u64_add(u64_add(hi, g->ih),
+        u64_lt(lo2, lo) ? u64_ul(1UL) : u64_ul(0UL));
+    g->sl = lo2;
+}
+static u64 rotr64(u64 v, int r);
+static u64 pcg_next64(RG *g)
+{
+    pcg_step(g);
+    return rotr64(u64_xor(g->sh, g->sl), (int)(u64_hi(g->sh) >> 26));
+}
+static u64 rotr64(u64 v, int r)
+{
+    if (r == 0) return v;
+    return u64_or(u64_shr(v, r), u64_shl(v, 64 - r));
+}
+/* pcg_setseq_128_srandom_r: seed words s = (initstate hi, lo), q =
+   (initseq hi, lo) */
+static void pcg_seed(RG *g, u64 s_hi, u64 s_lo, u64 q_hi, u64 q_lo)
+{
+    u64 lo, c;
+    g->sh = u64_ul(0UL); g->sl = u64_ul(0UL);
+    g->ih = u64_or(u64_shl(q_hi, 1), u64_shr(q_lo, 63));
+    g->il = u64_or(u64_shl(q_lo, 1), u64_ul(1UL));
+    pcg_step(g);
+    lo = u64_add(g->sl, s_lo);
+    c = u64_lt(lo, g->sl) ? u64_ul(1UL) : u64_ul(0UL);
+    g->sh = u64_add(u64_add(g->sh, s_hi), c);
+    g->sl = lo;
+    pcg_step(g);
+    g->has32 = 0;
+    g->u32 = 0;
+}
+
+static unsigned long rg_next32(RG *g)
+{
+    u64 n;
+    if (g->kind == 0) return mt_next(g);
+    if (g->has32) { g->has32 = 0; return g->u32; }
+    n = pcg_next64(g);
+    g->has32 = 1;
+    g->u32 = u64_hi(n);
+    return u64_lo(n);
+}
+static u64 rg_next64(RG *g)
+{
+    if (g->kind == 0) {
+        unsigned long hi = mt_next(g);
+        unsigned long lo = mt_next(g);
+        return u64_c(hi, lo);
+    }
+    return pcg_next64(g);
+}
+static double rg_double(RG *g)
+{
+    if (g->kind == 0) {
+        unsigned long a = mt_next(g) >> 5;
+        unsigned long b = mt_next(g) >> 6;
+        return ((double)a * 67108864.0 + (double)b)
+            * (1.0 / 9007199254740992.0);
+    }
+    return u64_dbl(u64_shr(pcg_next64(g), 11))
         * (1.0 / 9007199254740992.0);
 }
-static double nrng_norm(u64 *s)
+
+/* ---- SeedSequence ----------------------------------------------- */
+static unsigned long ss_hashmix(unsigned long v, unsigned long *hc)
 {
-    double u1, u2;
-    do u1 = nrng_dbl(s); while (u1 <= 0.0);
-    u2 = nrng_dbl(s);
-    return sqrt(-2.0 * log(u1)) * cos(6.283185307179586476925 * u2);
+    v ^= *hc;
+    *hc = (*hc * 0x931e8875UL) & U32M;
+    v = (v * *hc) & U32M;
+    v ^= v >> 16;
+    return v;
 }
-/* uniform integer in [0, n) */
-static u64 nrng_below(u64 *s, u64 n)
+static unsigned long ss_mix(unsigned long x, unsigned long y)
 {
-    u64 lim, r;
-    if (u64_le1(n)) return u64_ul(0UL);
-    lim = u64_sub(u64_max(), u64_mod(u64_max(), n));
-    do r = nrng_next(s); while (u64_ge(r, lim));
-    return u64_mod(r, n);
+    unsigned long r = (0xca01f9ddUL * x - 0x4973f715UL * y) & U32M;
+    r ^= r >> 16;
+    return r;
 }
-static u64 seed_value(Value v)
+/* the entropy pool (4 words) from nent 32-bit words */
+static void ss_pool(unsigned long *pool, const unsigned long *ent,
+    long nent)
 {
-    if (v.t == T_INT || v.t == T_BOOL) return u64_l(v.u.i);
-    if (v.t == T_BIG) return u64_ul(py_hash(v));
-    if (v.t == T_FLOAT)
-        throw_new(cls_TypeError,
-        "Cannot cast scalar from dtype('float64') to "
-            "dtype('int64') according to the rule 'safe'");
-    if (v.t == T_ND || v.t == T_LIST || v.t == T_TUPLE) {
-        Nd *a = nd_from_value(v, ND_INT);
-        u64 h = u64_ul(0x1234567UL);
-        long i;
-        for (i = 0; i < a->size; i++)
-            { u64 t = u64_add(u64_l(a->iv[i]), h);
-            h = splitmix(&t);
-        }
-        return h;
+    unsigned long hc = 0x43b0d7e5UL;
+    long i, j;
+    for (i = 0; i < 4; i++)
+        pool[i] = ss_hashmix(i < nent ? ent[i] : 0UL, &hc);
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++)
+            if (i != j)
+                pool[j] = ss_mix(pool[j], ss_hashmix(pool[i], &hc));
+    for (i = 4; i < nent; i++)
+        for (j = 0; j < 4; j++)
+            pool[j] = ss_mix(pool[j], ss_hashmix(ent[i], &hc));
+}
+/* n 32-bit output words */
+static void ss_state(const unsigned long *pool, unsigned long *out,
+    long n)
+{
+    unsigned long hc = 0x8b51f9ddUL, d;
+    long i;
+    for (i = 0; i < n; i++) {
+        d = pool[i & 3] ^ hc;
+        hc = (hc * 0x58f38dedUL) & U32M;
+        d = (d * hc) & U32M;
+        d ^= d >> 16;
+        out[i] = d;
     }
-    throw_new(cls_TypeError, "Seed must be an integer");
-    return u64_ul(0UL);
 }
-static void seed_from(u64 *s, Value v)
+
+/* ---- bounded integers (numpy's distributions.c) ----------------- */
+static u64 gen_mask(u64 max)
 {
-    if (v.t == T_UNSET || v.t == T_NONE) {
-        u64 t = u64_add(u64_ul(host_seed()),
-            u64_ul((unsigned long)(size_t)s));
-        nrng_seed(s, t);
-    } else nrng_seed(s, seed_value(v));
+    u64 m = max;
+    m = u64_or(m, u64_shr(m, 1));
+    m = u64_or(m, u64_shr(m, 2));
+    m = u64_or(m, u64_shr(m, 4));
+    m = u64_or(m, u64_shr(m, 8));
+    m = u64_or(m, u64_shr(m, 16));
+    m = u64_or(m, u64_shr(m, 32));
+    return m;
+}
+/* random_interval: the legacy shuffle / Generator.shuffle draw for [0,
+   max] */
+static u64 rg_interval(RG *g, u64 max)
+{
+    u64 mask, v;
+    if (u64_iszero(max)) return max;
+    mask = gen_mask(max);
+    if (u64_hi(max) == 0) {
+        do v = u64_and(u64_ul(rg_next32(g)), mask);
+        while (u64_lt(max, v));
+    } else {
+        do v = u64_and(rg_next64(g), mask); while (u64_lt(max, v));
+    }
+    return v;
+}
+static unsigned long rg_lemire32(RG *g, unsigned long rng)
+{
+    unsigned long excl = (rng + 1UL) & U32M, hi, lo, thr;
+    mul32(rg_next32(g), excl, &hi, &lo);
+    if (lo < excl) {
+        thr = (U32M - rng) % excl;
+        while (lo < thr) mul32(rg_next32(g), excl, &hi, &lo);
+    }
+    return hi;
+}
+static u64 rg_lemire64(RG *g, u64 rng)
+{
+    u64 excl = u64_add(rng, u64_ul(1UL)), x = rg_next64(g),
+        hi = u64_mulhi(x, excl),
+        lo = u64_mul(x, excl), thr;
+    if (u64_lt(lo, excl)) {
+        thr = u64_mod(u64_sub(u64_max(), rng), excl);
+        while (u64_lt(lo, thr)) {
+            x = rg_next64(g);
+            hi = u64_mulhi(x, excl);
+            lo = u64_mul(x, excl);
+        }
+    }
+    return hi;
+}
+/* random_bounded_uint64 with offset 0: a uniform draw from [0, rng] */
+static u64 rg_bounded(RG *g, u64 rng, int masked)
+{
+    if (u64_iszero(rng)) return rng;
+    if (u64_hi(rng) == 0) {
+        unsigned long r = u64_lo(rng), v;
+        if (r == U32M) return u64_ul(rg_next32(g));
+        if (masked) {
+            unsigned long mask = u64_lo(gen_mask(rng));
+            do v = rg_next32(g) & mask; while (v > r);
+            return u64_ul(v);
+        }
+        return u64_ul(rg_lemire32(g, r));
+    }
+    if (u64_eq(rng, u64_max())) return rg_next64(g);
+    if (masked) {
+        u64 mask = gen_mask(rng), v;
+        do v = u64_and(rg_next64(g), mask); while (u64_lt(rng, v));
+        return v;
+    }
+    return rg_lemire64(g, rng);
+}
+
+/* ziggurat tables: the constants of numpy's ziggurat_constants.h (256
+   layers, 52-bit scale) */
+static const unsigned long zig_nor_k[512] = {
+    0x000EF33DUL, 0x8025EF6AUL, 0x00000000UL, 0x00000000UL,
+        0x000C08BEUL, 0x98FBC6A8UL,
+    0x000DA354UL, 0xFABD8142UL, 0x000E51F6UL, 0x7EC1EEEAUL,
+        0x000EB255UL, 0xE9D3F77EUL,
+    0x000EEF4BUL, 0x817ECAB9UL, 0x000F1947UL, 0x0AFA44AAUL,
+        0x000F37EDUL, 0x61FFCB18UL,
+    0x000F4F46UL, 0x9561255CUL, 0x000F61A5UL, 0xE41BA396UL,
+        0x000F707AUL, 0x755396A4UL,
+    0x000F7CB2UL, 0xEC28449AUL, 0x000F86F1UL, 0x0C6357D3UL,
+        0x000F8FA6UL, 0x578325DEUL,
+    0x000F9724UL, 0xC74DD0DAUL, 0x000F9DA9UL, 0x07DBF509UL,
+        0x000FA360UL, 0xF581FA74UL,
+    0x000FA86FUL, 0xDE5B4BF8UL, 0x000FACF1UL, 0x60D354DCUL,
+        0x000FB0FBUL, 0x6718B90FUL,
+    0x000FB49FUL, 0x8D5374C6UL, 0x000FB7ECUL, 0x2366FE77UL,
+        0x000FBAECUL, 0xE9A1E50EUL,
+    0x000FBDABUL, 0x9D040BEDUL, 0x000FC030UL, 0x60FF6C57UL,
+        0x000FC282UL, 0x1037A248UL,
+    0x000FC4A6UL, 0x7AE25BD1UL, 0x000FC6A2UL, 0x977AEE31UL,
+        0x000FC87AUL, 0xA92896A4UL,
+    0x000FCA32UL, 0x5E4BDE85UL, 0x000FCBCCUL, 0xE902231AUL,
+        0x000FCD4DUL, 0x12F839C4UL,
+    0x000FCEB5UL, 0x4D8FEC99UL, 0x000FD007UL, 0xBF1DC930UL,
+        0x000FD146UL, 0x4DD6C4E6UL,
+    0x000FD272UL, 0xA8E2F450UL, 0x000FD38EUL, 0x4FF0C91EUL,
+        0x000FD49AUL, 0x9990B478UL,
+    0x000FD598UL, 0xB8920F53UL, 0x000FD689UL, 0xC08E99ECUL,
+        0x000FD76EUL, 0xA9C8E832UL,
+    0x000FD848UL, 0x547B08E8UL, 0x000FD917UL, 0x8BAD2C8CUL,
+        0x000FD9DDUL, 0x07A7ADD2UL,
+    0x000FDA99UL, 0x70105E8CUL, 0x000FDB4DUL, 0x5DC02E20UL,
+        0x000FDBF9UL, 0x5C5BFCD0UL,
+    0x000FDC9DUL, 0xEBB99A7DUL, 0x000FDD3BUL, 0x8118729DUL,
+        0x000FDDD2UL, 0x88342F90UL,
+    0x000FDE63UL, 0x64369F64UL, 0x000FDEEEUL, 0x708D514EUL,
+        0x000FDF74UL, 0x01A6B42EUL,
+    0x000FDFF4UL, 0x6599ED40UL, 0x000FE06FUL, 0xE4BC24F2UL,
+        0x000FE0E6UL, 0xC225A258UL,
+    0x000FE159UL, 0x3C28B84CUL, 0x000FE1C7UL, 0x8CBC3F99UL,
+        0x000FE231UL, 0xE9DB1CAAUL,
+    0x000FE298UL, 0x85DA1B91UL, 0x000FE2FBUL, 0x8FB54186UL,
+        0x000FE35BUL, 0x33558D4AUL,
+    0x000FE3B7UL, 0x99D0002AUL, 0x000FE410UL, 0xE99EAD7FUL,
+        0x000FE467UL, 0x46D47734UL,
+    0x000FE4BAUL, 0xD34C095CUL, 0x000FE50BUL, 0xAED29524UL,
+        0x000FE559UL, 0xF74EBC78UL,
+    0x000FE5A5UL, 0xC8E41212UL, 0x000FE5EFUL, 0x3E138689UL,
+        0x000FE636UL, 0x6FD91078UL,
+    0x000FE67BUL, 0x75C6D578UL, 0x000FE6BEUL, 0x661E11AAUL,
+        0x000FE6FFUL, 0x55E5F4F2UL,
+    0x000FE73EUL, 0x5900A702UL, 0x000FE77BUL, 0x823E9E39UL,
+        0x000FE7B6UL, 0xE37070A2UL,
+    0x000FE7F0UL, 0x8D774243UL, 0x000FE828UL, 0x9053F08CUL,
+        0x000FE85EUL, 0xFB35173AUL,
+    0x000FE893UL, 0xDC840864UL, 0x000FE8C7UL, 0x41F0CEBCUL,
+        0x000FE8F9UL, 0x387D4EF6UL,
+    0x000FE929UL, 0xCC879B1DUL, 0x000FE959UL, 0x09D388EAUL,
+        0x000FE986UL, 0xFB939AA2UL,
+    0x000FE9B3UL, 0xAC714866UL, 0x000FE9DFUL, 0x2694B6D5UL,
+        0x000FEA09UL, 0x73ABE67CUL,
+    0x000FEA32UL, 0x9CF166A4UL, 0x000FEA5AUL, 0xAB32952CUL,
+        0x000FEA81UL, 0xA6D5741AUL,
+    0x000FEAA7UL, 0x97DE1CF0UL, 0x000FEACCUL, 0x85F3D920UL,
+        0x000FEAF0UL, 0x7865E63CUL,
+    0x000FEB13UL, 0x762FEC13UL, 0x000FEB35UL, 0x85FE2A4AUL,
+        0x000FEB56UL, 0xAE3162B4UL,
+    0x000FEB76UL, 0xF4E284FAUL, 0x000FEB96UL, 0x5FE62014UL,
+        0x000FEBB4UL, 0xF4CF9D7CUL,
+    0x000FEBD2UL, 0xB8F449D0UL, 0x000FEBEFUL, 0xB16E2E3EUL,
+        0x000FEC0BUL, 0xE31EBDE8UL,
+    0x000FEC27UL, 0x52B15A15UL, 0x000FEC42UL, 0x049DAFD3UL,
+        0x000FEC5BUL, 0xFD29F196UL,
+    0x000FEC75UL, 0x406CEEF4UL, 0x000FEC8DUL, 0xD2500CB4UL,
+        0x000FECA5UL, 0xB6911F12UL,
+    0x000FECBCUL, 0xF0C427FEUL, 0x000FECD3UL, 0x8454FB15UL,
+        0x000FECE9UL, 0x7488C8B3UL,
+    0x000FECFEUL, 0xC47F91B7UL, 0x000FED13UL, 0x77358528UL,
+        0x000FED27UL, 0x8F844903UL,
+    0x000FED3BUL, 0x10242F4CUL, 0x000FED4DUL, 0xFBAD586EUL,
+        0x000FED60UL, 0x5498C3DDUL,
+    0x000FED72UL, 0x1D414FE8UL, 0x000FED83UL, 0x57E4A982UL,
+        0x000FED94UL, 0x06A42CC8UL,
+    0x000FEDA4UL, 0x2B85B704UL, 0x000FEDB3UL, 0xC8746AB4UL,
+        0x000FEDC2UL, 0xDF416652UL,
+    0x000FEDD1UL, 0x71A46E52UL, 0x000FEDDFUL, 0x813C8AD3UL,
+        0x000FEDEDUL, 0x0F909980UL,
+    0x000FEDFAUL, 0x1E0FD414UL, 0x000FEE06UL, 0xAE124BC4UL,
+        0x000FEE12UL, 0xC0D95A06UL,
+    0x000FEE1EUL, 0x579006E0UL, 0x000FEE29UL, 0x734B6524UL,
+        0x000FEE34UL, 0x150AE4BCUL,
+    0x000FEE3EUL, 0x3DB89B3CUL, 0x000FEE47UL, 0xEE2982F4UL,
+        0x000FEE51UL, 0x271DB086UL,
+    0x000FEE59UL, 0xE9407F41UL, 0x000FEE62UL, 0x3528B42EUL,
+        0x000FEE6AUL, 0x0B5897F1UL,
+    0x000FEE71UL, 0x6C3E077AUL, 0x000FEE78UL, 0x58327B82UL,
+        0x000FEE7EUL, 0xCF7B06BAUL,
+    0x000FEE84UL, 0xD2484AB2UL, 0x000FEE8AUL, 0x60B66343UL,
+        0x000FEE8FUL, 0x7ACCC851UL,
+    0x000FEE94UL, 0x207E25DAUL, 0x000FEE98UL, 0x51A829EAUL,
+        0x000FEE9CUL, 0x0E13485CUL,
+    0x000FEE9FUL, 0x557273F4UL, 0x000FEEA2UL, 0x2762CCAEUL,
+        0x000FEEA4UL, 0x836B42ACUL,
+    0x000FEEA6UL, 0x68FC2D71UL, 0x000FEEA7UL, 0xD76ED6FAUL,
+        0x000FEEA8UL, 0xCE04FA0AUL,
+    0x000FEEA9UL, 0x4BE8333BUL, 0x000FEEA9UL, 0x50296410UL,
+        0x000FEEA8UL, 0xD9C0075EUL,
+    0x000FEEA7UL, 0xE7897654UL, 0x000FEEA6UL, 0x78481D24UL,
+        0x000FEEA4UL, 0x8AA29E83UL,
+    0x000FEEA2UL, 0x1D22E4DAUL, 0x000FEE9FUL, 0x2E352024UL,
+        0x000FEE9BUL, 0xBC26AF2EUL,
+    0x000FEE97UL, 0xC524F2E4UL, 0x000FEE93UL, 0x473C0A3AUL,
+        0x000FEE8EUL, 0x40557516UL,
+    0x000FEE88UL, 0xAE369C7AUL, 0x000FEE82UL, 0x8E7F3DFDUL,
+        0x000FEE7BUL, 0xDEA7B888UL,
+    0x000FEE74UL, 0x9BFF37FFUL, 0x000FEE6CUL, 0xC3A9BD5EUL,
+        0x000FEE64UL, 0x529E007EUL,
+    0x000FEE5BUL, 0x45A32888UL, 0x000FEE51UL, 0x994E57B6UL,
+        0x000FEE47UL, 0x4A0006CFUL,
+    0x000FEE3CUL, 0x53E12C50UL, 0x000FEE30UL, 0xB2E02AD8UL,
+        0x000FEE24UL, 0x62AD8205UL,
+    0x000FEE17UL, 0x5EB83C5AUL, 0x000FEE09UL, 0xA22A1447UL,
+        0x000FEDFBUL, 0x27E349CCUL,
+    0x000FEDEBUL, 0xEA76216CUL, 0x000FEDDBUL, 0xE422047EUL,
+        0x000FEDCBUL, 0x0ECE39D3UL,
+    0x000FEDB9UL, 0x64042CF4UL, 0x000FEDA6UL, 0xDCE938C9UL,
+        0x000FED93UL, 0x7237E98DUL,
+    0x000FED7FUL, 0x1C38A836UL, 0x000FED69UL, 0xD2B9C02BUL,
+        0x000FED53UL, 0x8D06AE00UL,
+    0x000FED3CUL, 0x41DEA422UL, 0x000FED23UL, 0xE76A2FD8UL,
+        0x000FED0AUL, 0x732FE644UL,
+    0x000FECEFUL, 0xDA07FE34UL, 0x000FECD4UL, 0x100EB7B8UL,
+        0x000FECB7UL, 0x08956EB4UL,
+    0x000FEC98UL, 0xB61230C1UL, 0x000FEC79UL, 0x0A0DA978UL,
+        0x000FEC57UL, 0xF50F31FEUL,
+    0x000FEC35UL, 0x6686C962UL, 0x000FEC11UL, 0x4CB4B335UL,
+        0x000FEBEBUL, 0x948E6FD0UL,
+    0x000FEBC4UL, 0x29A0B692UL, 0x000FEB9AUL, 0xF5EE0CDCUL,
+        0x000FEB6FUL, 0xE1C98542UL,
+    0x000FEB42UL, 0xD3AD1F9EUL, 0x000FEB13UL, 0xB00B2D4BUL,
+        0x000FEAE2UL, 0x591A02E9UL,
+    0x000FEAAEUL, 0xAE992257UL, 0x000FEA78UL, 0x8D8EE326UL,
+        0x000FEA3FUL, 0xCFFD73E5UL,
+    0x000FEA04UL, 0x4C8DD9F6UL, 0x000FE9C5UL, 0xD62F563BUL,
+        0x000FE984UL, 0x3BA947A4UL,
+    0x000FE93FUL, 0x471D4728UL, 0x000FE8F6UL, 0xBD76C5D6UL,
+        0x000FE8AAUL, 0x5DC4E8E6UL,
+    0x000FE859UL, 0xE07AB1EAUL, 0x000FE804UL, 0xF690A940UL,
+        0x000FE7ABUL, 0x488233C0UL,
+    0x000FE74CUL, 0x751F6AA5UL, 0x000FE6E8UL, 0x102AA202UL,
+        0x000FE67DUL, 0xA0B6ABD8UL,
+    0x000FE60CUL, 0x9F38307EUL, 0x000FE594UL, 0x7338F742UL,
+        0x000FE514UL, 0x70977280UL,
+    0x000FE48BUL, 0xD436F458UL, 0x000FE3F9UL, 0xBFFD1E37UL,
+        0x000FE35DUL, 0x35EEB19CUL,
+    0x000FE2B5UL, 0x122FE4FEUL, 0x000FE200UL, 0x03995557UL,
+        0x000FE13CUL, 0x82788314UL,
+    0x000FE068UL, 0xC4EE67B0UL, 0x000FDF82UL, 0xB02B71AAUL,
+        0x000FDE87UL, 0xC57EFEAAUL,
+    0x000FDD75UL, 0x09C63BFDUL, 0x000FDC46UL, 0xE529BF13UL,
+        0x000FDAF8UL, 0xF82E0282UL,
+    0x000FD985UL, 0xE1B2BA75UL, 0x000FD7E6UL, 0xEF48CF04UL,
+        0x000FD613UL, 0xADBD650BUL,
+    0x000FD401UL, 0x49E2F012UL, 0x000FD1A1UL, 0xA7B4C7ACUL,
+        0x000FCEE2UL, 0x04761F9EUL,
+    0x000FCBA8UL, 0xD85E11B2UL, 0x000FC7D2UL, 0x6ECD2D22UL,
+        0x000FC32BUL, 0x2F1E22EDUL,
+    0x000FBD65UL, 0x81C0B83AUL, 0x000FB606UL, 0xC4005434UL,
+        0x000FAC40UL, 0x582A2874UL,
+    0x000F9E97UL, 0x1E014598UL, 0x000F89FAUL, 0x48A41DFCUL,
+        0x000F66C5UL, 0xF7F0302CUL,
+    0x000F1A5AUL, 0x4B331C4AUL
+};
+static const double zig_nor_w[256] = {
+    8.683627060801306e-16, 4.779330175727737e-17,
+        6.354352417405262e-17,
+    7.454870481247696e-17, 8.3293668157931e-17, 9.068060405059482e-17,
+    9.714860076567762e-17, 1.0294750314241019e-16,
+        1.0823430288447684e-16,
+    1.131147019610903e-16, 1.176635945702292e-16,
+        1.2193617278714363e-16,
+    1.2597439914637093e-16, 1.2981099886264032e-16,
+        1.3347203736824123e-16,
+    1.3697864842571203e-16, 1.4034823001242382e-16,
+        1.4359529452056943e-16,
+    1.4673208742364422e-16, 1.4976904668391037e-16,
+        1.5271515003596198e-16,
+    1.5557818169460764e-16, 1.5836494009290885e-16,
+        1.6108140175274928e-16,
+    1.6373285203969853e-16, 1.6632399058420835e-16,
+        1.6885901708676596e-16,
+    1.713417017655966e-16, 1.737754436586486e-16,
+        1.7616331923000996e-16,
+    1.7850812316976727e-16, 1.8081240285799152e-16,
+        1.830784876482675e-16,
+    1.853085138861802e-16, 1.8750444639373882e-16,
+        1.896680970077476e-16,
+    1.918011406483862e-16, 1.9390512930625104e-16,
+        1.9598150426628824e-16,
+    1.9803160683128174e-16, 2.000566877627333e-16,
+        2.0205791562071654e-16,
+    2.0403638415480212e-16, 2.0599311887403706e-16,
+        2.079290829041402e-16,
+    2.0984518222370352e-16, 2.1174227035760342e-16,
+        2.1362115259449868e-16,
+    2.1548258978581458e-16, 2.1732730177564367e-16,
+        2.191559705042727e-16,
+    2.2096924282235318e-16, 2.2276773304789553e-16,
+        2.2455202529414355e-16,
+    2.263226755928568e-16, 2.280802138345017e-16,
+        2.2982514554424684e-16,
+    2.3155795351040804e-16, 2.3327909928004356e-16,
+        2.3498902453470955e-16,
+    2.3668815235791604e-16, 2.3837688840454243e-16,
+        2.4005562198135063e-16,
+    2.4172472704675025e-16, 2.433845631371103e-16,
+        2.4503547622614954e-16,
+    2.466777995232705e-16, 2.4831185421610877e-16,
+        2.4993795016204524e-16,
+    2.515563865329658e-16, 2.5316745241713583e-16,
+        2.547714273816944e-16,
+    2.563685819989397e-16, 2.579591783392867e-16,
+        2.5954347043351707e-16,
+    2.6112170470670194e-16, 2.6269412038597256e-16,
+        2.6426094988411895e-16,
+    2.658224191608307e-16, 2.6737874806323633e-16,
+        2.689301506472616e-16,
+    2.704768354811995e-16, 2.720190059327732e-16,
+        2.735568604408679e-16,
+    2.7509059277301666e-16, 2.7662039226963903e-16,
+        2.781464440759544e-16,
+    2.79668929362423e-16, 2.8118802553450207e-16,
+        2.827039064324479e-16,
+    2.842167425218406e-16, 2.8572670107546015e-16,
+        2.87233946347098e-16,
+    2.887386397378482e-16, 2.9024093995538423e-16,
+        2.9174100316669455e-16,
+    2.9323898314471816e-16, 2.947350314092935e-16,
+        2.9622929736280665e-16,
+    2.977219284209029e-16, 2.992130701386013e-16,
+        3.007028663321331e-16,
+    3.0219145919680615e-16, 3.036789894211802e-16,
+        3.051655962978219e-16,
+    3.0665141783089545e-16, 3.081365908408297e-16,
+        3.0962125106629225e-16,
+    3.111055332636893e-16, 3.125895713043999e-16,
+        3.140734982699446e-16,
+    3.1555744654528006e-16, 3.1704154791040285e-16,
+        3.1852593363044065e-16,
+    3.2001073454440114e-16, 3.214960811527447e-16,
+        3.2298210370394156e-16,
+    3.244689322801698e-16, 3.2595669688230784e-16,
+        3.2744552751437067e-16,
+    3.2893555426753697e-16, 3.3042690740391284e-16,
+        3.3191971744017523e-16,
+    3.3341411523123725e-16, 3.3491023205407785e-16,
+        3.364081996918765e-16,
+    3.37908150518595e-16, 3.394102175841489e-16, 3.409145347003126e-16,
+    3.424212365275018e-16, 3.4393045866258313e-16,
+        3.454423377278584e-16,
+    3.4695701146137835e-16, 3.4847461880874137e-16,
+        3.499953000165381e-16,
+    3.5151919672760744e-16, 3.53046452078274e-16,
+        3.5457721079774357e-16,
+    3.5611161930983884e-16, 3.5764982583726505e-16,
+        3.59191980508603e-16,
+    3.6073823546823514e-16, 3.6228874498941915e-16,
+        3.6384366559073444e-16,
+    3.65403156156137e-16, 3.669673780588701e-16, 3.685364952894914e-16,
+    3.7011067458828983e-16, 3.716900855823823e-16,
+        3.7327490092779435e-16,
+    3.7486529645684887e-16, 3.7646145133120287e-16,
+        3.7806354820089604e-16,
+    3.7967177336979443e-16, 3.8128631696783774e-16,
+        3.829073731305243e-16,
+    3.8453514018609596e-16, 3.8616982085091493e-16,
+        3.878116224335587e-16,
+    3.894607570481926e-16, 3.9111744183782054e-16,
+        3.9278189920805415e-16,
+    3.944543570720877e-16, 3.9613504910761354e-16,
+        3.9782421502646826e-16,
+    3.995221008578565e-16, 4.012289592460629e-16,
+        4.029450497636328e-16,
+    4.04670639241075e-16, 4.0640600211422504e-16,
+        4.0815142079049387e-16,
+    4.0990718603532664e-16, 4.1167359738030257e-16,
+        4.134509635544236e-16,
+    4.1523960294026883e-16, 4.170398440568316e-16,
+        4.1885202607101123e-16,
+    4.206764993399015e-16, 4.2251362598620494e-16,
+        4.243637805093078e-16,
+    4.262273504347798e-16, 4.2810473700531167e-16,
+        4.2999635591638323e-16,
+    4.3190263810026294e-16, 4.338240305622791e-16,
+        4.357609972736849e-16,
+    4.3771402012585875e-16, 4.3968359995105214e-16,
+        4.4167025761542035e-16,
+    4.4367453519065673e-16, 4.456969972112043e-16,
+        4.477382320247534e-16,
+    4.49798853244555e-16, 4.518795013130059e-16, 4.539808451870034e-16,
+    4.561035841567422e-16, 4.582484498109567e-16,
+        4.604162081631153e-16,
+    4.626076619547846e-16, 4.648236531543207e-16,
+        4.670650656712631e-16,
+    4.693328283093329e-16, 4.716279179838351e-16,
+        4.739513632325867e-16,
+    4.763042480533137e-16, 4.786877161048723e-16,
+        4.811029753147417e-16,
+    4.835513029411525e-16, 4.860340511450812e-16,
+        4.885526531353603e-16,
+    4.91108629959527e-16, 4.937035980240335e-16, 4.963392774403987e-16,
+    4.990175013091822e-16, 5.017402260718089e-16,
+        5.045095430818727e-16,
+    5.073276915733542e-16, 5.101970732341562e-16,
+        5.131202686306784e-16,
+    5.161000557743228e-16, 5.191394311757699e-16,
+        5.222416338000234e-16,
+    5.254101724177597e-16, 5.286488569504945e-16, 5.3196183453384e-16,
+    5.353536311816497e-16, 5.388292001334053e-16,
+        5.423939782201712e-16,
+    5.46053951907478e-16, 5.498157350892814e-16, 5.536866612467876e-16,
+    5.576748932926576e-16, 5.617895553555417e-16,
+        5.660408920082422e-16,
+    5.704404621291389e-16, 5.750013768919895e-16,
+        5.797385945724594e-16,
+    5.846692893455479e-16, 5.898133176477899e-16,
+        5.951938149641444e-16,
+    6.008379696271908e-16, 6.067780409333449e-16,
+        6.130527208725282e-16,
+    6.197089894581626e-16, 6.268046963301284e-16,
+        6.344122407127506e-16,
+    6.426239659548055e-16, 6.515603317344994e-16,
+        6.613827885097664e-16,
+    6.723150462505587e-16, 6.846803417564259e-16, 6.98971833638762e-16,
+    7.159994934830664e-16, 7.372424301798799e-16,
+        7.658936370805573e-16,
+    8.113849337656484e-16
+};
+static const double zig_nor_f[256] = {
+    1.0, 0.9771017012676716, 0.9598790918001067,
+    0.9451989534422996, 0.9320600759592305, 0.919991505039347,
+    0.9087264400521309, 0.8980959218983434, 0.8879846607558334,
+    0.8783096558089174, 0.869008688036857, 0.8600336211963315,
+    0.851346258458678, 0.8429156531122042, 0.8347162929868834,
+    0.8267268339462214, 0.8189291916037024, 0.8113078743126563,
+    0.8038494831709643, 0.796542330422959, 0.7893761435660246,
+    0.7823418326548025, 0.7754313049811872, 0.7686373157984863,
+    0.7619533468367954, 0.7553735065070961, 0.7488924472191568,
+    0.742505296340151, 0.7362075981268627, 0.7299952645614762,
+    0.7238645334686302, 0.717811932630722, 0.7118342488782484,
+    0.7059285013327543, 0.7000919181365116, 0.6943219161261167,
+    0.6886160830046718, 0.6829721616449949, 0.6773880362187735,
+    0.6718617198970821, 0.6663913439087501, 0.6609751477766631,
+    0.6556114705796973, 0.6502987431108167, 0.6450354808208223,
+    0.6398202774530566, 0.6346517992876236, 0.6295287799248367,
+    0.6244500155470265, 0.6194143606058343, 0.6144207238889139,
+    0.6094680649257734, 0.6045553906974678, 0.5996817526191253,
+    0.5948462437679874, 0.590047996332826, 0.5852861792633715,
+    0.5805599961007909, 0.5758686829723537, 0.5712115067352532,
+    0.5665877632561644, 0.5619967758145243, 0.557437893618766,
+    0.5529104904258323, 0.5484139632552658, 0.5439477311900263,
+    0.5395112342569521, 0.5351039323804576, 0.5307253044036621,
+    0.5263748471716845, 0.5220520746723218, 0.5177565172297564,
+    0.513487720747327, 0.5092452459957479, 0.5050286679434681,
+    0.5008375751261487, 0.4966715690524897, 0.49253026364386854,
+    0.48841328470545803, 0.4843202694266833, 0.48025086590904675,
+    0.47620473271950586, 0.4721815384677302, 0.4681809614056936,
+    0.46420268904817436, 0.46024641781284287, 0.45631185267871643,
+    0.4523987068618485, 0.44850670150720306, 0.4446355653957394,
+    0.440785034665804, 0.43695485254798555, 0.43314476911265226,
+    0.4293545410294414, 0.42558393133802197, 0.4218327092294959,
+    0.4181006498378482, 0.4143875340408911, 0.41069314827018816,
+    0.40701728432947337, 0.4033597392211145, 0.3997203149801972,
+    0.39609881851583245, 0.3924950614593156, 0.3889088600187887,
+    0.3853400348400773, 0.38178841087339366, 0.3782538172456192,
+    0.37473608713789114, 0.3712350576682395, 0.3677505697790326,
+    0.36428246812900406, 0.36083060098964803, 0.3573948201457805,
+    0.3539749808000768, 0.3505709414814061, 0.34718256395679364,
+    0.3438097131468507, 0.34045225704452187, 0.33711006663700605,
+    0.33378301583071845, 0.3304709813791636, 0.3271738428136014,
+    0.3238914823763911, 0.32062378495690536, 0.3173706380299136,
+    0.3141319315963372, 0.3109075581262865, 0.30769741250429206,
+    0.30450139197665, 0.30131939610080305, 0.2981513266966855,
+    0.2949970877999618, 0.2918565856170952, 0.2887297284821829,
+    0.28561642681550176, 0.2825165930837076, 0.27943014176163794,
+    0.2763569892956683, 0.27329705406857707, 0.27025025636587546,
+    0.26721651834356147, 0.2641957639972612, 0.2611879191327212,
+    0.25819291133761924, 0.25521066995466196, 0.2522411260559422,
+    0.24928421241852852, 0.24633986350126383, 0.2434080154227503,
+    0.2404886059405006, 0.2375815744312381, 0.23468686187233,
+    0.23180441082433872, 0.22893416541468034, 0.22607607132238028,
+    0.22323007576391748, 0.220396127480152, 0.21757417672433113,
+    0.21476417525117358, 0.21196607630703018, 0.20917983462112508,
+    0.2064054063978808, 0.2036427493103349, 0.2008918224946566,
+    0.19815258654577514, 0.1954250035141343, 0.19270903690358918,
+    0.19000465167046499, 0.1873118142238003, 0.18463049242679927,
+    0.18196065559952251, 0.17930227452284758, 0.17665532144373486,
+    0.17401977008183855, 0.17139559563750575, 0.1687827748012113,
+    0.1661812857644819, 0.16359110823236558, 0.161012223437511,
+    0.15844461415592428, 0.1558882647244792, 0.15334316106026286,
+    0.15080929068184568, 0.14828664273257455, 0.14577520800599403,
+    0.14327497897351346, 0.1407859498144447, 0.13830811644855073,
+    0.13584147657125376, 0.13338602969166916, 0.13094177717364436,
+    0.12850872227999957, 0.1260868702201859, 0.12367622820159657,
+    0.1212768054847903, 0.11888861344291006, 0.11651166562561087,
+    0.11414597782783849, 0.11179156816383809, 0.1094484571468118,
+    0.1071166677746838, 0.10479622562248707, 0.10248715894193525,
+    0.10018949876881002, 0.09790327903886246, 0.095628536713009,
+    0.09336531191269101, 0.09111364806637376, 0.08887359206827589,
+    0.08664519445055807, 0.08442850957035347, 0.0822235958132029,
+    0.08003051581466307, 0.07784933670209612, 0.07568013035892718,
+    0.07352297371398132, 0.0713779490588904, 0.06924514439700676,
+    0.0671246538277885, 0.0650165779712429, 0.06292102443775814,
+    0.06083810834953988, 0.05876795292093374, 0.0567106901062029,
+    0.05466646132488892, 0.05263541827679219, 0.05061772386094778,
+    0.04861355321586854, 0.04662309490193038, 0.044646552251294463,
+    0.04268414491647446, 0.04073611065594094, 0.03880270740452615,
+    0.036884215688567305, 0.034980941461716125, 0.03309321945857858,
+    0.0312214171919203, 0.02936593975813336, 0.027527235669603113,
+    0.02570580400854891, 0.02390220330579588, 0.02211706270730885,
+    0.02035109623004451, 0.018605121275724622, 0.016880083152543142,
+    0.01517708830793531, 0.013497450601739867, 0.011842757857907879,
+    0.010214971439701459, 0.008616582769398726, 0.007050875471373222,
+    0.0055224032992509916, 0.0040379725933630236,
+        0.0026090727461021593,
+    0.001260285930498598
+};
+static const unsigned long zig_exp_k[512] = {
+    0x001C5214UL, 0x272497C6UL, 0x00000000UL, 0x00000000UL,
+        0x00137D5BUL, 0xD79C317EUL,
+    0x00186EF5UL, 0x8E3F3C10UL, 0x001A9BB7UL, 0x320EB0AEUL,
+        0x001BD127UL, 0xF719447CUL,
+    0x001C951DUL, 0x0F88651AUL, 0x001D1BFEUL, 0x2D5C3972UL,
+        0x001D7E5BUL, 0xD56B18B2UL,
+    0x001DC934UL, 0xDD172C70UL, 0x001E0409UL, 0xDFAC9DC8UL,
+        0x001E337BUL, 0x71D47836UL,
+    0x001E5A8BUL, 0x177CB7A2UL, 0x001E7B42UL, 0x096F046CUL,
+        0x001E970DUL, 0xAF08AE3EUL,
+    0x001EAEF5UL, 0xB14EF09EUL, 0x001EC3BDUL, 0x07B46556UL,
+        0x001ED5F6UL, 0xF08799CEUL,
+    0x001EE614UL, 0xAE6E5688UL, 0x001EF46EUL, 0xCA361CD0UL,
+        0x001F014BUL, 0x76DDD4A4UL,
+    0x001F0CE3UL, 0x13A796B6UL, 0x001F1763UL, 0x69F1F77AUL,
+        0x001F20F2UL, 0x0C452570UL,
+    0x001F29AEUL, 0x1951A874UL, 0x001F31B1UL, 0x8FB95532UL,
+        0x001F3912UL, 0x5157C106UL,
+    0x001F3FE2UL, 0xEB6E694CUL, 0x001F4633UL, 0x32D788FAUL,
+        0x001F4C10UL, 0xBF1D3A0EUL,
+    0x001F5187UL, 0x4C5C3322UL, 0x001F56A1UL, 0x09C3ECC0UL,
+        0x001F5B66UL, 0xD9099996UL,
+    0x001F5FE0UL, 0x8210D08CUL, 0x001F6414UL, 0xDD445772UL,
+        0x001F6809UL, 0xF6859678UL,
+    0x001F6BC5UL, 0x2A2B02E6UL, 0x001F6F4BUL, 0x3D32E4F4UL,
+        0x001F72A0UL, 0x7190F13AUL,
+    0x001F75C8UL, 0x974D09D6UL, 0x001F78C7UL, 0x1B045CC0UL,
+        0x001F7B9FUL, 0x12413FF4UL,
+    0x001F7E53UL, 0x46079F8AUL, 0x001F80E6UL, 0x3BE21138UL,
+        0x001F835AUL, 0x3DAD9162UL,
+    0x001F85B1UL, 0x6056B912UL, 0x001F87EDUL, 0x89B24262UL,
+        0x001F8A10UL, 0x759374FAUL,
+    0x001F8C1BUL, 0xBA3D39ACUL, 0x001F8E10UL, 0xCC45D04AUL,
+        0x001F8FF1UL, 0x02013E16UL,
+    0x001F91BDUL, 0x968358E0UL, 0x001F9377UL, 0xAC47AFD8UL,
+        0x001F9520UL, 0x4F8B64DAUL,
+    0x001F96B8UL, 0x78633892UL, 0x001F9841UL, 0x0C968892UL,
+        0x001F99BAUL, 0xE146BA80UL,
+    0x001F9B26UL, 0xBC697F00UL, 0x001F9C85UL, 0x561B717AUL,
+        0x001F9DD7UL, 0x59CFD802UL,
+    0x001F9F1DUL, 0x6761A1CEUL, 0x001FA058UL, 0x140936C0UL,
+        0x001FA187UL, 0xEB3A3338UL,
+    0x001FA2ADUL, 0x6F6BC4FCUL, 0x001FA3C9UL, 0x1ACE0682UL,
+        0x001FA4DBUL, 0x5FEE6AA2UL,
+    0x001FA5E4UL, 0xAA4D097CUL, 0x001FA6E5UL, 0x5EE46782UL,
+        0x001FA7DDUL, 0xDCA51EC4UL,
+    0x001FA8CEUL, 0x7CE6A874UL, 0x001FA9B7UL, 0x93CE5FEEUL,
+        0x001FAA99UL, 0x70ADB858UL,
+    0x001FAB74UL, 0x5E588232UL, 0x001FAC48UL, 0xA3740584UL,
+        0x001FAD16UL, 0x82BF9FE8UL,
+    0x001FADDEUL, 0x3B5782C0UL, 0x001FAEA0UL, 0x08F21D6CUL,
+        0x001FAF5CUL, 0x2418B07EUL,
+    0x001FB012UL, 0xC25B7A12UL, 0x001FB0C4UL, 0x1681DFF4UL,
+        0x001FB170UL, 0x50B6F1FAUL,
+    0x001FB217UL, 0x9EB2963AUL, 0x001FB2BAUL, 0x2BDFA84AUL,
+        0x001FB358UL, 0x217F4E18UL,
+    0x001FB3F1UL, 0xA6C9BE0CUL, 0x001FB486UL, 0xE10CACD6UL,
+        0x001FB517UL, 0xF3C793FCUL,
+    0x001FB5A5UL, 0x00C5FDAAUL, 0x001FB62EUL, 0x2837FE58UL,
+        0x001FB6B3UL, 0x88C9010AUL,
+    0x001FB735UL, 0x3FB50798UL, 0x001FB7B3UL, 0x68DC7DA8UL,
+        0x001FB82EUL, 0x1ED6BA08UL,
+    0x001FB8A5UL, 0x7B0347F6UL, 0x001FB919UL, 0x959A0F74UL,
+        0x001FB98AUL, 0x85BA7204UL,
+    0x001FB9F8UL, 0x61796F26UL, 0x001FBA63UL, 0x3DEEE286UL,
+        0x001FBACBUL, 0x2F41EC16UL,
+    0x001FBB30UL, 0x48B49144UL, 0x001FBB92UL, 0x9CAEA4E2UL,
+        0x001FBBF2UL, 0x3CC8029EUL,
+    0x001FBC4FUL, 0x39D22994UL, 0x001FBCA9UL, 0xA3E140D4UL,
+        0x001FBD01UL, 0x8A548F9EUL,
+    0x001FBD56UL, 0xFBDE729CUL, 0x001FBDAAUL, 0x068BD66AUL,
+        0x001FBDFAUL, 0xB7CB3F40UL,
+    0x001FBE49UL, 0x1C7364DEUL, 0x001FBE95UL, 0x40C9695EUL,
+        0x001FBEDFUL, 0x3086B128UL,
+    0x001FBF26UL, 0xF6DE6174UL, 0x001FBF6CUL, 0x9E828AE2UL,
+        0x001FBFB0UL, 0x31A904C4UL,
+    0x001FBFF1UL, 0xBA0FFDB0UL, 0x001FC031UL, 0x41024588UL,
+        0x001FC06EUL, 0xCF5B54B2UL,
+    0x001FC0AAUL, 0x6D8B1426UL, 0x001FC0E4UL, 0x2399698AUL,
+        0x001FC11BUL, 0xF9298A64UL,
+    0x001FC151UL, 0xF57D1942UL, 0x001FC186UL, 0x1F770F4AUL,
+        0x001FC1B8UL, 0x7D9E74B4UL,
+    0x001FC1E9UL, 0x1620EA42UL, 0x001FC217UL, 0xEED505DEUL,
+        0x001FC245UL, 0x0D3C83FEUL,
+    0x001FC270UL, 0x76864FC2UL, 0x001FC29AUL, 0x2F90630EUL,
+        0x001FC2C2UL, 0x3CE98046UL,
+    0x001FC2E8UL, 0xA2D2C6B4UL, 0x001FC30DUL, 0x654122ECUL,
+        0x001FC330UL, 0x87DE9C0EUL,
+    0x001FC352UL, 0x0E0B7EC6UL, 0x001FC371UL, 0xFADF66F8UL,
+        0x001FC390UL, 0x512A2886UL,
+    0x001FC3ADUL, 0x137497FAUL, 0x001FC3C8UL, 0x44013348UL,
+        0x001FC3E1UL, 0xE4CCAB40UL,
+    0x001FC3F9UL, 0xF78E4DA8UL, 0x001FC410UL, 0x7DB85060UL,
+        0x001FC425UL, 0x7877FD68UL,
+    0x001FC438UL, 0xE8B5BFC6UL, 0x001FC44AUL, 0xCF15112AUL,
+        0x001FC45BUL, 0x2BF447E8UL,
+    0x001FC469UL, 0xFF6C4504UL, 0x001FC477UL, 0x495001B2UL,
+        0x001FC483UL, 0x092BFBB8UL,
+    0x001FC48DUL, 0x3E457FF6UL, 0x001FC495UL, 0xE799D21AUL,
+        0x001FC49DUL, 0x03DD30B0UL,
+    0x001FC4A2UL, 0x9179B432UL, 0x001FC4A6UL, 0x8E8E07FCUL,
+        0x001FC4A8UL, 0xF8EBFB8CUL,
+    0x001FC4A9UL, 0xCE16EA9EUL, 0x001FC4A9UL, 0x0B41FA34UL,
+        0x001FC4A6UL, 0xAD4E28A0UL,
+    0x001FC4A2UL, 0xB0C82E74UL, 0x001FC49DUL, 0x11E62DE2UL,
+        0x001FC495UL, 0xCC852DF4UL,
+    0x001FC48CUL, 0xDC265EC0UL, 0x001FC482UL, 0x3BEC237AUL,
+        0x001FC475UL, 0xE696DEE6UL,
+    0x001FC467UL, 0xD6817E82UL, 0x001FC458UL, 0x059DC036UL,
+        0x001FC446UL, 0x6D702E20UL,
+    0x001FC433UL, 0x070BCB98UL, 0x001FC41DUL, 0xCB0D6E0EUL,
+        0x001FC406UL, 0xB196BBF6UL,
+    0x001FC3EDUL, 0xB248CB62UL, 0x001FC3D2UL, 0xC43E593CUL,
+        0x001FC3B5UL, 0xDE0591B4UL,
+    0x001FC396UL, 0xF599614CUL, 0x001FC376UL, 0x005A4592UL,
+        0x001FC352UL, 0xF3069370UL,
+    0x001FC32DUL, 0xC1B22818UL, 0x001FC306UL, 0x5FBD7888UL,
+        0x001FC2DCUL, 0xBFCBF262UL,
+    0x001FC2B0UL, 0xD3B99F9EUL, 0x001FC282UL, 0x8C8FFCF0UL,
+        0x001FC251UL, 0xDA79F164UL,
+    0x001FC21EUL, 0xACB6D39EUL, 0x001FC1E8UL, 0xF18C6756UL,
+        0x001FC1B0UL, 0x9637BB3CUL,
+    0x001FC175UL, 0x86DCCD10UL, 0x001FC137UL, 0xAE74D6B6UL,
+        0x001FC0F6UL, 0xF6BB2414UL,
+    0x001FC0B3UL, 0x48184DA4UL, 0x001FC06CUL, 0x898BAFF0UL,
+        0x001FC022UL, 0xA092F364UL,
+    0x001FBFD5UL, 0x710F72B8UL, 0x001FBF84UL, 0xDD29488EUL,
+        0x001FBF30UL, 0xC52FC60AUL,
+    0x001FBED9UL, 0x07770CC6UL, 0x001FBE7DUL, 0x80327DDAUL,
+        0x001FBE1EUL, 0x094BA614UL,
+    0x001FBDBAUL, 0x7A354408UL, 0x001FBD52UL, 0xA7B9F826UL,
+        0x001FBCE6UL, 0x63C6201AUL,
+    0x001FBC75UL, 0x7D2C4DE4UL, 0x001FBBFFUL, 0xBF63B7AAUL,
+        0x001FBB84UL, 0xF23FE6A2UL,
+    0x001FBB04UL, 0xD9A0D18CUL, 0x001FBA7FUL, 0x351A70ACUL,
+        0x001FB9F3UL, 0xBF92B618UL,
+    0x001FB962UL, 0x2ED4ABFCUL, 0x001FB8CAUL, 0x33174A16UL,
+        0x001FB82BUL, 0x76765B54UL,
+    0x001FB785UL, 0x9C5B895CUL, 0x001FB6D8UL, 0x40D55594UL,
+        0x001FB622UL, 0xF7D96942UL,
+    0x001FB565UL, 0x4C6F37E0UL, 0x001FB49EUL, 0xBFBF69D2UL,
+        0x001FB3CEUL, 0xC803E746UL,
+    0x001FB2F4UL, 0xCF539C3EUL, 0x001FB210UL, 0x32442852UL,
+        0x001FB120UL, 0x3E5A9604UL,
+    0x001FB024UL, 0x3042E1C2UL, 0x001FAF1BUL, 0x31C479A6UL,
+        0x001FAE04UL, 0x5767E104UL,
+    0x001FACDEUL, 0x9DBF2D72UL, 0x001FABA8UL, 0xE640060AUL,
+        0x001FAA61UL, 0xF399FF28UL,
+    0x001FA908UL, 0x656F66A2UL, 0x001FA79AUL, 0xB3508D3CUL,
+        0x001FA617UL, 0x26D1F214UL,
+    0x001FA47BUL, 0xD48BEA00UL, 0x001FA2C6UL, 0x93C5C094UL,
+        0x001FA0F4UL, 0xF47DF314UL,
+    0x001F9F04UL, 0x336BBE0AUL, 0x001F9CF1UL, 0x2B79F9BCUL,
+        0x001F9AB8UL, 0x4415ABC4UL,
+    0x001F9855UL, 0x5B782FB8UL, 0x001F95C3UL, 0xABD03F78UL,
+        0x001F92FDUL, 0xA9CEF1F2UL,
+    0x001F8FFCUL, 0xDA9AE41CUL, 0x001F8CB9UL, 0x9E7385F8UL,
+        0x001F892AUL, 0xEC479606UL,
+    0x001F8545UL, 0xF904DB8EUL, 0x001F80FDUL, 0xC336039AUL,
+        0x001F7C42UL, 0x7839E926UL,
+    0x001F7700UL, 0xA3582ACCUL, 0x001F7120UL, 0x0F1A241CUL,
+        0x001F6A82UL, 0x34B7352AUL,
+    0x001F6300UL, 0x00A8E266UL, 0x001F5A66UL, 0x904FE3C4UL,
+        0x001F5072UL, 0x4ECE1172UL,
+    0x001F44C7UL, 0x665C6FDAUL, 0x001F36E5UL, 0xA38A59A2UL,
+        0x001F2614UL, 0x3450340AUL,
+    0x001F113EUL, 0x047B0414UL, 0x001EF6AEUL, 0xFA57CBE6UL,
+        0x001ED38CUL, 0xA188151EUL,
+    0x001EA2A6UL, 0x1E122DB0UL, 0x001E5961UL, 0xC78B267CUL,
+        0x001DDDF6UL, 0x2BAC0BB0UL,
+    0x001CDB4DUL, 0xD9E4E8C0UL
+};
+static const double zig_exp_w[256] = {
+    9.655740063209183e-16, 7.089014243955414e-18,
+        1.1639412496691224e-17,
+    1.524391512353216e-17, 1.833284885723744e-17,
+        2.1089651094644866e-17,
+    2.3611280778431382e-17, 2.595595772310894e-17,
+        2.8161735541977523e-17,
+    3.0255041303213823e-17, 3.225508254836375e-17,
+        3.417632340185027e-17,
+    3.6029969787344525e-17, 3.782490776869649e-17,
+        3.956832198097553e-17,
+    4.1266117781759464e-17, 4.2923218084425256e-17,
+        4.4543777432823714e-17,
+    4.613133981483186e-17, 4.768895725264636e-17,
+        4.921928043727963e-17,
+    5.072462904503147e-17, 5.220704702792672e-17,
+        5.366834661718192e-17,
+    5.511014372835095e-17, 5.653388673239667e-17,
+        5.794088004852767e-17,
+    5.933230365208943e-17, 6.07092293284718e-17, 6.207263431163193e-17,
+    6.342341280303077e-17, 6.476238575956142e-17,
+        6.609030925769405e-17,
+    6.740788167872722e-17, 6.871574991183812e-17, 7.00145147340393e-17,
+    7.130473549660643e-17, 7.258693422414648e-17,
+        7.386159921381792e-17,
+    7.512918820723728e-17, 7.639013119550826e-17,
+        7.764483290797848e-17,
+    7.88936750272979e-17, 8.013701816675454e-17, 8.137520364041762e-17,
+    8.260855505210038e-17, 8.383737972539139e-17,
+        8.506196999385323e-17,
+    8.628260436784113e-17, 8.749954859216183e-17,
+        8.871305660690252e-17,
+    8.992337142215357e-17, 9.113072591597909e-17,
+        9.233534356381788e-17,
+    9.353743910649129e-17, 9.47372191631295e-17, 9.593488279457997e-17,
+    9.713062202221521e-17, 9.832462230649511e-17,
+        9.951706298915072e-17,
+    1.0070811770242949e-16, 1.0189795474846941e-16,
+        1.030867374515422e-16,
+    1.0427462448561886e-16, 1.0546177017945764e-16,
+        1.0664832480119147e-16,
+    1.0783443482419485e-16, 1.0902024317583505e-16,
+        1.1020588947055781e-16,
+    1.1139151022861975e-16, 1.1257723908165675e-16,
+        1.1376320696616847e-16,
+    1.1494954230590093e-16, 1.1613637118402183e-16,
+        1.1732381750590458e-16,
+    1.1851200315326694e-16, 1.1970104813034652e-16,
+        1.2089107070273855e-16,
+    1.2208218752947062e-16, 1.2327451378884152e-16,
+        1.2446816329851125e-16,
+    1.2566324863028985e-16, 1.2685988122003975e-16,
+        1.2805817147307494e-16,
+    1.2925822886541196e-16, 1.3046016204120288e-16,
+        1.3166407890665726e-16,
+    1.328700867207381e-16, 1.3407829218289994e-16,
+        1.3528880151811755e-16,
+    1.3650172055943978e-16, 1.377171548282881e-16,
+        1.389352096127064e-16,
+    1.4015599004375715e-16, 1.4137960117024852e-16,
+        1.4260614803196654e-16,
+    1.4383573573157902e-16, 1.4506846950536877e-16,
+        1.4630445479294757e-16,
+    1.4754379730609516e-16, 1.487866030968626e-16,
+        1.500329786250737e-16,
+    1.5128303082535394e-16, 1.5253686717381255e-16,
+        1.537945957544997e-16,
+    1.5505632532575771e-16, 1.5632216538658375e-16,
+        1.5759222624311761e-16,
+    1.5886661907536842e-16, 1.6014545600429167e-16,
+        1.6142885015932787e-16,
+    1.6271691574651305e-16, 1.640097681172718e-16,
+        1.653075238380037e-16,
+    1.666103007605742e-16, 1.6791821809382289e-16,
+        1.6923139647620223e-16,
+    1.7054995804966298e-16, 1.7187402653490317e-16,
+        1.7320372730810084e-16,
+    1.745391874792534e-16, 1.7588053597224914e-16,
+        1.7722790360680065e-16,
+    1.7858142318237326e-16, 1.7994122956424637e-16,
+        1.8130745977185016e-16,
+    1.8268025306952523e-16, 1.8405975105985878e-16,
+        1.8544609777975695e-16,
+    1.8683943979941927e-16, 1.882399263243892e-16,
+        1.8964770930086167e-16,
+    1.9106294352443765e-16, 1.9248578675252438e-16,
+        1.9391639982058994e-16,
+    1.9535494676249091e-16, 1.9680159493510374e-16,
+        1.982565151475019e-16,
+    1.997198817949342e-16, 2.0119187299787347e-16,
+        2.0267267074641983e-16,
+    2.0416246105035888e-16, 2.0566143409519179e-16,
+        2.071697844044737e-16,
+    2.0868771100881597e-16, 2.1021541762192928e-16,
+        2.117531128241076e-16,
+    2.133010102535779e-16, 2.1485932880616633e-16,
+        2.1642829284376047e-16,
+    2.180081324120784e-16, 2.1959908346828707e-16,
+        2.212013881190496e-16,
+    2.2281529486961805e-16, 2.2444105888463086e-16,
+        2.2607894226131737e-16,
+    2.277292143158621e-16, 2.2939215188373114e-16,
+        2.3106803963482133e-16,
+    2.3275717040435346e-16, 2.344598455404958e-16,
+        2.361763752697774e-16,
+    2.3790707908142767e-16, 2.3965228613186235e-16,
+        2.4141233567062933e-16,
+    2.431875774892256e-16, 2.44978372394307e-16,
+        2.4678509270692887e-16,
+    2.4860812278958517e-16, 2.504478596029557e-16,
+        2.523047132944217e-16,
+    2.541791078205812e-16, 2.560714816061771e-16,
+        2.579822882420531e-16,
+    2.599119972249747e-16, 2.618610947423924e-16,
+        2.638300845054943e-16,
+    2.658194886341845e-16, 2.678298485979525e-16,
+        2.698617262169489e-16,
+    2.7191570472798185e-16, 2.739923899205815e-16,
+        2.760924113487617e-16,
+    2.782164236246436e-16, 2.8036510780069835e-16,
+        2.825391728480253e-16,
+    2.847393572388174e-16, 2.8696643064198177e-16,
+        2.8922119574179956e-16,
+    2.915044901905293e-16, 2.9381718870700286e-16,
+        2.9616020533454657e-16,
+    2.9853449587300453e-16, 3.009410605012618e-16,
+        3.0338094660850034e-16,
+    3.058552518544861e-16, 3.08365127481531e-16,
+        3.1091178190342663e-16,
+    3.134964845996663e-16, 3.1612057034671057e-16,
+        3.187854438219713e-16,
+    3.2149258462067974e-16, 3.2424355273094516e-16,
+        3.2703999451822404e-16,
+    3.298836492772283e-16, 3.3277635641716714e-16,
+        3.357200633553244e-16,
+    3.387168342045505e-16, 3.417688593525637e-16,
+        3.448784660453424e-16,
+    3.4804813010374423e-16, 3.5128048892229794e-16,
+        3.545783559224792e-16,
+    3.5794473666042765e-16, 3.6138284682190606e-16,
+        3.6489613237645425e-16,
+    3.6848829220956213e-16, 3.7216330360802073e-16,
+        3.7592545104162565e-16,
+    3.7977935876688744e-16, 3.8373002787892137e-16,
+        3.8778287856078953e-16,
+    3.919437984311429e-16, 3.962191980786775e-16,
+        4.0061607510565417e-16,
+    4.051420882956573e-16, 4.0980564389030625e-16,
+        4.1461599642909046e-16,
+    4.195833672073399e-16, 4.247190841824385e-16,
+        4.3003574816674707e-16,
+    4.355474314693952e-16, 4.41269916903607e-16, 4.472209874259932e-16,
+    4.534207798565834e-16, 4.598922204905932e-16,
+        4.666615664711476e-16,
+    4.737590853262492e-16, 4.812199172829238e-16, 4.89085182739221e-16,
+    4.97403423619194e-16, 5.06232507214416e-16, 5.156421828878083e-16,
+    5.257175802022275e-16, 5.365640977112022e-16,
+        5.483144034258704e-16,
+    5.61138745467516e-16, 5.752606481503332e-16, 5.909817641652103e-16,
+    6.087231416180908e-16, 6.290979034877557e-16,
+        6.530492053564041e-16,
+    6.821393079028929e-16, 7.192444966089362e-16,
+        7.706095350032097e-16,
+    8.545517038584027e-16
+};
+static const double zig_exp_f[256] = {
+    1.0, 0.9381436808621747, 0.9004699299257465,
+    0.8717043323812036, 0.8477855006239896, 0.8269932966430503,
+    0.8084216515230084, 0.7915276369724956, 0.7759568520401156,
+    0.7614633888498963, 0.7478686219851951, 0.7350380924314235,
+    0.722867659593572, 0.711274760805076, 0.7001926550827882,
+    0.689566496117078, 0.6793505722647654, 0.6695063167319247,
+    0.6600008410789997, 0.6508058334145711, 0.6418967164272661,
+    0.6332519942143661, 0.624852738703666, 0.6166821809152077,
+    0.608725382079622, 0.6009689663652322, 0.5934009016917334,
+    0.586010318477268, 0.578787358602845, 0.5717230486648258,
+    0.5648091929124002, 0.5580382822625874, 0.5514034165406413,
+    0.5448982376724396, 0.5385168720028619, 0.5322538802630433,
+    0.5261042139836197, 0.5200631773682336, 0.5141263938147486,
+    0.5082897764106429, 0.5025495018413477, 0.49690198724154955,
+    0.49134386959403253, 0.4858719873418849, 0.4804833639304542,
+    0.4751751930373774, 0.46994482528396, 0.4647897562504262,
+    0.4597076156421377, 0.4546961574746155, 0.449753251162755,
+    0.4448768734145485, 0.4400651008423539, 0.4353161032156366,
+    0.43062813728845883, 0.42599954114303434, 0.4214287289976166,
+    0.4169141864330029, 0.4124544659971612, 0.4080481831520324,
+    0.4036940125305303, 0.3993906844752311, 0.39513698183329016,
+    0.3909317369847971, 0.38677382908413765, 0.38266218149600983,
+    0.3785957594095808, 0.37457356761590216, 0.370594648435146,
+    0.36665807978151416, 0.3627629733548178, 0.3589084729487498,
+    0.35509375286678746, 0.35131801643748334, 0.347580494621637,
+    0.3438804447045024, 0.34021714906678, 0.3365899140286776,
+    0.332998068761809, 0.3294409642641363, 0.3259179723935562,
+    0.32242848495608917, 0.31897191284495724, 0.31554768522712895,
+    0.31215524877417955, 0.3087940669345602, 0.30546361924459026,
+    0.3021634006756935, 0.2988929210155818, 0.2956517042812612,
+    0.2924392881618926, 0.28925522348967775, 0.2860990737370768,
+    0.28297041453878075, 0.2798688332369729, 0.27679392844851736,
+    0.27374530965280297, 0.27072259679906, 0.2677254199320448,
+    0.2647534188350622, 0.261806242689363, 0.25888354974901623,
+    0.2559850070304154, 0.25311029001562946, 0.2502590823688623,
+    0.24743107566532763, 0.2446259691318921, 0.24184346939887721,
+    0.23908329026244918, 0.23634515245705964, 0.23362878343743335,
+    0.2309339171696274, 0.2282602939307167, 0.22560766011668407,
+    0.2229757680581202, 0.2203643758433595, 0.21777324714870053,
+    0.21520215107537868, 0.21265086199297828, 0.21011915938898826,
+    0.20760682772422204, 0.2051136562938377, 0.20263943909370902,
+    0.20018397469191127, 0.19774706610509887, 0.19532852067956322,
+    0.19292814997677135, 0.1905457696631954, 0.18818119940425432,
+    0.1858342627621971, 0.18350478709776746, 0.1811926034754963,
+    0.1788975465724783, 0.17661945459049488, 0.1743581691713535,
+    0.17211353531532006, 0.16988540130252766, 0.1676736186172502,
+    0.165478041874936, 0.16329852875190182, 0.16113493991759203,
+    0.1589871389693142, 0.15685499236936523, 0.15473836938446808,
+    0.15263714202744286, 0.1505511850010399, 0.1484803756438668,
+    0.14642459387834494, 0.14438372216063478, 0.1423576454324722,
+    0.14034625107486245, 0.1383494288635802, 0.13636707092642886,
+    0.13439907170221363, 0.13244532790138752, 0.13050573846833077,
+    0.12858020454522817, 0.12666862943751067, 0.12477091858083096,
+    0.12288697950954514, 0.12101672182667483, 0.11916005717532768,
+    0.11731689921155557, 0.11548716357863353, 0.11367076788274431,
+    0.1118676316700563, 0.11007767640518538, 0.1083008254510338,
+    0.10653700405000166, 0.10478613930657017, 0.10304816017125772,
+    0.10132299742595363, 0.09961058367063713, 0.0979108533114922,
+    0.0962237425504328, 0.09454918937605586, 0.09288713355604354,
+    0.09123751663104016, 0.08960028191003286, 0.08797537446727022,
+    0.08636274114075691, 0.08476233053236812, 0.08317409300963238,
+    0.08159798070923742, 0.0800339475423199, 0.07848194920160642,
+    0.0769419431704805, 0.07541388873405841, 0.07389774699236475,
+    0.07239348087570874, 0.07090105516237183, 0.06942043649872875,
+    0.0679515934219366, 0.06649449638533977, 0.06504911778675375,
+    0.06361543199980733, 0.062193415408540995, 0.06078304644547963,
+    0.059384305633420266, 0.05799717563120066, 0.05662164128374288,
+    0.05525768967669704, 0.05390531019604609, 0.05256449459307169,
+    0.05123523705512628, 0.04991753428270637, 0.0486113855733795,
+    0.04731679291318155, 0.04603376107617517, 0.04476229773294328,
+    0.04350241356888818, 0.042254122413316234, 0.04101744138041482,
+    0.039792391023374125, 0.03857899550307486, 0.03737728277295936,
+    0.03618728478193142, 0.03500903769739741, 0.03384258215087433,
+    0.032687963508959535, 0.03154523217289361, 0.030414443910466604,
+    0.029295660224637393, 0.028188948763978636, 0.0270943837809558,
+    0.026012046645134217, 0.024942026419731783, 0.02388442051155817,
+    0.02283933540638524, 0.02180688750428358, 0.020787204072578117,
+    0.019780424338009743, 0.01878670074469603, 0.01780620041091136,
+    0.016839106826039948, 0.015885621839973163, 0.014945968011691148,
+    0.014020391403181938, 0.013109164931254991, 0.012212592426255381,
+    0.011331013597834597, 0.010464810181029979, 0.00961441364250221,
+    0.008780314985808975, 0.00796307743801704, 0.007163353183634984,
+    0.006381905937319179, 0.005619642207205483, 0.004877655983542392,
+    0.004157295120833795, 0.003460264777836904, 0.002788798793574076,
+    0.0021459677437189063, 0.0015362997803015724,
+        0.0009672692823271745,
+    0.00045413435384149677
+};
+
+/* ---- standard distributions (numpy/random/src/distributions) -------
+   Every function takes `legacy`: the RandomState algorithms (polar
+   normal, inversion exponential) or the Generator ones (ziggurat). */
+#define ZIG_NOR_R 3.6541528853610087963519472518
+#define ZIG_NOR_INV_R 0.27366123732975827203338247596
+#define ZIG_EXP_R 7.69711747013104972
+static u64 zig_k(const unsigned long *t, int i) {
+    return u64_c(t[2 * i], t[2 * i + 1]);
+}
+
+static double legacy_gauss(RG *g)
+{
+    double f, x1, x2, r2, t;
+    if (g->has_gauss) {
+        t = g->gauss;
+        g->has_gauss = 0;
+        g->gauss = 0.0;
+        return t;
+    }
+    do {
+        x1 = 2.0 * rg_double(g) - 1.0;
+        x2 = 2.0 * rg_double(g) - 1.0;
+        r2 = x1 * x1 + x2 * x2;
+    } while (r2 >= 1.0 || r2 == 0.0);
+    f = sqrt(-2.0 * log(r2) / r2);
+    g->gauss = f * x1;
+    g->has_gauss = 1;
+    return f * x2;
+}
+static double zig_normal(RG *g)
+{
+    for (;;) {
+        u64 r = rg_next64(g), rabs;
+        int idx = (int)(u64_lo(r) & 0xffUL), sign;
+        double x, xx, yy;
+        r = u64_shr(r, 8);
+        sign = (int)(u64_lo(r) & 1UL);
+        rabs = u64_and(u64_shr(r, 1), u64_c(0x000fffffUL, U32M));
+        x = u64_dbl(rabs) * zig_nor_w[idx];
+        if (sign) x = -x;
+        if (u64_lt(rabs, zig_k(zig_nor_k, idx))) return x;
+        if (idx == 0) {
+            for (;;) {
+                xx = -ZIG_NOR_INV_R * n_log1p(-rg_double(g));
+                yy = -n_log1p(-rg_double(g));
+                if (yy + yy > xx * xx)
+                    return (u64_lo(u64_shr(rabs, 8)) & 1UL)
+                        ? -(ZIG_NOR_R + xx) : ZIG_NOR_R + xx;
+            }
+        } else {
+            if ((zig_nor_f[idx - 1] - zig_nor_f[idx]) * rg_double(g)
+                + zig_nor_f[idx] <
+                exp(-0.5 * x * x)) return x;
+        }
+    }
+}
+static double zig_exp(RG *g)
+{
+    for (;;) {
+        u64 ri = u64_shr(rg_next64(g), 3);
+        int idx = (int)(u64_lo(ri) & 0xffUL);
+        double x;
+        ri = u64_shr(ri, 8);
+        x = u64_dbl(ri) * zig_exp_w[idx];
+        if (u64_lt(ri, zig_k(zig_exp_k, idx))) return x;
+        if (idx == 0) return ZIG_EXP_R - n_log1p(-rg_double(g));
+        if ((zig_exp_f[idx - 1] - zig_exp_f[idx]) * rg_double(g)
+            + zig_exp_f[idx] < exp(-x))
+            return x;
+    }
+}
+static double std_normal(RG *g, int legacy) {
+    return legacy ? legacy_gauss(g) : zig_normal(g);
+}
+static double std_exp(RG *g, int legacy)
+{
+    return legacy ? -log(1.0 - rg_double(g)) : zig_exp(g);
+}
+static double std_gamma(RG *g, int legacy, double shape)
+{
+    double b, c, U, V, X, Y;
+    if (shape == 1.0) return std_exp(g, legacy);
+    if (shape == 0.0) return 0.0;
+    if (shape < 1.0) {
+        for (;;) {
+            U = rg_double(g);
+            V = std_exp(g, legacy);
+            if (U <= 1.0 - shape) {
+                X = pow(U, 1.0 / shape);
+                if (X <= V) return X;
+            } else {
+                Y = -log((1.0 - U) / shape);
+                X = pow(1.0 - shape + shape * Y, 1.0 / shape);
+                if (X <= (V + Y)) return X;
+            }
+        }
+    }
+    b = shape - 1.0 / 3.0;
+    c = 1.0 / sqrt(9.0 * b);
+    for (;;) {
+        do {
+            X = std_normal(g, legacy);
+            V = 1.0 + c * X;
+        } while (V <= 0.0);
+        V = V * V * V;
+        U = rg_double(g);
+        if (U < 1.0 - 0.0331 * (X * X) * (X * X)) return b * V;
+        if (log(U) < 0.5 * X * X + b * (1.0 - V + log(V)))
+            return b * V;
+    }
+}
+static double d_loggam(double x)
+{
+    static const double a[10] = {
+        8.333333333333333e-02, -2.777777777777778e-03,
+        7.936507936507937e-04, -5.952380952380952e-04,
+            8.417508417508418e-04,
+        -1.917526917526918e-03, 6.410256410256410e-03,
+            -2.955065359477124e-02,
+        1.796443723688307e-01, -1.39243221690590e+00 };
+    double x0, x2, lg2pi = 1.8378770664093453e+00, gl, gl0;
+    long k, n;
+    if (x == 1.0 || x == 2.0) return 0.0;
+    n = x < 7.0 ? (long)(7.0 - x) : 0;
+    x0 = x + (double)n;
+    x2 = (1.0 / x0) * (1.0 / x0);
+    gl0 = a[9];
+    for (k = 8; k >= 0; k--) { gl0 *= x2; gl0 += a[k]; }
+    gl = gl0 / x0 + 0.5 * lg2pi + (x0 - 0.5) * log(x0) - x0;
+    if (x < 7.0) {
+        for (k = 1; k <= n; k++) { gl -= log(x0 - 1.0); x0 -= 1.0; }
+    }
+    return gl;
+}
+static long poisson_mult(RG *g, double lam)
+{
+    long X = 0;
+    double prod = 1.0, enlam = exp(-lam);
+    for (;;) {
+        prod *= rg_double(g);
+        if (prod > enlam) X++; else return X;
+    }
+}
+static long poisson_ptrs(RG *g, double lam)
+{
+    double slam = sqrt(lam), loglam = log(lam),
+        b = 0.931 + 2.53 * slam, a, invalpha, vr, U, V, us;
+    long k;
+    a = -0.059 + 0.02483 * b;
+    invalpha = 1.1239 + 1.1328 / (b - 3.4);
+    vr = 0.9277 - 3.6224 / (b - 2.0);
+    for (;;) {
+        U = rg_double(g) - 0.5;
+        V = rg_double(g);
+        us = 0.5 - fabs(U);
+        k = (long)floor((2.0 * a / us + b) * U + lam + 0.43);
+        if (us >= 0.07 && V <= vr) return k;
+        if (k < 0 || (us < 0.013 && V > us)) continue;
+        if (log(V) + log(invalpha) - log(a / (us * us) + b) <=
+            -lam + (double)k * loglam
+                - d_loggam((double)k + 1.0)) return k;
+    }
+}
+static long std_poisson(RG *g, double lam)
+{
+    if (lam >= 10.0) return poisson_ptrs(g, lam);
+    if (lam == 0.0) return 0;
+    return poisson_mult(g, lam);
+}
+static long binom_inversion(RG *g, long n, double p)
+{
+    double q = 1.0 - p, qn = exp((double)n * log(q)),
+        np = (double)n * p, px, U;
+    double lim = np + 10.0 * sqrt(np * q + 1.0);
+    long X, bound = (long)(lim < (double)n ? lim : (double)n);
+    X = 0;
+    px = qn;
+    U = rg_double(g);
+    while (U > px) {
+        X++;
+        if (X > bound) {
+            X = 0;
+            px = qn;
+            U = rg_double(g);
+        } else {
+            U -= px;
+            px = (((double)n - (double)X + 1.0) * p * px)
+                / ((double)X * q);
+        }
+    }
+    return X;
+}
+static long binom_btpe(RG *g, long n, double p)
+{
+    double r, q, fm, p1, xm, xl, xr, c, laml, lamr, p2, p3, p4, a, u,
+        v, s, F, rho, t, A, nrq;
+    double x1, x2, f1, f2, z, z2, w, w2, x;
+    long m, y, k, i;
+    r = p < 1.0 - p ? p : 1.0 - p;
+    q = 1.0 - r;
+    fm = (double)n * r + r;
+    m = (long)floor(fm);
+    p1 = floor(2.195 * sqrt((double)n * r * q) - 4.6 * q) + 0.5;
+    xm = (double)m + 0.5;
+    xl = xm - p1;
+    xr = xm + p1;
+    c = 0.134 + 20.5 / (15.3 + (double)m);
+    a = (fm - xl) / (fm - xl * r);
+    laml = a * (1.0 + a / 2.0);
+    a = (xr - fm) / (xr * q);
+    lamr = a * (1.0 + a / 2.0);
+    p2 = p1 * (1.0 + 2.0 * c);
+    p3 = p2 + c / laml;
+    p4 = p3 + c / lamr;
+    nrq = (double)n * r * q;
+    for (;;) {
+        u = rg_double(g) * p4;
+        v = rg_double(g);
+        if (u <= p1) {
+            y = (long)floor(xm - p1 * v + u);
+            break;
+        }
+        if (u <= p2) {
+            x = xl + (u - p1) / c;
+            v = v * c + 1.0 - fabs((double)m - x + 0.5) / p1;
+            if (v > 1.0) continue;
+            y = (long)floor(x);
+        } else if (u <= p3) {
+            y = (long)floor(xl + log(v) / laml);
+            if (y < 0 || v == 0.0) continue;
+            v = v * (u - p2) * laml;
+        } else {
+            y = (long)floor(xr - log(v) / lamr);
+            if (y > n || v == 0.0) continue;
+            v = v * (u - p3) * lamr;
+        }
+        k = y > m ? y - m : m - y;
+        if (!(k > 20 && (double)k < nrq / 2.0 - 1.0)) {
+            s = r / q;
+            a = s * ((double)n + 1.0);
+            F = 1.0;
+            if (m < y) {
+                for (i = m + 1; i <= y; i++) F *= (a / (double)i - s);
+            } else if (m > y) {
+                for (i = y + 1; i <= m; i++) F /= (a / (double)i - s);
+            }
+            if (v > F) continue;
+            break;
+        }
+        rho = ((double)k / nrq)
+            *
+            (
+            ((double)k * ((double)k / 3.0 + 0.625)
+            + 0.16666666666666666) /
+            nrq + 0.5);
+        t = -(double)k * (double)k / (2.0 * nrq);
+        A = log(v);
+        if (A < t - rho) break;
+        if (A > t + rho) continue;
+        x1 = (double)y + 1.0;
+        f1 = (double)m + 1.0;
+        z = (double)n + 1.0 - (double)m;
+        w = (double)n - (double)y + 1.0;
+        x2 = x1 * x1; f2 = f1 * f1; z2 = z * z; w2 = w * w;
+        if (A > xm * log(f1 / x1) + ((double)n - (double)m + 0.5)
+            * log(z / w) +
+            (double)(y - m) * log(w * r / (x1 * q)) +
+            (13680. - (462. - (132. - (99. - 140. / f2) / f2) / f2)
+                / f2) / f1 / 166320. +
+            (13680. - (462. - (132. - (99. - 140. / z2) / z2) / z2)
+                / z2) / z / 166320. +
+            (13680. - (462. - (132. - (99. - 140. / x2) / x2) / x2)
+                / x2) / x1 / 166320. +
+            (13680. - (462. - (132. - (99. - 140. / w2) / w2) / w2)
+                / w2) / w / 166320.)
+            continue;
+        break;
+    }
+    if (p > 0.5) y = n - y;
+    return y;
+}
+static long std_binomial(RG *g, double p, long n, int legacy)
+{
+    if (!legacy && (n == 0 || p == 0.0)) return 0;
+    if (p <= 0.5) {
+        if (p * (double)n <= 30.0) return binom_inversion(g, n, p);
+        return binom_btpe(g, n, p);
+    }
+    if ((1.0 - p) * (double)n <= 30.0)
+        return n - binom_inversion(g, n, 1.0 - p);
+    return binom_btpe(g, n, p);
+}
+
+/* ---- seeding ---------------------------------------------------- */
+static Class *cls_rng[5];
+/* Generator, RandomState, PCG64, MT19937, SeedSequence */
+static RG g_rs;
+/* np.random.* module-level state (legacy RandomState) */
+
+/* the 32-bit words of a non-negative integer (little endian); returns
+   the count */
+static long ss_int_words(Value v, unsigned long *out, long cap)
+{
+    unsigned long *d;
+    int n, i;
+    long cnt = 0;
+    if (int_sign(v) < 0)
+        throw_new(cls_ValueError, "expected non-negative integer");
+    n = int_to_bin(v, &d);
+    if (n == 0) { out[0] = 0UL; return 1; }
+    for (i = 0; i < n; i += 2) {
+        unsigned long lo = d[i] & 0xFFFFUL,
+            hi = i + 1 < n ? d[i + 1] & 0xFFFFUL : 0UL;
+        if (cnt >= cap) break;
+        out[cnt++] = (hi << 16) | lo;
+    }
+    free(d);
+    return cnt;
+}
+/* entropy words of an int / sequence of ints; the array is xmalloc'ed
+   */
+static long ss_entropy(Value v, unsigned long **out)
+{
+    unsigned long *w;
+    long cnt = 0, cap, i;
+    if (v.t == T_INT || v.t == T_BIG || v.t == T_BOOL) {
+        cap = 1 + (int_bitlen(v) + 31) / 32;
+        w
+            = (unsigned long *)xmalloc(sizeof(unsigned long)
+            * (size_t)cap);
+        cnt = ss_int_words(v.t == T_BOOL ? mkint(v.u.i) : v, w, cap);
+    } else if (v.t == T_LIST || v.t == T_TUPLE || v.t == T_ND) {
+        Nd *a = v.t == T_ND ? AS_ND(v) : nd_from_value(v, ND_INT);
+        if (a->dt != ND_INT && a->dt != ND_BOOL)
+            throw_new(cls_TypeError,
+                "SeedSequence expects int or sequence of ints for "
+                "entropy not "
+                "%.40s", type_name(v));
+        cap = a->size * 3 + 1;
+        w
+            = (unsigned long *)xmalloc(sizeof(unsigned long)
+            * (size_t)cap);
+        for (i = 0; i < a->size; i++) {
+            if (a->iv[i] < 0) { free(w);
+                throw_new(cls_ValueError,
+                    "expected non-negative integer");
+            }
+            cnt += ss_int_words(mkint(a->iv[i]), w + cnt, cap - cnt);
+        }
+    } else {
+        throw_new(cls_TypeError,
+            "SeedSequence expects int or sequence of ints for "
+            "entropy not "
+            "%.40s", type_name(v));
+        return 0;
+    }
+    *out = w;
+    return cnt;
+}
+static void entropy_words(unsigned long *w, long n)
+{
+    unsigned char b[64];
+    long i;
+    host_urandom(b, 4 * n < 64 ? 4 * n : 64);
+    for (i = 0; i < n; i++) {
+        long k = (4 * i) % 60;
+        w[i] = ((unsigned long)b[k] << 24)
+            | ((unsigned long)b[k + 1] << 16) |
+            ((unsigned long)b[k + 2] << 8) | (unsigned long)b[k + 3];
+        w[i] ^= (unsigned long)i * 0x9e3779b9UL;
+        w[i] &= U32M;
+    }
+}
+static void rg_seed_pcg(RG *g, Value seed)
+{
+    unsigned long pool[4], st[8], *ent = NULL, tmp[4];
+    long n;
+    if (seed.t == T_UNSET || seed.t == T_NONE) {
+        entropy_words(tmp, 4);
+        ent = NULL;
+        ss_pool(pool, tmp, 4);
+    } else {
+        n = ss_entropy(seed, &ent);
+        ss_pool(pool, ent, n);
+        free(ent);
+    }
+    ss_state(pool, st, 8);
+    memset(g, 0, sizeof(RG));
+    g->kind = 1;
+    pcg_seed(g, u64_c(st[1], st[0]), u64_c(st[3], st[2]),
+        u64_c(st[5], st[4]), u64_c(st[7], st[6]));
+}
+static void rg_seed_mt(RG *g, Value seed)
+{
+    memset(g, 0, sizeof(RG));
+    g->kind = 0;
+    if (seed.t == T_UNSET || seed.t == T_NONE) {
+        unsigned long tmp[4], pool[4], key[MT_N];
+        entropy_words(tmp, 4);
+        ss_pool(pool, tmp, 4);
+        ss_state(pool, key, MT_N);
+        memcpy(g->mt, key, sizeof(g->mt));
+        g->mpos = MT_N;
+        return;
+    }
+    if (seed.t == T_INT || seed.t == T_BOOL || seed.t == T_BIG) {
+        if (int_sign(seed) < 0 || int_cmp(seed, int_pow2(32)) >= 0)
+            throw_new(cls_ValueError,
+                "Seed must be between 0 and 2**32 - 1");
+        {
+            unsigned long w[3];
+            ss_int_words(seed.t == T_BOOL ? mkint(seed.u.i) : seed, w,
+                3);
+            mt_init32(g->mt, w[0]);
+        }
+        g->mpos = MT_N;
+        return;
+    }
+    if (seed.t == T_FLOAT)
+        throw_new(cls_TypeError,
+            "Cannot cast array data from dtype('float64') to "
+            "dtype('int64') "
+            "according to the rule 'safe'");
+    {
+        Nd *a;
+        unsigned long *key;
+        long i;
+        if (seed.t != T_ND && seed.t != T_LIST && seed.t != T_TUPLE)
+            throw_new(cls_TypeError,
+                "Seed must be an integer or an array of integers");
+        a = seed.t == T_ND ? AS_ND(seed) : nd_from_value(seed, -1);
+        if (a->dt == ND_FLOAT || a->dt == ND_COMPLEX)
+            throw_new(cls_TypeError,
+                "Cannot cast array data from dtype('float64') "
+                    "to dtype('int64')"
+                " according to the rule 'safe'");
+        if (a->size == 0)
+            throw_new(cls_ValueError, "Seed must be non-empty");
+        if (a->nd != 1)
+            throw_new(cls_ValueError, "Seed array must be 1-d");
+        key
+            = (unsigned long *)xmalloc(sizeof(unsigned long)
+            * (size_t)a->size);
+        for (i = 0; i < a->size; i++) {
+            if (a->iv[i] < 0
+                || (((unsigned long)a->iv[i] >> 16) >> 16) != 0) {
+                free(key);
+                throw_new(cls_ValueError,
+                    "Seed must be between 0 and 2**32 - 1");
+            }
+            key[i] = (unsigned long)a->iv[i];
+        }
+        mt_init_array(g->mt, key, a->size);
+        g->mpos = MT_N;
+        free(key);
+    }
+}
+/* the state holder: an int array big enough for a RG */
+static Value rg_holder(void)
+{
+    Nd *st = nd_new1(ND_INT, RG_LONGS);
+    memset(st->iv, 0, sizeof(long) * (size_t)RG_LONGS);
+    return ndv(st);
+}
+static RG *rg_get(Value iv)
+{
+    Value *sv;
+    if (iv.t != T_INST)
+        throw_new(cls_TypeError,
+        "descriptor requires a random state object");
+    sv = amap_get(&AS_INST(iv)->a, intern_c("_s"));
+    if (!sv || sv->t != T_ND)
+        throw_new(cls_TypeError, "uninitialised random state object");
+    return (RG *)AS_ND(*sv)->iv;
 }
 
 /* ---- argument helpers: off = 0 for module functions, 1 for methods
@@ -24877,50 +27511,566 @@ static Value rarg(Args *x, int off, int pos, const char *nm)
     if (pos < RN) return RA(pos);
     return kwget(x, nm);
 }
-static double rdbl(Args *x, int off, int pos, const char *nm,
-    double dflt)
-{
-    Value v = rarg(x, off, pos, nm);
-    if (!np_has(v)) return dflt;
-    return to_dbl(v);
-}
 /* size argument -> shape; returns -1 for a scalar result */
 static int rsize(Value sz, long *shape)
 {
     if (!np_has(sz)) return -1;
     return shape_arg(sz, shape);
 }
-typedef double (*RGen)(u64 *s, double p1, double p2);
-static double g_unif(u64 *s, double a, double b) {
-    return a + (b - a) * nrng_dbl(s);
-}
-static double g_norm(u64 *s, double a, double b) {
-    return a + b * nrng_norm(s);
-}
-static double g_exp(u64 *s, double a, double b)
+static int is_scalar_num(Value v)
 {
-    double u;
-    (void)b;
-    do u = nrng_dbl(s); while (u <= 0.0);
-    return -log(u) * a;
+    return v.t == T_INT || v.t == T_FLOAT || v.t == T_BOOL
+        || v.t == T_BIG;
 }
-static Value rfill(u64 *s, Value sz, RGen g, double p1, double p2)
+
+/* ---- distribution table ----------------------------------------- */
+#define DREQ (-1.0e300)
+typedef double (*DFn)(RG *g, int legacy, double a, double b, double c);
+typedef const char *(*DChk)(double a, double b, double c);
+typedef struct Dist {
+    const char *name;
+    int np;
+    const char *pn[3];
+    double dflt[3];
+    DFn fn;
+    int isint;
+    DChk chk;
+} Dist;
+
+static Value dist_call(Args *x, int off, RG *g, int legacy,
+    const Dist *d)
 {
-    long shape[ND_MAXD], i;
-    int nd = rsize(sz, shape);
+    Nd *pa[3];
+    double pd[3];
+    long shape[ND_MAXD], n = 1, i;
+    int nd, k, anyarr = 0, ashape = -1;
+    Value szv;
     Nd *r;
-    if (nd < 0) return mkfloat(g(s, p1, p2));
-    r = nd_new(ND_FLOAT, nd, shape);
-    for (i = 0; i < r->size; i++) r->dv[i] = g(s, p1, p2);
-    return nd_ret(r);
+    for (k = 0; k < 3; k++) { pa[k] = NULL; pd[k] = 0.0; }
+    for (k = 0; k < d->np; k++) {
+        Value v = rarg(x, off, k, d->pn[k]);
+        if (!np_has(v)) {
+            if (d->dflt[k] == DREQ)
+                throw_new(cls_TypeError,
+                    "%s() missing required argument '%s' (pos %d)",
+                    d->name,
+                    d->pn[k], k + 1);
+            pd[k] = d->dflt[k];
+        } else if (is_scalar_num(v)) pd[k] = to_dbl(v);
+        else {
+            pa[k] = np_f(v);
+            if (pa[k]->size == 1 && pa[k]->nd <= 1)
+                { pd[k] = pa[k]->dv[0];
+                pa[k] = NULL;
+            }
+            else { anyarr = 1; if (ashape < 0) ashape = k; }
+        }
+    }
+    szv = rarg(x, off, d->np, "size");
+    nd = rsize(szv, shape);
+    if (nd < 0 && anyarr) {
+        Nd *src = pa[ashape];
+        nd = src->nd;
+        for (k = 0; k < nd; k++) shape[k] = src->shape[k];
+    }
+    if (nd >= 0) for (k = 0; k < nd; k++) n *= shape[k];
+    for (k = 0; k < d->np; k++)
+        if (pa[k] && pa[k]->size != n)
+            throw_new(cls_ValueError,
+                "shape mismatch: objects cannot be broadcast to a "
+                "single "
+                "shape");
+    if (d->chk) {
+        const char *msg = NULL;
+        long cnt = nd < 0 ? 1 : n;
+        for (i = 0; i < cnt && !msg; i++) {
+            double a = pa[0] ? pa[0]->dv[i] : pd[0],
+                b = pa[1] ? pa[1]->dv[i] : pd[1],
+                c = pa[2] ? pa[2]->dv[i] : pd[2];
+            msg = d->chk(a, b, c);
+        }
+        if (msg) throw_new(cls_ValueError, "%s", msg);
+    }
+    if (nd < 0) {
+        double v = d->fn(g, legacy, pd[0], pd[1], pd[2]);
+        return d->isint ? mkint((long)v) : mkfloat(v);
+    }
+    r = nd_new(d->isint ? ND_INT : ND_FLOAT, nd, shape);
+    for (i = 0; i < n; i++) {
+        double v = d->fn(g, legacy, pa[0] ? pa[0]->dv[i] : pd[0],
+            pa[1] ? pa[1]->dv[i] : pd[1],
+            pa[2] ? pa[2]->dv[i] : pd[2]);
+        if (d->isint) r->iv[i] = (long)v; else r->dv[i] = v;
+    }
+    return ndv(r);
 }
+
+/* ---- the distributions ---- */
+static double f_unif01(RG *g, int l, double a, double b, double c) {
+    (void)l;
+    (void)a;
+    (void)b;
+    (void)c; return rg_double(g); }
+static double f_stdnorm(RG *g, int l, double a, double b, double c) {
+    (void)a;
+    (void)b;
+    (void)c;
+    return std_normal(g, l); }
+static double f_normal(RG *g, int l, double a, double b, double c) {
+    (void)c;
+    return a + b * std_normal(g, l); }
+static double f_uniform(RG *g, int l, double a, double b, double c) {
+    (void)l;
+    (void)c;
+    return a + (b - a) * rg_double(g); }
+static double f_stdexp(RG *g, int l, double a, double b, double c) {
+    (void)a;
+    (void)b;
+    (void)c;
+    return std_exp(g, l); }
+static double f_exp(RG *g, int l, double a, double b, double c) {
+    (void)b;
+    (void)c;
+    return a * std_exp(g, l); }
+static double f_stdgamma(RG *g, int l, double a, double b, double c) {
+    (void)b;
+    (void)c;
+    return std_gamma(g, l, a); }
+static double f_gamma(RG *g, int l, double a, double b, double c) {
+    (void)c;
+    return b * std_gamma(g, l, a); }
+static double f_beta(RG *g, int l, double a, double b, double c)
+{
+    double Ga, Gb;
+    (void)c;
+    if (a <= 1.0 && b <= 1.0) {
+        for (;;) {
+            double U = rg_double(g), V = rg_double(g),
+                X = pow(U, 1.0 / a), Y = pow(V, 1.0 / b),
+                XpY = X + Y;
+            if (XpY <= 1.0 && U + V > 0.0) {
+                if (XpY > 0.0) return X / XpY;
+                {
+                    double logX = log(U) / a, logY = log(V) / b,
+                        logM = logX > logY ? logX : logY;
+                    logX -= logM;
+                    logY -= logM;
+                    return exp(logX - log(exp(logX) + exp(logY)));
+                }
+            }
+        }
+    }
+    Ga = std_gamma(g, l, a);
+    Gb = std_gamma(g, l, b);
+    return Ga / (Ga + Gb);
+}
+static double f_chisq(RG *g, int l, double a, double b, double c) {
+    (void)b;
+    (void)c;
+    return 2.0 * std_gamma(g, l, a / 2.0); }
+static double f_ncchisq(RG *g, int l, double df, double nonc, double c)
+{
+    (void)c;
+    if (nonc != nonc) return nonc;
+    if (nonc == 0.0) return 2.0 * std_gamma(g, l, df / 2.0);
+    if (1.0 < df) {
+        double Chi2 = 2.0 * std_gamma(g, l, (df - 1.0) / 2.0);
+        double n = std_normal(g, l) + sqrt(nonc);
+        return Chi2 + n * n;
+    } else {
+        long i = std_poisson(g, nonc / 2.0);
+        return 2.0 * std_gamma(g, l, (df + 2.0 * (double)i) / 2.0);
+    }
+}
+static double f_f(RG *g, int l, double dfnum, double dfden, double c)
+{
+    double num, den;
+    (void)c;
+    num = 2.0 * std_gamma(g, l, dfnum / 2.0) * dfden;
+    den = 2.0 * std_gamma(g, l, dfden / 2.0) * dfnum;
+    return num / den;
+}
+static double f_ncf(RG *g, int l, double dfnum, double dfden,
+    double nonc)
+{
+    double t = f_ncchisq(g, l, dfnum, nonc, 0.0) * dfden;
+    return t / (2.0 * std_gamma(g, l, dfden / 2.0) * dfnum);
+}
+static double f_cauchy(RG *g, int l, double a, double b, double c)
+{
+    double n, d;
+    (void)a; (void)b; (void)c;
+    n = std_normal(g, l);
+    d = std_normal(g, l);
+    return n / d;
+}
+static double f_t(RG *g, int l, double df, double b, double c)
+{
+    double num, denom;
+    (void)b; (void)c;
+    num = std_normal(g, l);
+    denom = std_gamma(g, l, df / 2.0);
+    return sqrt(df / 2.0) * num / sqrt(denom);
+}
+static double f_pareto(RG *g, int l, double a, double b, double c) {
+    (void)b;
+    (void)c;
+    return l ? exp(std_exp(g, l) / a) - 1.0
+        : n_expm1(std_exp(g, l) / a);
+    }
+static double f_weibull(RG *g, int l, double a, double b, double c) {
+    (void)b;
+    (void)c;
+    if (a == 0.0) return 0.0;
+    return pow(std_exp(g, l), 1.0 / a); }
+static double f_power(RG *g, int l, double a, double b, double c) {
+    (void)b;
+    (void)c;
+    return pow(l ? 1.0 - exp(-std_exp(g, l))
+        : -n_expm1(-std_exp(g, l)), 1.0 / a);
+    }
+static double f_laplace(RG *g, int l, double loc, double scale,
+    double c)
+{
+    double U;
+    (void)l; (void)c;
+    do U = rg_double(g); while (U <= 0.0);
+    if (U >= 0.5) return loc - scale * log(2.0 - U - U);
+    return loc + scale * log(U + U);
+}
+static double f_gumbel(RG *g, int l, double loc, double scale,
+    double c)
+{
+    double U;
+    (void)l; (void)c;
+    U = 1.0 - rg_double(g);
+    if (U < 1.0) return loc - scale * log(-log(U));
+    return f_gumbel(g, l, loc, scale, 0.0);
+}
+static double f_logistic(RG *g, int l, double loc, double scale,
+    double c)
+{
+    double U;
+    (void)l; (void)c;
+    do U = rg_double(g); while (U <= 0.0);
+    return loc + scale * log(U / (1.0 - U));
+}
+static double f_lognormal(RG *g, int l, double mean, double sigma,
+    double c) { (void)c;
+    return exp(mean + sigma * std_normal(g, l)); }
+static double f_rayleigh(RG *g, int l, double mode, double b,
+    double c) { (void)b;
+    (void)c;
+    if (l) return mode * sqrt(-2.0 * n_log1p(-rg_double(g)));
+    return mode * sqrt(2.0 * std_exp(g, l)); }
+static double f_wald(RG *g, int l, double mean, double scale, double c)
+{
+    double mu_2l = mean / (2.0 * scale), Y = std_normal(g, l), X, U;
+    (void)c;
+    Y = mean * Y * Y;
+    X = mean + mu_2l * (Y - sqrt(4.0 * scale * Y + Y * Y));
+    U = rg_double(g);
+    if (U <= mean / (mean + X)) return X;
+    return mean * mean / X;
+}
+static double f_vonmises(RG *g, int l, double mu, double kappa,
+    double c)
+{
+    double s, U, V, W, Y, Z, result, mod;
+    int neg;
+    (void)c;
+    if (kappa != kappa) return kappa;
+    if (kappa < 1e-8)
+        return 3.141592653589793 * (2.0 * rg_double(g) - 1.0);
+    if (kappa < 1e-5) s = 1.0 / kappa + kappa;
+    else if (kappa <= 1e6) {
+        double r = 1.0 + sqrt(1.0 + 4.0 * kappa * kappa),
+            rho = (r - sqrt(2.0 * r)) / (2.0 * kappa);
+        s = (1.0 + rho * rho) / (2.0 * rho);
+    } else {
+        result = mu + sqrt(1.0 / kappa) * std_normal(g, l);
+        if (result < -3.141592653589793)
+            result += 2.0 * 3.141592653589793;
+        if (result > 3.141592653589793)
+            result -= 2.0 * 3.141592653589793;
+        return result;
+    }
+    for (;;) {
+        U = rg_double(g);
+        Z = cos(3.141592653589793 * U);
+        W = (1.0 + s * Z) / (s + Z);
+        Y = kappa * (s - W);
+        V = rg_double(g);
+        if (Y * (2.0 - Y) - V >= 0.0 || log(Y / V) + 1.0 - Y >= 0.0)
+            break;
+    }
+    U = rg_double(g);
+    result = acos(W);
+    if (U < 0.5) result = -result;
+    result += mu;
+    neg = result < 0.0;
+    mod = fabs(result);
+    mod = fmod(mod + 3.141592653589793, 2.0 * 3.141592653589793)
+        - 3.141592653589793;
+    if (neg) mod *= -1.0;
+    return mod;
+}
+static double f_triangular(RG *g, int l, double left, double mode,
+    double right)
+{
+    double base = right - left, leftbase = mode - left,
+        ratio = leftbase / base,
+        leftprod = leftbase * base, rightprod = (right - mode) * base,
+            U;
+    (void)l;
+    U = rg_double(g);
+    if (U <= ratio) return left + sqrt(U * leftprod);
+    return right - sqrt((1.0 - U) * rightprod);
+}
+static double f_poisson(RG *g, int l, double lam, double b, double c) {
+    (void)l;
+    (void)b;
+    (void)c;
+    return (double)std_poisson(g, lam); }
+static double f_binomial(RG *g, int l, double n, double p, double c) {
+    (void)c;
+    return (double)std_binomial(g, p, (long)n, l); }
+static double f_geometric(RG *g, int l, double p, double b, double c)
+{
+    (void)b; (void)c;
+    if (p >= 0.333333333333333333333333) {
+        double U = rg_double(g), sum = p, prod = p, q = 1.0 - p;
+        long X = 1;
+        while (U > sum) { prod *= q; sum += prod; X++; }
+        return (double)X;
+    }
+    return ceil(-std_exp(g, l) / n_log1p(-p));
+}
+static double f_negbin(RG *g, int l, double n, double p, double c)
+{
+    double Y;
+    (void)c;
+    Y = (1.0 - p) / p * std_gamma(g, l, n);
+    return (double)std_poisson(g, Y);
+}
+static double f_logseries(RG *g, int l, double p, double b, double c)
+{
+    double r = n_log1p(-p), U, V, q;
+    long result;
+    (void)l; (void)b; (void)c;
+    for (;;) {
+        V = rg_double(g);
+        if (V >= p) return 1.0;
+        U = rg_double(g);
+        q = -n_expm1(r * U);
+        if (V <= q * q) {
+            result = (long)floor(1.0 + log(V) / log(q));
+            if (result < 1 || V == 0.0) continue;
+            return (double)result;
+        }
+        if (V >= q) return 1.0;
+        return 2.0;
+    }
+}
+static double f_zipf(RG *g, int l, double a, double b, double c)
+{
+    double am1 = a - 1.0, bb = pow(2.0, am1), U, V, X, T;
+    (void)l; (void)b; (void)c;
+    for (;;) {
+        U = 1.0 - rg_double(g);
+        V = rg_double(g);
+        X = floor(pow(U, -1.0 / am1));
+        if (X > 9.223372036854775807e18 || X < 1.0) continue;
+        T = pow(1.0 + 1.0 / X, am1);
+        if (V * X * (T - 1.0) / (bb - 1.0) <= T / bb) return X;
+    }
+}
+
+/* parameter checks */
+static const char *k_none(double a, double b, double c) { (void)a;
+    (void)b;
+    (void)c;
+    return NULL;
+}
+static const char *k_scale1(double a, double b, double c) { (void)a;
+    (void)c;
+    return b < 0.0 ? "scale < 0" : NULL; }
+static const char *k_scale0(double a, double b, double c) { (void)b;
+    (void)c;
+    return a < 0.0 ? "scale < 0" : NULL; }
+static const char *k_gamma(double a, double b, double c) { (void)c;
+    if (a < 0.0) return "shape < 0";
+    return b < 0.0 ? "scale < 0" : NULL; }
+static const char *k_shape(double a, double b, double c) { (void)b;
+    (void)c;
+    return a < 0.0 ? "shape < 0" : NULL; }
+static const char *k_beta(double a, double b, double c) { (void)c;
+    if (a <= 0.0) return "a <= 0";
+    return b <= 0.0 ? "b <= 0" : NULL; }
+static const char *k_df(double a, double b, double c) { (void)b;
+    (void)c;
+    return a <= 0.0 ? "df <= 0" : NULL; }
+static const char *k_ncchi(double a, double b, double c) { (void)c;
+    if (a <= 0.0) return "df <= 0";
+    return b < 0.0 ? "nonc < 0" : NULL; }
+static const char *k_f(double a, double b, double c) { (void)c;
+    if (a <= 0.0) return "dfnum <= 0";
+    return b <= 0.0 ? "dfden <= 0" : NULL; }
+static const char *k_ncf(double a, double b, double c)
+{
+    if (a <= 0.0) return "dfnum <= 0";
+    if (b <= 0.0) return "dfden <= 0";
+    return c < 0.0 ? "nonc < 0" : NULL;
+}
+static const char *k_apos(double a, double b, double c) { (void)b;
+    (void)c;
+    return a <= 0.0 ? "a <= 0" : NULL; }
+static const char *k_aneg(double a, double b, double c) { (void)b;
+    (void)c;
+    return a < 0.0 ? "a < 0" : NULL; }
+static const char *k_sigma(double a, double b, double c) { (void)a;
+    (void)c;
+    return b < 0.0 ? "sigma < 0" : NULL; }
+static const char *k_wald(double a, double b, double c) { (void)c;
+    if (a <= 0.0) return "mean <= 0";
+    return b <= 0.0 ? "scale <= 0" : NULL; }
+static const char *k_kappa(double a, double b, double c) { (void)a;
+    (void)c;
+    return b < 0.0 ? "kappa < 0" : NULL; }
+static const char *k_tri(double a, double b, double c)
+{
+    if (a > b) return "left > mode";
+    if (b > c) return "mode > right";
+    return a == c ? "left == right" : NULL;
+}
+static const char *k_pois(double a, double b, double c) { (void)b;
+    (void)c;
+    if (!(a >= 0.0)) return "lam < 0 or lam is NaN";
+    return a > 9.223372006484771e+18 ? "lam value too large" : NULL; }
+static const char *k_binom(double a, double b, double c) { (void)c;
+    if (a < 0.0) return "n < 0";
+    if (!(b >= 0.0 && b <= 1.0)) return "p < 0, p > 1 or p is NaN";
+    return NULL; }
+static const char *k_geom(double a, double b, double c) { (void)b;
+    (void)c;
+    return (a > 0.0 && a <= 1.0) ? NULL
+        : "p <= 0, p > 1 or p contains NaNs";
+    }
+static const char *k_negbin(double a, double b, double c) { (void)c;
+    if (a <= 0.0) return "n <= 0";
+    return (b > 0.0 && b <= 1.0) ? NULL
+        : "p <= 0, p > 1 or p contains NaNs";
+    }
+static const char *k_logser(double a, double b, double c) { (void)b;
+    (void)c;
+    return (a > 0.0 && a < 1.0) ? NULL : "p < 0, p >= 1 or p is NaN"; }
+static const char *k_zipf(double a, double b, double c) { (void)b;
+    (void)c;
+    return a > 1.0 ? NULL : "a <= 1 or a is NaN"; }
+
+#define D0 { 0.0, 0.0, 0.0 }
+static const Dist D_random = { "random_sample", 0, { NULL, NULL, NULL }
+    , D0, f_unif01, 0, k_none };
+static const Dist D_stdnorm = {
+    "standard_normal", 0, { NULL, NULL, NULL }, D0, f_stdnorm, 0,
+    k_none };
+static const Dist D_stdexp = {
+    "standard_exponential", 0, { NULL, NULL, NULL }, D0, f_stdexp, 0,
+    k_none };
+static const Dist D_normal = { "normal", 2, { "loc", "scale", NULL }
+    , { 0.0, 1.0, 0.0 }, f_normal,
+    0, k_scale1 };
+static const Dist D_uniform = { "uniform", 2, { "low", "high", NULL }
+    , { 0.0, 1.0, 0.0 }, f_uniform,
+    0, k_none };
+static const Dist D_exp = { "exponential", 1, { "scale", NULL, NULL }
+    , { 1.0, 0.0, 0.0 }, f_exp, 0,
+    k_scale0 };
+static const Dist D_stdgamma = {
+    "standard_gamma", 1, { "shape", NULL, NULL }, { DREQ, 0.0, 0.0 },
+    f_stdgamma, 0, k_shape };
+static const Dist D_gamma = { "gamma", 2, { "shape", "scale", NULL }
+    , { DREQ, 1.0, 0.0 }, f_gamma,
+    0, k_gamma };
+static const Dist D_beta = { "beta", 2, { "a", "b", NULL }
+    , { DREQ, DREQ, 0.0 }, f_beta, 0,
+    k_beta };
+static const Dist D_chisq = { "chisquare", 1, { "df", NULL, NULL }
+    , { DREQ, 0.0, 0.0 }, f_chisq, 0,
+    k_df };
+static const Dist D_ncchisq = {
+    "noncentral_chisquare", 2, { "df", "nonc", NULL }, { DREQ, DREQ,
+    0.0 }, f_ncchisq, 0, k_ncchi };
+static const Dist D_f = { "f", 2, { "dfnum", "dfden", NULL }
+    , { DREQ, DREQ, 0.0 }, f_f, 0, k_f };
+static const Dist D_ncf = {
+    "noncentral_f", 3, { "dfnum", "dfden", "nonc" }
+    , { DREQ, DREQ, DREQ },
+    f_ncf, 0, k_ncf };
+static const Dist D_cauchy = {
+    "standard_cauchy", 0, { NULL, NULL, NULL }, D0, f_cauchy, 0,
+    k_none };
+static const Dist D_t = { "standard_t", 1, { "df", NULL, NULL }
+    , { DREQ, 0.0, 0.0 }, f_t, 0, k_df };
+static const Dist D_pareto = { "pareto", 1, { "a", NULL, NULL }
+    , { DREQ, 0.0, 0.0 }, f_pareto, 0,
+    k_apos };
+static const Dist D_weibull = { "weibull", 1, { "a", NULL, NULL }
+    , { DREQ, 0.0, 0.0 }, f_weibull, 0,
+    k_aneg };
+static const Dist D_power = { "power", 1, { "a", NULL, NULL }
+    , { DREQ, 0.0, 0.0 }, f_power, 0,
+    k_apos };
+static const Dist D_laplace = { "laplace", 2, { "loc", "scale", NULL }
+    , { 0.0, 1.0, 0.0 },
+    f_laplace, 0, k_scale1 };
+static const Dist D_gumbel = { "gumbel", 2, { "loc", "scale", NULL }
+    , { 0.0, 1.0, 0.0 }, f_gumbel,
+    0, k_scale1 };
+static const Dist D_logistic = {
+    "logistic", 2, { "loc", "scale", NULL }, { 0.0, 1.0, 0.0 },
+    f_logistic, 0, k_scale1 };
+static const Dist D_lognormal = {
+    "lognormal", 2, { "mean", "sigma", NULL }, { 0.0, 1.0, 0.0 },
+    f_lognormal, 0, k_sigma };
+static const Dist D_rayleigh = { "rayleigh", 1, { "scale", NULL, NULL }
+    , { 1.0, 0.0, 0.0 },
+    f_rayleigh, 0, k_scale0 };
+static const Dist D_wald = { "wald", 2, { "mean", "scale", NULL }
+    , { DREQ, DREQ, 0.0 }, f_wald, 0,
+    k_wald };
+static const Dist D_vonmises = { "vonmises", 2, { "mu", "kappa", NULL }
+    , { DREQ, DREQ, 0.0 },
+    f_vonmises, 0, k_kappa };
+static const Dist D_triangular = {
+    "triangular", 3, { "left", "mode", "right" }, { DREQ, DREQ,
+    DREQ }, f_triangular, 0, k_tri };
+static const Dist D_poisson = { "poisson", 1, { "lam", NULL, NULL }
+    , { 1.0, 0.0, 0.0 }, f_poisson,
+    1, k_pois };
+static const Dist D_binomial = { "binomial", 2, { "n", "p", NULL }
+    , { DREQ, DREQ, 0.0 }, f_binomial,
+    1, k_binom };
+static const Dist D_geometric = { "geometric", 1, { "p", NULL, NULL }
+    , { DREQ, 0.0, 0.0 },
+    f_geometric, 1, k_geom };
+static const Dist D_negbin = {
+    "negative_binomial", 2, { "n", "p", NULL }, { DREQ, DREQ, 0.0 },
+    f_negbin, 1, k_negbin };
+static const Dist D_logseries = { "logseries", 1, { "p", NULL, NULL }
+    , { DREQ, 0.0, 0.0 },
+    f_logseries, 1, k_logser };
+static const Dist D_zipf = { "zipf", 1, { "a", NULL, NULL }
+    , { DREQ, 0.0, 0.0 }, f_zipf, 1,
+    k_zipf };
+
 /* positional dims (rand / randn) */
-static Value rdims(Args *x, int off, u64 *s, RGen g)
+static Value rdims(Args *x, int off, RG *g, int legacy, const Dist *d)
 {
     long shape[ND_MAXD], i;
     int nd = RN, k;
     Nd *r;
-    if (nd == 0) return mkfloat(g(s, 0.0, 1.0));
+    if (nd == 0) return mkfloat(d->fn(g, legacy, 0.0, 0.0, 0.0));
     if (nd > ND_MAXD)
         throw_new(cls_ValueError,
             "maximum supported dimension for an ndarray is %d",
@@ -24932,78 +28082,50 @@ static Value rdims(Args *x, int off, u64 *s, RGen g)
             "negative dimensions are not allowed");
     }
     r = nd_new(ND_FLOAT, nd, shape);
-    for (i = 0; i < r->size; i++) r->dv[i] = g(s, 0.0, 1.0);
+    for (i = 0; i < r->size; i++)
+        r->dv[i] = d->fn(g, legacy, 0.0, 0.0, 0.0);
     return ndv(r);
 }
-static Value nr_random(Args *x, int off, u64 *s)
-{
-    return rfill(s, rarg(x, off, 0, "size"), g_unif, 0.0, 1.0);
-}
-static Value nr_stdnorm(Args *x, int off, u64 *s)
-{
-    return rfill(s, rarg(x, off, 0, "size"), g_norm, 0.0, 1.0);
-}
-static Value nr_normal(Args *x, int off, u64 *s)
-{
-    double loc = rdbl(x, off, 0, "loc", 0.0),
-        sc = rdbl(x, off, 1, "scale", 1.0);
-    if (sc < 0) throw_new(cls_ValueError, "scale < 0");
-    return rfill(s, rarg(x, off, 2, "size"), g_norm, loc, sc);
-}
-static Value nr_uniform(Args *x, int off, u64 *s)
-{
-    double lo = rdbl(x, off, 0, "low", 0.0),
-        hi = rdbl(x, off, 1, "high", 1.0);
-    return rfill(s, rarg(x, off, 2, "size"), g_unif, lo, hi);
-}
-static Value nr_exponential(Args *x, int off, u64 *s)
-{
-    double sc = rdbl(x, off, 0, "scale", 1.0);
-    if (sc < 0) throw_new(cls_ValueError, "scale < 0");
-    return rfill(s, rarg(x, off, 1, "size"), g_exp, sc, 0.0);
-}
-static Value nr_stdexp(Args *x, int off, u64 *s)
-{
-    return rfill(s, rarg(x, off, 0, "size"), g_exp, 1.0, 0.0);
-}
-/* integers: legacy randint has high exclusive; Generator.integers adds
-   endpoint */
-static Value nr_ints(Args *x, int off, u64 *s, int gen)
+
+/* integers: legacy randint (high exclusive, masked rejection) and
+   Generator.integers (Lemire) */
+static Value nr_ints(Args *x, int off, RG *g, int legacy)
 {
     Value lov = rarg(x, off, 0, "low"), hiv = rarg(x, off, 1, "high"),
         szv = rarg(x, off, 2, "size");
-    Value epv = gen ? kwget(x, "endpoint") : UNSET_V;
-    long lo, hi, shape[ND_MAXD], i;
-    int nd;
+    Value epv = legacy ? UNSET_V : kwget(x, "endpoint");
+    long lo, hi, shape[ND_MAXD], i, cnt = 1;
+    int nd, k;
+    u64 rng;
     Nd *r;
     if (!np_has(lov))
         throw_new(cls_TypeError,
-        "integers() missing required argument 'low'");
+            "%s() missing required argument 'low' (pos 1)",
+            legacy ? "randint" : "integers");
     if (!np_has(hiv)) { hi = need_long(lov, "low"); lo = 0; }
     else { lo = need_long(lov, "low"); hi = need_long(hiv, "high"); }
-    if (np_has(epv) && py_truthy(epv)) hi++;
-    if (lo >= hi)
+    if (!(np_has(epv) && py_truthy(epv))) hi--;
+    /* now inclusive */
+    if (lo > hi) {
+        if (np_has(epv) && py_truthy(epv))
+            throw_new(cls_ValueError, "low > high");
         throw_new(cls_ValueError,
-        np_has(hiv) ? "low >= high" : "high <= 0");
+            np_has(hiv) ? "low >= high" : "high <= 0");
+    }
+    rng = u64_sub(u64_l(hi), u64_l(lo));
     nd = rsize(szv, shape);
+    if (nd >= 0) for (k = 0; k < nd; k++) cnt *= shape[k];
     if (nd < 0)
-        return mkint(lo
-        + u64_tol(nrng_below(s, u64_sub(u64_l(hi), u64_l(lo)))));
+        return mkint(lo + u64_tol(rg_bounded(g, rng, legacy)));
     r = nd_new(ND_INT, nd, shape);
-    for (i = 0; i < r->size; i++)
-        r->iv[i] = lo
-            + u64_tol(nrng_below(s, u64_sub(u64_l(hi), u64_l(lo))));
-    return nd_ret(r);
-}
-static Value nr_randint(Args *x, int off, u64 *s) {
-    return nr_ints(x, off, s, 0);
-}
-static Value nr_integers(Args *x, int off, u64 *s) {
-    return nr_ints(x, off, s, 1);
+    for (i = 0; i < cnt; i++)
+        r->iv[i] = lo + u64_tol(rg_bounded(g, rng, legacy));
+    return ndv(r);
 }
 
-/* in-place Fisher-Yates of the first axis of an array / list */
-static void shuffle_nd(Nd *a, u64 *s)
+/* in-place Fisher-Yates of the first axis of an array / list
+   (random_interval draws) */
+static void shuffle_nd(Nd *a, RG *g)
 {
     long n, row, i, j;
     Nd *tmp;
@@ -25012,7 +28134,7 @@ static void shuffle_nd(Nd *a, u64 *s)
     row = n > 0 ? a->size / n : 0;
     tmp = nd_new(a->dt, 1, &row);
     for (i = n - 1; i > 0; i--) {
-        j = u64_tol(nrng_below(s, u64_l(i + 1)));
+        j = u64_tol(rg_interval(g, u64_l(i)));
         if (j != i && row > 0) {
             nd_cp(tmp, 0, a, i * row, row);
             nd_cp(a, i * row, a, j * row, row);
@@ -25020,27 +28142,27 @@ static void shuffle_nd(Nd *a, u64 *s)
         }
     }
 }
-static Value nr_shuffle(Args *x, int off, u64 *s)
+static Value nr_shuffle(Args *x, int off, RG *g)
 {
     Value v;
     if (RN < 1)
         throw_new(cls_TypeError,
         "shuffle() missing 1 required positional argument: 'x'");
     v = RA(0);
-    if (v.t == T_ND) shuffle_nd(AS_ND(v), s);
+    if (v.t == T_ND) shuffle_nd(AS_ND(v), g);
     else if (v.t == T_LIST) {
         List *l = AS_LIST(v);
         long i, j;
         for (i = l->n - 1; i > 0; i--) {
             Value t;
-            j = u64_tol(nrng_below(s, u64_l(i + 1)));
+            j = u64_tol(rg_interval(g, u64_l(i)));
             t = l->a[i]; l->a[i] = l->a[j]; l->a[j] = t;
         }
     } else throw_new(cls_TypeError,
         "shuffle: unsupported type '%.40s'", type_name(v));
     return NONE_V;
 }
-static Value nr_permutation(Args *x, int off, u64 *s)
+static Value nr_permutation(Args *x, int off, RG *g)
 {
     Value v;
     Nd *r;
@@ -25061,116 +28183,245 @@ static Value nr_permutation(Args *x, int off, u64 *s)
         if (r->nd == 0)
             throw_new(cls_ValueError,
             "x must be an integer or at least 1-dimensional");
+        if (v.t == T_ND) r = nd_astype(r, r->dt);
     }
-    shuffle_nd(r, s);
+    shuffle_nd(r, g);
     return ndv(r);
 }
-static Value nr_choice(Args *x, int off, u64 *s)
+/* sum with Kahan compensation, as numpy's choice does */
+static double kahan_sum(const double *d, long n)
+{
+    double sum = 0.0, c = 0.0, y, t;
+    long i;
+    for (i = 0; i < n; i++) {
+        y = d[i] - c;
+        t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+    return sum;
+}
+/* index of the first cdf entry greater than u (searchsorted
+   side='right') */
+static long cdf_search(const double *cdf, long n, double u)
+{
+    long lo = 0, hi = n;
+    while (lo < hi) {
+        long mid = (lo + hi) / 2;
+        if (cdf[mid] <= u) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+static Value nr_choice(Args *x, int off, RG *g, int legacy)
 {
     Value av = rarg(x, off, 0, "a"), szv = rarg(x, off, 1, "size"),
         rpv = rarg(x, off, 2, "replace");
-    Value pv = rarg(x, off, 3, "p");
+    Value pv = rarg(x, off, 3, "p"),
+        shv = legacy ? UNSET_V : kwget(x, "shuffle");
     Nd *src, *idx, *res;
     long n, cnt, i, j, shape[ND_MAXD], row;
-    int nd, repl = 1, k;
+    int nd, repl = 1, k, shuffle = 1;
     double *cum = NULL;
+    List *objs = NULL;
     if (!np_has(av))
         throw_new(cls_TypeError,
-        "choice() missing required argument 'a'");
+        "choice() missing required argument 'a' (pos 1)");
     if (np_has(rpv)) repl = py_truthy(rpv);
-    if (av.t == T_INT) {
+    if (np_has(shv)) shuffle = py_truthy(shv);
+    if ((av.t == T_LIST || av.t == T_TUPLE) && AS_LIST(av)->n > 0 &&
+        (AS_LIST(av)->a[0].t == T_STR || AS_LIST(av)->a[0].t == T_DICT
+            ||
+         AS_LIST(av)->a[0].t == T_SET
+             || AS_LIST(av)->a[0].t == T_NONE)) {
+        objs = AS_LIST(av);
+        /* a sequence of objects: no ndarray dtype for it, choose by
+           index */
+        n = objs->n;
+        src = NULL;
+    } else if (av.t == T_INT) {
         n = av.u.i;
-        if (n <= 0)
-            throw_new(cls_ValueError,
-                "a must be a positive integer unless no samples "
-                "are taken");
         src = NULL;
     } else {
         src = nd_from_value(av, -1);
-        if (src->nd < 1)
+        if (src->nd == 0)
             throw_new(cls_ValueError,
-            "a must be 1-dimensional or an integer");
+                "a must be a sequence or an integer, not %.40s",
+                type_name(av));
+        if (src->nd != 1 && legacy)
+            throw_new(cls_ValueError, "a must be 1-dimensional");
         n = src->shape[0];
-        if (n == 0)
-            throw_new(cls_ValueError,
-            "a cannot be empty unless no samples are taken");
     }
     nd = rsize(szv, shape);
     cnt = 1;
     if (nd >= 0) for (k = 0; k < nd; k++) cnt *= shape[k];
+    if (!src && n <= 0 && cnt != 0)
+        throw_new(cls_ValueError,
+            legacy
+            ? "a must be greater than 0 unless no samples are taken" :
+            "a must be a positive integer unless no samples "
+                "are taken");
+    if (src && n == 0 && cnt != 0)
+        throw_new(cls_ValueError,
+            legacy ? "'a' cannot be empty unless no samples are taken"
+            :
+            "a cannot be empty unless no samples are taken");
     if (np_has(pv)) {
         Nd *p = np_f(pv);
-        double tot = 0.0;
+        double tot;
+        if (p->nd != 1)
+            throw_new(cls_ValueError, "'p' must be 1-dimensional");
         if (p->size != n)
-            throw_new(cls_ValueError, "a and p must have same size");
-        cum = (double *)xmalloc(sizeof(double) * (size_t)(n + 1));
-        for (i = 0; i < n; i++) {
-            if (p->dv[i] < 0) { free(cum);
+            throw_new(cls_ValueError,
+            "'a' and 'p' must have same size");
+        tot = kahan_sum(p->dv, n);
+        if (tot != tot)
+            throw_new(cls_ValueError, "probabilities contain NaN");
+        for (i = 0; i < n; i++)
+            if (p->dv[i] < 0)
                 throw_new(cls_ValueError,
-                    "probabilities are not non-negative");
-            }
-            tot += p->dv[i];
-            cum[i] = tot;
-        }
-        if (fabs(tot - 1.0) > 1e-8) { free(cum);
+                "probabilities are not non-negative");
+        if (fabs(tot - 1.0) > 1.4901161193847656e-08)
             throw_new(cls_ValueError, "probabilities do not sum to 1");
-        }
+        cum = (double *)xmalloc(sizeof(double) * (size_t)(n + 1));
+        tot = 0.0;
+        for (i = 0; i < n; i++) { tot += p->dv[i]; cum[i] = tot; }
         for (i = 0; i < n; i++) cum[i] /= tot;
     }
     if (!repl && cnt > n) {
         free(cum);
         throw_new(cls_ValueError,
+            legacy
+                ? "Cannot take a larger sample than population when "
+                "'replace=False'" :
             "Cannot take a larger sample than population when "
-                "'replace=False'");
+                "replace is False");
     }
     idx = nd_new1(ND_INT, cnt);
-    if (cum) {
-        if (repl) {
-            for (i = 0; i < cnt; i++) {
-                double u = nrng_dbl(s);
-                long lo = 0, hi = n - 1;
-                while (lo < hi) {
-                    long mid = (lo + hi) / 2;
-                    if (cum[mid] > u) hi = mid; else lo = mid + 1;
-                }
-                idx->iv[i] = lo;
-            }
+    if (repl) {
+        if (cum) {
+            for (i = 0; i < cnt; i++)
+                idx->iv[i] = cdf_search(cum, n, rg_double(g));
+        } else if (legacy) {
+            u64 rg = u64_l(n - 1);
+            for (i = 0; i < cnt; i++)
+                idx->iv[i] = u64_tol(rg_bounded(g, rg, 1));
         } else {
-            /* sequential removal, renormalising */
-            double *w
-                = (double *)xmalloc(sizeof(double) * (size_t)(n + 1));
-            double prev = 0.0;
-            for (i = 0; i < n; i++) { w[i] = cum[i] - prev;
-                prev = cum[i];
+            u64 rg = u64_l(n - 1);
+            for (i = 0; i < cnt; i++)
+                idx->iv[i] = u64_tol(rg_bounded(g, rg, 0));
+        }
+    } else if (cum) {
+        double *w;
+        long nuniq = 0, nz = 0;
+        w = (double *)xmalloc(sizeof(double) * (size_t)(n + 1));
+        {
+            Nd *p = np_f(pv);
+            for (i = 0; i < n; i++) { w[i] = p->dv[i];
+                if (w[i] > 0.0) nz++;
             }
-            for (i = 0; i < cnt; i++) {
-                double tot = 0.0, u, acc = 0.0;
-                long pick = n - 1;
-                for (j = 0; j < n; j++) tot += w[j];
-                u = nrng_dbl(s) * tot;
-                for (j = 0; j < n; j++) {
-                    acc += w[j];
-                    if (w[j] > 0 && acc > u) { pick = j; break; }
+        }
+        if (nz < cnt) { free(w); free(cum);
+            throw_new(cls_ValueError,
+                "Fewer non-zero entries in p than size");
+        }
+        while (nuniq < cnt) {
+            long m = cnt - nuniq, q, newn = 0;
+            double *xs
+                = (double *)xmalloc(sizeof(double) * (size_t)(m + 1));
+            long *nw = (long *)xmalloc(sizeof(long) * (size_t)(m + 1));
+            double tot = 0.0;
+            for (i = 0; i < m; i++) xs[i] = rg_double(g);
+            if (nuniq > 0) for (i = 0; i < nuniq; i++)
+                w[idx->iv[i]] = 0.0;
+            for (i = 0; i < n; i++) { tot += w[i]; cum[i] = tot; }
+            for (i = 0; i < n; i++) cum[i] /= tot;
+            for (i = 0; i < m; i++) nw[i] = cdf_search(cum, n, xs[i]);
+            /* np.unique(return_index=True) then sorted by first
+               occurrence */
+            for (i = 0; i < m; i++) {
+                int dup = 0;
+                for (q = 0; q < i; q++) if (nw[q] == nw[i]) { dup = 1;
+                    break;
                 }
-                idx->iv[i] = pick;
-                w[pick] = 0.0;
+                if (!dup) idx->iv[nuniq + newn++] = nw[i];
             }
-            free(w);
+            nuniq += newn;
+            free(xs); free(nw);
         }
-        free(cum);
-    } else if (repl) {
-        for (i = 0; i < cnt; i++)
-            idx->iv[i] = u64_tol(nrng_below(s, u64_l(n)));
-    } else {
-        long *pool = (long *)xmalloc(sizeof(long) * (size_t)n);
-        for (i = 0; i < n; i++) pool[i] = i;
-        for (i = 0; i < cnt; i++) {
+        free(w);
+    } else if (legacy) {
+        long *perm = (long *)xmalloc(sizeof(long) * (size_t)(n + 1));
+        for (i = 0; i < n; i++) perm[i] = i;
+        for (i = n - 1; i > 0; i--) {
             long t;
-            j = i + u64_tol(nrng_below(s, u64_l(n - i)));
-            t = pool[i]; pool[i] = pool[j]; pool[j] = t;
-            idx->iv[i] = pool[i];
+            j = u64_tol(rg_interval(g, u64_l(i)));
+            t = perm[i]; perm[i] = perm[j]; perm[j] = t;
         }
-        free(pool);
+        for (i = 0; i < cnt; i++) idx->iv[i] = perm[i];
+        free(perm);
+    } else {
+        long size_i = cnt, pop = n;
+        if (pop > 10000 && size_i > pop / (shuffle ? 50 : 20)) {
+            long *arr
+                = (long *)xmalloc(sizeof(long) * (size_t)(pop + 1));
+            long stop = pop - size_i > 1 ? pop - size_i : 1;
+            for (i = 0; i < pop; i++) arr[i] = i;
+            for (i = pop - 1; i >= stop; i--) {
+                long t;
+                j = u64_tol(rg_bounded(g, u64_l(i), 0));
+                t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+            }
+            for (i = 0; i < size_i; i++)
+                idx->iv[i] = arr[pop - size_i + i];
+            free(arr);
+        } else {
+            /* Floyd's algorithm with an open-addressing hash set */
+            unsigned long mask, setsize;
+            long *hs;
+            unsigned long m1 = (unsigned long)(1.2 * (double)size_i);
+            m1 |= m1 >> 1;
+            m1 |= m1 >> 2;
+            m1 |= m1 >> 4;
+            m1 |= m1 >> 8;
+            m1 |= m1 >> 16;
+            mask = m1;
+            setsize = mask + 1UL;
+            hs = (long *)xmalloc(sizeof(long) * (size_t)setsize);
+            for (i = 0; i < (long)setsize; i++) hs[i] = -1;
+            for (j = pop - size_i; j < pop; j++) {
+                long val = u64_tol(rg_bounded(g, u64_l(j), 0));
+                unsigned long loc = (unsigned long)val & mask;
+                while (hs[loc] != -1 && hs[loc] != val)
+                    loc = (loc + 1UL) & mask;
+                if (hs[loc] == -1) {
+                    hs[loc] = val;
+                    idx->iv[j - pop + size_i] = val;
+                } else {
+                    loc = (unsigned long)j & mask;
+                    while (hs[loc] != -1) loc = (loc + 1UL) & mask;
+                    hs[loc] = j;
+                    idx->iv[j - pop + size_i] = j;
+                }
+            }
+            free(hs);
+            if (shuffle) {
+                for (i = size_i - 1; i > 0; i--) {
+                    long t;
+                    j = u64_tol(rg_bounded(g, u64_l(i), 0));
+                    t = idx->iv[i];
+                    idx->iv[i] = idx->iv[j];
+                    idx->iv[j] = t;
+                }
+            }
+        }
+    }
+    free(cum);
+    if (objs) {
+        List *ol;
+        if (nd < 0) return objs->a[idx->iv[0]];
+        ol = list_new(cnt);
+        for (i = 0; i < cnt; i++) list_push(ol, objs->a[idx->iv[i]]);
+        return mklist(ol);
     }
     if (nd < 0) {
         if (!src) return mkint(idx->iv[0]);
@@ -25185,7 +28436,7 @@ static Value nr_choice(Args *x, int off, u64 *s)
         for (i = 0; i < cnt; i++) res->iv[i] = idx->iv[i];
         return nd_ret(res);
     }
-    row = src->size / n;
+    row = n > 0 ? src->size / n : 0;
     {
         long rs[ND_MAXD];
         int rn = nd;
@@ -25198,170 +28449,2698 @@ static Value nr_choice(Args *x, int off, u64 *s)
         nd_cp(res, i * row, src, idx->iv[i] * row, row);
     return nd_ret(res);
 }
-static long nr_poisson1(u64 *s, double lam)
-{
-    long k = 0;
-    while (lam > 500.0) {
-        /* split: Poisson(lam) = Poisson(500) + Poisson(lam - 500) */
-        k += nr_poisson1(s, 500.0);
-        lam -= 500.0;
-    }
-    {
-        double L = exp(-lam), p = 1.0;
-        do { k++; p *= nrng_dbl(s); } while (p > L);
-    }
-    return k - 1;
-}
-static Value nr_poisson(Args *x, int off, u64 *s)
-{
-    double lam = rdbl(x, off, 0, "lam", 1.0);
-    long shape[ND_MAXD], i;
-    int nd = rsize(rarg(x, off, 1, "size"), shape);
-    Nd *r;
-    if (lam < 0) throw_new(cls_ValueError, "lam < 0 or lam is NaN");
-    if (nd < 0) return mkint(nr_poisson1(s, lam));
-    r = nd_new(ND_INT, nd, shape);
-    for (i = 0; i < r->size; i++) r->iv[i] = nr_poisson1(s, lam);
-    return nd_ret(r);
-}
-static long nr_binom1(u64 *s, long n, double p)
-{
-    long k = 0, i;
-    for (i = 0; i < n; i++) if (nrng_dbl(s) < p) k++;
-    return k;
-}
-static Value nr_binomial(Args *x, int off, u64 *s)
-{
-    long n = need_long(rarg(x, off, 0, "n"), "n"), shape[ND_MAXD], i;
-    double p = rdbl(x, off, 1, "p", 0.5);
-    int nd = rsize(rarg(x, off, 2, "size"), shape);
-    Nd *r;
-    if (n < 0) throw_new(cls_ValueError, "n < 0");
-    if (!(p >= 0.0 && p <= 1.0))
-        throw_new(cls_ValueError, "p < 0, p > 1 or p is NaN");
-    if (nd < 0) return mkint(nr_binom1(s, n, p));
-    r = nd_new(ND_INT, nd, shape);
-    for (i = 0; i < r->size; i++) r->iv[i] = nr_binom1(s, n, p);
-    return nd_ret(r);
-}
 
-/* module-level (global state) and method (instance state) wrappers */
-static u64 *self_state(Args *x)
+/* ---- wrappers: module level (global legacy state), RandomState and
+   Generator methods ---- */
+static RG *self_rg(Args *x)
 {
-    Value *sv;
-    if (x->n < 1 || x->a[0].t != T_INST)
+    if (x->n < 1)
         throw_new(cls_TypeError,
-            "descriptor requires a Generator object");
-    sv = amap_get(&AS_INST(x->a[0])->a, intern_c("_s"));
-    if (!sv || sv->t != T_ND)
-        throw_new(cls_TypeError, "uninitialised Generator");
-    return (u64 *)AS_ND(*sv)->iv;
+        "descriptor requires a random state object");
+    return rg_get(x->a[0]);
 }
-#define RFN(nm, impl) \
-  BI(rm_##nm) { return impl(x, 0, g_rs); } \
-  BI(rg_##nm) { return impl(x, 1, self_state(x)); }
-RFN(random, nr_random)
-RFN(stdnorm, nr_stdnorm)
-RFN(normal, nr_normal)
-RFN(uniform, nr_uniform)
-RFN(exponential, nr_exponential)
-RFN(stdexp, nr_stdexp)
-RFN(randint, nr_randint)
-RFN(integers, nr_integers)
-RFN(choice, nr_choice)
-RFN(shuffle, nr_shuffle)
-RFN(permutation, nr_permutation)
-RFN(poisson, nr_poisson)
-RFN(binomial, nr_binomial)
-BI(rm_rand) { return rdims(x, 0, g_rs, g_unif); }
-BI(rg_rand) { return rdims(x, 1, self_state(x), g_unif); }
-BI(rm_randn) { return rdims(x, 0, g_rs, g_norm); }
-BI(rg_randn) { return rdims(x, 1, self_state(x), g_norm); }
-BI(rm_seed)
+#define DFN(nm, D) \
+  BI(rm_##nm) { return dist_call(x, 0, &g_rs, 1, &D); } \
+  BI(rs_##nm) { return dist_call(x, 1, self_rg(x), 1, &D); } \
+  BI(gn_##nm) { return dist_call(x, 1, self_rg(x), 0, &D); }
+DFN(random, D_random)
+DFN(stdnorm, D_stdnorm)
+DFN(stdexp, D_stdexp)
+DFN(normal, D_normal)
+DFN(uniform, D_uniform)
+DFN(exponential, D_exp)
+DFN(stdgamma, D_stdgamma)
+DFN(gamma, D_gamma)
+DFN(beta, D_beta)
+DFN(chisquare, D_chisq)
+DFN(ncchisq, D_ncchisq)
+DFN(f, D_f)
+DFN(ncf, D_ncf)
+DFN(cauchy, D_cauchy)
+DFN(t, D_t)
+DFN(pareto, D_pareto)
+DFN(weibull, D_weibull)
+DFN(power, D_power)
+DFN(laplace, D_laplace)
+DFN(gumbel, D_gumbel)
+DFN(logistic, D_logistic)
+DFN(lognormal, D_lognormal)
+DFN(rayleigh, D_rayleigh)
+DFN(wald, D_wald)
+DFN(vonmises, D_vonmises)
+DFN(triangular, D_triangular)
+DFN(poisson, D_poisson)
+DFN(binomial, D_binomial)
+DFN(geometric, D_geometric)
+DFN(negbin, D_negbin)
+DFN(logseries, D_logseries)
+DFN(zipf, D_zipf)
+
+BI(rm_rand) { return rdims(x, 0, &g_rs, 1, &D_random); }
+BI(rs_rand) { return rdims(x, 1, self_rg(x), 1, &D_random); }
+BI(rm_randn) { return rdims(x, 0, &g_rs, 1, &D_stdnorm); }
+BI(rs_randn) { return rdims(x, 1, self_rg(x), 1, &D_stdnorm); }
+BI(rm_randint) { return nr_ints(x, 0, &g_rs, 1); }
+BI(rs_randint) { return nr_ints(x, 1, self_rg(x), 1); }
+BI(gn_integers) { return nr_ints(x, 1, self_rg(x), 0); }
+BI(rm_choice) { return nr_choice(x, 0, &g_rs, 1); }
+BI(rs_choice) { return nr_choice(x, 1, self_rg(x), 1); }
+BI(gn_choice) { return nr_choice(x, 1, self_rg(x), 0); }
+BI(rm_shuffle) { return nr_shuffle(x, 0, &g_rs); }
+BI(rs_shuffle) { return nr_shuffle(x, 1, self_rg(x)); }
+BI(rm_permutation) { return nr_permutation(x, 0, &g_rs); }
+BI(rs_permutation) { return nr_permutation(x, 1, self_rg(x)); }
+static Value nr_bytes(Args *x, int off, RG *g)
 {
-    Value sv = x->n > 0 ? A(0) : kwget(x, "seed");
-    seed_from(g_rs, sv);
-    return NONE_V;
+    long n, i;
+    char *b;
+    Value r;
+    if (RN < 1)
+        throw_new(cls_TypeError,
+        "bytes() missing required argument 'length' (pos 1)");
+    n = need_long(RA(0), "length");
+    if (n < 0)
+        throw_new(cls_ValueError,
+        "negative dimensions are not allowed");
+    b = (char *)xmalloc((size_t)n + 4);
+    for (i = 0; i < n; i += 4) {
+        unsigned long w = rg_next32(g);
+        b[i] = (char)(w & 255UL);
+        if (i + 1 < n) b[i + 1] = (char)((w >> 8) & 255UL);
+        if (i + 2 < n) b[i + 2] = (char)((w >> 16) & 255UL);
+        if (i + 3 < n) b[i + 3] = (char)((w >> 24) & 255UL);
+    }
+    r = mkbytes(b, n);
+    free(b);
+    return r;
 }
-static Value make_rng(Class *c, Value seed)
+BI(rm_bytes) { return nr_bytes(x, 0, &g_rs); }
+BI(rs_bytes) { return nr_bytes(x, 1, self_rg(x)); }
+
+
+/* ---- hypergeometric, multinomial, dirichlet --------------------- */
+static long hyper_sample(RG *g, long good, long bad, long sample)
+{
+    long remaining_good = good, remaining_total, computed,
+        total = good + bad;
+    computed = sample > total / 2 ? total - sample : sample;
+    remaining_total = total;
+    while (computed > 0 && remaining_good > 0
+        && remaining_total > remaining_good) {
+        --remaining_total;
+        if (u64_tol(rg_interval(g, u64_l(remaining_total)))
+            < remaining_good) --remaining_good;
+        --computed;
+    }
+    if (remaining_total == remaining_good) remaining_good -= computed;
+    return sample > total / 2 ? remaining_good : good - remaining_good;
+}
+/* log(k!) as numpy's Generator hypergeometric computes it: a table
+   below 126, then Stirling */
+static const double logfact_tab[126] = {
+    0.0, 0.0, 0.6931471805599453, 1.791759469228055,
+    3.1780538303479458, 4.787491742782046, 6.579251212010101,
+        8.525161361065415,
+    10.60460290274525, 12.801827480081469, 15.104412573075516,
+        17.502307845873887,
+    19.987214495661885, 22.552163853123425, 25.19122118273868,
+        27.89927138384089,
+    30.671860106080672, 33.50507345013689, 36.39544520803305,
+        39.339884187199495,
+    42.335616460753485, 45.38013889847691, 48.47118135183523,
+        51.60667556776438,
+    54.78472939811232, 58.00360522298052, 61.261701761002,
+        64.55753862700634,
+    67.88974313718154, 71.25703896716801, 74.65823634883016,
+        78.0922235533153,
+    81.55795945611504, 85.05446701758152, 88.58082754219768,
+        92.1361756036871,
+    95.7196945421432, 99.33061245478743, 102.96819861451381,
+        106.63176026064346,
+    110.32063971475739, 114.0342117814617, 117.77188139974507,
+        121.53308151543864,
+    125.3172711493569, 129.12393363912722, 132.95257503561632,
+        136.80272263732635,
+    140.67392364823425, 144.5657439463449, 148.47776695177302,
+        152.40959258449735,
+    156.3608363030788, 160.3311282166309, 164.32011226319517,
+        168.32744544842765,
+    172.3527971391628, 176.39584840699735, 180.45629141754378,
+        184.53382886144948,
+    188.6281734236716, 192.7390472878449, 196.86618167289,
+        201.00931639928152,
+    205.1681994826412, 209.34258675253685, 213.53224149456327,
+        217.73693411395422,
+    221.95644181913033, 226.1905483237276, 230.43904356577696,
+        234.70172344281826,
+    238.97838956183432, 243.2688490029827, 247.57291409618688,
+        251.8904022097232,
+    256.22113555000954, 260.5649409718632, 264.9216497985528,
+        269.2910976510198,
+    273.6731242856937, 278.0675734403661, 282.4742926876304,
+        286.893133295427,
+    291.3239500942703, 295.76660135076065, 300.22094864701415,
+        304.6868567656687,
+    309.1641935801469, 313.65282994987905, 318.1526396202093,
+        322.66349912672615,
+    327.1852877037752, 331.7178871969285, 336.26118197919845,
+        340.815058870799,
+    345.37940706226686, 349.95411804077025, 354.5390855194408,
+        359.1342053695754,
+    363.73937555556347, 368.35449607240474, 372.979468885689,
+        377.61419787391867,
+    382.25858877306, 386.91254912321756, 391.5759882173296,
+        396.24881705179155,
+    400.93094827891576, 405.6222961611449, 410.32277652693733,
+        415.03230672824964,
+    419.7508055995447, 424.4781934182571, 429.21439186665157,
+        433.9593239950148,
+    438.71291418612117, 443.47508812091894, 448.2457727453846,
+        453.0248962384961,
+    457.81238798127816, 462.6081785268749, 467.4121995716082,
+        472.2243839269806,
+    477.04466549258564, 481.87297922988796
+};
+static double logfactorial(long k)
+{
+    double dk;
+    if (k < 126) return logfact_tab[k];
+    dk = (double)k;
+    return (dk + 0.5) * log(dk) - dk + 0.9189385332046728 +
+        (1.0 / dk) * (1.0 / 12.0 -
+        (1.0 / (dk * dk))
+            * (1.0 / 360.0 - (1.0 / (dk * dk)) * (1.0 / 1260.0)));
+}
+static long hyper_hrua(RG *g, long good, long bad, long sample)
+{
+    long mingoodbad = good < bad ? good : bad, popsize = good + bad,
+        maxgoodbad = good < bad ? bad : good, cs, m, K;
+    double p, q, mu, var, a, c, h, gg, b, U, V, X, T, gp, t;
+    cs = sample < popsize - sample ? sample : popsize - sample;
+    p = (double)mingoodbad / (double)popsize;
+    q = (double)maxgoodbad / (double)popsize;
+    mu = (double)cs * p;
+    a = mu + 0.5;
+    var = (double)(popsize - cs) * (double)cs * p * q
+        / (double)(popsize - 1);
+    c = sqrt(var + 0.5);
+    h = 1.7155277699214135 * c + 0.8989161620588988;
+    m
+        = (long)floor((double)(cs + 1) * (double)(mingoodbad + 1)
+        / (double)(popsize + 2));
+    gg = logfactorial(m) + logfactorial(mingoodbad - m)
+        + logfactorial(cs - m) +
+        logfactorial(maxgoodbad - cs + m);
+    t = (double)(cs < mingoodbad ? cs : mingoodbad) + 1.0;
+    b = floor(a + 16.0 * c);
+    if (t < b) b = t;
+    for (;;) {
+        U = rg_double(g);
+        V = rg_double(g);
+        X = a + h * (V - 0.5) / U;
+        if (X < 0.0 || X >= b) continue;
+        K = (long)floor(X);
+        gp = logfactorial(K) + logfactorial(mingoodbad - K)
+            + logfactorial(cs - K) +
+            logfactorial(maxgoodbad - cs + K);
+        T = gg - gp;
+        if (U * (4.0 - U) - 3.0 <= T) break;
+        if (U * (U - T) >= 1.0) continue;
+        if (2.0 * log(U) <= T) break;
+    }
+    if (good > bad) K = cs - K;
+    if (cs < sample) K = good - K;
+    return K;
+}
+/* the algorithm RandomState still uses (before numpy 1.17): the same
+   with loggam */
+static long hyper_hrua_legacy(RG *g, long good, long bad, long sample)
+{
+    long mingoodbad = good < bad ? good : bad, popsize = good + bad,
+        maxgoodbad = good < bad ? bad : good, m, d9, Z;
+    double d4, d5, d6, d7, d8, d10, d11, T, W, X, Y, t;
+    m = sample < popsize - sample ? sample : popsize - sample;
+    d4 = (double)mingoodbad / (double)popsize;
+    d5 = 1.0 - d4;
+    d6 = (double)m * d4 + 0.5;
+    d7
+        = sqrt((double)(popsize - m) * (double)sample * d4 * d5
+        / (double)(popsize - 1) + 0.5);
+    d8 = 1.7155277699214135 * d7 + 0.8989161620588988;
+    d9
+        = (long)floor((double)(m + 1) * (double)(mingoodbad + 1)
+        / (double)(popsize + 2));
+    d10 = d_loggam((double)(d9 + 1))
+        + d_loggam((double)(mingoodbad - d9 + 1)) +
+        d_loggam((double)(m - d9 + 1))
+            + d_loggam((double)(maxgoodbad - m + d9 + 1));
+    t = (double)(m < mingoodbad ? m : mingoodbad) + 1.0;
+    d11 = floor(d6 + 16.0 * d7);
+    if (t < d11) d11 = t;
+    for (;;) {
+        X = rg_double(g);
+        Y = rg_double(g);
+        W = d6 + d8 * (Y - 0.5) / X;
+        if (W < 0.0 || W >= d11) continue;
+        Z = (long)floor(W);
+        T = d10
+            - (d_loggam((double)(Z + 1))
+            + d_loggam((double)(mingoodbad - Z + 1)) +
+            d_loggam((double)(m - Z + 1))
+                + d_loggam((double)(maxgoodbad - m + Z + 1)));
+        if (X * (4.0 - X) - 3.0 <= T) break;
+        if (X * (X - T) >= 1.0) continue;
+        if (2.0 * log(X) <= T) break;
+    }
+    if (good > bad) Z = m - Z;
+    if (m < sample) Z = good - Z;
+    return Z;
+}
+/* the pre-1.17 algorithm still used by RandomState for samples of up
+   to 10 */
+static long hyper_hyp(RG *g, long good, long bad, long sample)
+{
+    long d1 = bad + good - sample, K = sample, Z;
+    double d2 = (double)(good < bad ? good : bad), Y = d2, U;
+    while (Y > 0.0) {
+        U = rg_double(g);
+        Y -= (double)(long)floor(U + Y / ((double)d1 + (double)K));
+        K--;
+        if (K == 0) break;
+    }
+    Z = (long)(d2 - Y);
+    if (good > bad) Z = sample - Z;
+    return Z;
+}
+static double f_hyper(RG *g, int l, double good, double bad,
+    double sample)
+{
+    long gd = (long)good, bd = (long)bad, sm = (long)sample;
+    if (l) {
+        if (sm > 10) return (double)hyper_hrua_legacy(g, gd, bd, sm);
+        return (double)hyper_hyp(g, gd, bd, sm);
+    }
+    if (sm >= 10 && sm <= gd + bd - 10) return (double)
+        hyper_hrua(g, gd, bd, sm);
+    return (double)hyper_sample(g, gd, bd, sm);
+}
+static const char *k_hyper_l(double a, double b, double c)
+{
+    if (!(a >= 0.0)) return "ngood < 0";
+    if (!(b >= 0.0)) return "nbad < 0";
+    if (!(c >= 1.0)) return "nsample < 1 or nsample is NaN";
+    if (a + b < c) return "ngood + nbad < nsample";
+    return NULL;
+}
+static const char *k_hyper_g(double a, double b, double c)
+{
+    if (!(a >= 0.0)) return "ngood < 0";
+    if (!(b >= 0.0)) return "nbad < 0";
+    if (!(c >= 0.0)) return "nsample < 0";
+    if (a + b < c) return "ngood + nbad < nsample";
+    if (a >= 1000000000.0 || b >= 1000000000.0)
+        return "both ngood and nbad must be less than 1000000000";
+    return NULL;
+}
+static const Dist D_hyper_l = {
+    "hypergeometric", 3, { "ngood", "nbad", "nsample" },
+    { DREQ, DREQ, DREQ }, f_hyper, 1, k_hyper_l };
+static const Dist D_hyper_g = {
+    "hypergeometric", 3, { "ngood", "nbad", "nsample" },
+    { DREQ, DREQ, DREQ }, f_hyper, 1, k_hyper_g };
+BI(rm_hyper) { return dist_call(x, 0, &g_rs, 1, &D_hyper_l); }
+BI(rs_hyper) { return dist_call(x, 1, self_rg(x), 1, &D_hyper_l); }
+BI(gn_hyper) { return dist_call(x, 1, self_rg(x), 0, &D_hyper_g); }
+
+/* output shape: `size` followed by a trailing dimension of d */
+static int vec_shape(Value szv, long d, long *shape, long *rows)
+{
+    int nd = rsize(szv, shape), k;
+    *rows = 1;
+    if (nd < 0) nd = 0;
+    for (k = 0; k < nd; k++) *rows *= shape[k];
+    if (nd >= ND_MAXD)
+        throw_new(cls_ValueError,
+            "maximum supported dimension for an ndarray is %d",
+            ND_MAXD);
+    shape[nd++] = d;
+    return nd;
+}
+static Value nr_multinomial(Args *x, int off, RG *g, int legacy)
+{
+    Value nv = rarg(x, off, 0, "n"), pv = rarg(x, off, 1, "pvals"),
+        szv = rarg(x, off, 2, "size");
+    long n, d, j, row, rows, shape[ND_MAXD], dn;
+    int nd;
+    Nd *p, *r;
+    double remaining, ssum;
+    if (!np_has(nv)) throw_new(cls_TypeError,
+        "multinomial() missing required argument 'n' (pos 1)");
+    if (!np_has(pv)) throw_new(cls_TypeError,
+        "multinomial() missing required argument 'pvals' (pos 2)");
+    n = need_long(nv, "n");
+    p = np_f(pv);
+    if (p->nd != 1)
+        throw_new(cls_ValueError, "pvals must be 1-dimensional");
+    d = p->size;
+    if (n < 0) throw_new(cls_ValueError, "n < 0");
+    for (j = 0; j < d; j++)
+        if (!(p->dv[j] >= 0.0 && p->dv[j] <= 1.0))
+            throw_new(cls_ValueError,
+                "pvals < 0, pvals > 1 or pvals contains NaNs");
+    ssum = d > 1 ? kahan_sum(p->dv, d - 1) : 0.0;
+    if (ssum > 1.0 + 1e-12)
+        throw_new(cls_ValueError, "sum(pvals[:-1]) > 1.0");
+    nd = vec_shape(szv, d, shape, &rows);
+    r = nd_new(ND_INT, nd, shape);
+    for (row = 0; row < rows; row++) {
+        long *out = r->iv + row * d;
+        for (j = 0; j < d; j++) out[j] = 0;
+        remaining = 1.0;
+        dn = n;
+        for (j = 0; j + 1 < d; j++) {
+            out[j] = std_binomial(g, p->dv[j] / remaining, dn, legacy);
+            dn -= out[j];
+            if (dn <= 0) break;
+            remaining -= p->dv[j];
+        }
+        if (dn > 0 && d > 0) out[d - 1] = dn;
+    }
+    return ndv(r);
+}
+BI(rm_multinomial) { return nr_multinomial(x, 0, &g_rs, 1); }
+BI(rs_multinomial) { return nr_multinomial(x, 1, self_rg(x), 1); }
+BI(gn_multinomial) { return nr_multinomial(x, 1, self_rg(x), 0); }
+static Value nr_dirichlet(Args *x, int off, RG *g, int legacy)
+{
+    Value av = rarg(x, off, 0, "alpha"), szv = rarg(x, off, 1, "size");
+    Nd *a;
+    long k, j, row, rows, shape[ND_MAXD];
+    int nd, beta_path = 0;
+    double amax, *csum = NULL;
+    Nd *r;
+    if (!np_has(av)) throw_new(cls_TypeError,
+        "dirichlet() missing required argument 'alpha' (pos 1)");
+    a = np_f(av);
+    if (a->nd != 1)
+        throw_new(cls_ValueError,
+        "alpha must be a 1-dimensional array");
+    k = a->size;
+    amax = k > 0 ? a->dv[0] : 1.0;
+    for (j = 0; j < k; j++) {
+        if (a->dv[j] > amax) amax = a->dv[j];
+        if (legacy ? !(a->dv[j] > 0.0) : (a->dv[j] < 0.0))
+            throw_new(cls_ValueError,
+                legacy ? "alpha <= 0" : "alpha < 0");
+    }
+    nd = vec_shape(szv, k, shape, &rows);
+    r = nd_new(ND_FLOAT, nd, shape);
+    if (!legacy && amax < 0.1) {
+        beta_path = 1;
+        csum = (double *)xmalloc(sizeof(double) * (size_t)(k + 1));
+        csum[k] = 0.0;
+        for (j = k - 1; j >= 0; j--) csum[j] = csum[j + 1] + a->dv[j];
+    }
+    for (row = 0; row < rows; row++) {
+        double *v = r->dv + row * k, acc, inv;
+        if (beta_path) {
+            acc = 1.0;
+            for (j = 0; j + 1 < k; j++) {
+                double b = f_beta(g, 0, a->dv[j], csum[j + 1], 0.0);
+                v[j] = acc * b;
+                acc *= 1.0 - b;
+            }
+            if (k > 0) v[k - 1] = acc;
+        } else {
+            acc = 0.0;
+            for (j = 0; j < k; j++) {
+                v[j] = std_gamma(g, legacy, a->dv[j]);
+                acc += v[j];
+            }
+            inv = 1.0 / acc;
+            for (j = 0; j < k; j++) v[j] *= inv;
+        }
+    }
+    free(csum);
+    return ndv(r);
+}
+BI(rm_dirichlet) { return nr_dirichlet(x, 0, &g_rs, 1); }
+BI(rs_dirichlet) { return nr_dirichlet(x, 1, self_rg(x), 1); }
+BI(gn_dirichlet) { return nr_dirichlet(x, 1, self_rg(x), 0); }
+
+/* construction and seeding */
+/* MT19937(seed) as a bit generator: SeedSequence words, key[0] =
+   0x80000000, pos = 623 */
+static void rg_seed_mt_ss(RG *g, Value seed)
+{
+    unsigned long pool[4], tmp[4], *ent = NULL;
+    long n;
+    memset(g, 0, sizeof(RG));
+    g->kind = 0;
+    if (seed.t == T_UNSET || seed.t == T_NONE) {
+        entropy_words(tmp, 4);
+        ss_pool(pool, tmp, 4);
+    } else {
+        n = ss_entropy(seed, &ent);
+        ss_pool(pool, ent, n);
+        free(ent);
+    }
+    ss_state(pool, g->mt, MT_N);
+    g->mt[0] = 0x80000000UL;
+    g->mpos = MT_N - 1;
+}
+static Value make_rng(Class *c, int kind, Value seed)
 {
     Inst *in = new_inst(c);
-    Nd *st = nd_new1(ND_INT, (long)(4 * sizeof(u64) / sizeof(long)));
-    Value iv = mkobj(in, T_INST);
+    Value iv = mkobj(in, T_INST), holder;
     VPUSH(iv);
-    seed_from((u64 *)st->iv, seed);
-    amap_set(&in->a, intern_c("_s"), ndv(st));
+    holder = rg_holder();
+    amap_set(&in->a, intern_c("_s"), holder);
+    if (kind == 1) rg_seed_pcg((RG *)AS_ND(holder)->iv, seed);
+    else if (c == cls_rng[3])
+        rg_seed_mt_ss((RG *)AS_ND(holder)->iv, seed);
+    else rg_seed_mt((RG *)AS_ND(holder)->iv, seed);
     vsp--;
     return iv;
 }
-BI(rm_default_rng)
+static Value seed_arg(Args *x, int pos)
 {
-    Value sv = x->n > 0 ? A(0) : kwget(x, "seed");
-    if (sv.t == T_INST && AS_INST(sv)->cls == cls_rng[0]) return sv;
-    return make_rng(cls_rng[0], sv);
+    return x->n > pos ? A(pos) : kwget(x, "seed");
 }
+BI(rm_seed) { rg_seed_mt(&g_rs, seed_arg(x, 0)); return NONE_V; }
+BI(rs_seed) { rg_seed_mt(self_rg(x), seed_arg(x, 1)); return NONE_V; }
 BI(rm_RandomState)
 {
-    Value sv = x->n > 0 ? A(0) : kwget(x, "seed");
-    return make_rng(cls_rng[1], sv);
+    Value sv = seed_arg(x, 0);
+    if (sv.t == T_INST && AS_INST(sv)->cls == cls_rng[3]) {
+        /* RandomState(MT19937(...)): share the bit generator state */
+        Inst *in = new_inst(cls_rng[1]);
+        Value iv = mkobj(in, T_INST);
+        amap_set(&in->a, intern_c("_s"),
+            *amap_get(&AS_INST(sv)->a, intern_c("_s")));
+        amap_set(&in->a, intern_c("_bit_generator"), sv);
+        return iv;
+    }
+    return make_rng(cls_rng[1], 0, sv);
 }
-BI(rg_seed)
+BI(rm_default_rng)
 {
-    Value sv = x->n > 1 ? A(1) : kwget(x, "seed");
-    seed_from(self_state(x), sv);
+    Value sv = seed_arg(x, 0), bg;
+    Inst *in;
+    Value iv;
+    if (sv.t == T_INST && AS_INST(sv)->cls == cls_rng[0]) return sv;
+    if (sv.t == T_INST
+        && (AS_INST(sv)->cls == cls_rng[2]
+        || AS_INST(sv)->cls == cls_rng[3]))
+        bg = sv;
+    else bg = make_rng(cls_rng[2], 1, sv);
+    VPUSH(bg);
+    in = new_inst(cls_rng[0]);
+    iv = mkobj(in, T_INST);
+    amap_set(&in->a, intern_c("_s"),
+        *amap_get(&AS_INST(bg)->a, intern_c("_s")));
+    amap_set(&in->a, intern_c("bit_generator"), bg);
+    vsp--;
+    return iv;
+}
+BI(rm_Generator)
+{
+    Value bg = x->n > 0 ? A(0) : kwget(x, "bit_generator");
+    Inst *in;
+    Value iv;
+    if (bg.t != T_INST
+        || (AS_INST(bg)->cls != cls_rng[2]
+        && AS_INST(bg)->cls != cls_rng[3]))
+        throw_new(cls_ValueError, "No bit_generator found");
+    in = new_inst(cls_rng[0]);
+    iv = mkobj(in, T_INST);
+    amap_set(&in->a, intern_c("_s"),
+        *amap_get(&AS_INST(bg)->a, intern_c("_s")));
+    amap_set(&in->a, intern_c("bit_generator"), bg);
+    return iv;
+}
+BI(rm_PCG64) { return make_rng(cls_rng[2], 1, seed_arg(x, 0)); }
+BI(rm_MT19937) { return make_rng(cls_rng[3], 0, seed_arg(x, 0)); }
+static Value u64_value(u64 a)
+{
+    unsigned long d[4];
+    d[0] = u64_lo(a) & 0xFFFFUL; d[1] = u64_lo(a) >> 16;
+    d[2] = u64_hi(a) & 0xFFFFUL; d[3] = u64_hi(a) >> 16;
+    return int_from_bin(d, 4, 0);
+}
+BI(bg_random_raw)
+{
+    RG *g = self_rg(x);
+    Value sz = x->n > 1 ? A(1) : kwget(x, "size");
+    long shape[ND_MAXD], n = 1, i;
+    int nd = rsize(sz, shape), k;
+    List *l;
+    if (nd < 0) return u64_value(rg_next64(g));
+    for (k = 0; k < nd; k++) n *= shape[k];
+    l = list_new(n);
+    for (i = 0; i < n; i++) list_push(l, u64_value(rg_next64(g)));
+    return mklist(l);
+}
+
+/* bit_generator.state: the dict numpy exposes (PCG64: state/inc as
+   Python ints, MT19937: key/pos) */
+static Value u128_value(u64 hi, u64 lo)
+{
+    unsigned long d[8];
+    d[0] = u64_lo(lo) & 0xFFFFUL; d[1] = u64_lo(lo) >> 16;
+    d[2] = u64_hi(lo) & 0xFFFFUL; d[3] = u64_hi(lo) >> 16;
+    d[4] = u64_lo(hi) & 0xFFFFUL; d[5] = u64_lo(hi) >> 16;
+    d[6] = u64_hi(hi) & 0xFFFFUL; d[7] = u64_hi(hi) >> 16;
+    return int_from_bin(d, 8, 0);
+}
+static void u128_parse(Value v, u64 *hi, u64 *lo)
+{
+    unsigned long *d;
+    unsigned long w[10];
+    int n, i;
+    if (v.t != T_INT && v.t != T_BIG)
+        throw_new(cls_TypeError, "state values must be integers");
+    n = int_to_bin(v, &d);
+    for (i = 0; i < 10; i++) w[i] = i < n ? d[i] : 0UL;
+    free(d);
+    *lo = u64_c((w[3] << 16) | w[2], (w[1] << 16) | w[0]);
+    *hi = u64_c((w[7] << 16) | w[6], (w[5] << 16) | w[4]);
+}
+static void sdict_put(Dict *d, const char *k, Value v) {
+    dict_set(d, mkcstr(k), v);
+}
+static Value sdict_get(Value dv, const char *k)
+{
+    Value out = NONE_V;
+    if (dv.t != T_DICT || !dict_get(AS_DICT(dv), mkcstr(k), &out))
+        throw_new(cls_ValueError, "state dictionary is missing '%s'",
+            k);
+    return out;
+}
+BI(bg_state_get)
+{
+    RG *g = self_rg(x);
+    Dict *d = dict_new(), *s = dict_new();
+    if (g->kind == 1) {
+        sdict_put(d, "bit_generator", mkcstr("PCG64"));
+        sdict_put(s, "state", u128_value(g->sh, g->sl));
+        sdict_put(s, "inc", u128_value(g->ih, g->il));
+        sdict_put(d, "state", mkobj(s, T_DICT));
+        sdict_put(d, "has_uint32", mkint(g->has32));
+        sdict_put(d, "uinteger", mkint((long)g->u32));
+    } else {
+        Nd *key = nd_new1(ND_INT, MT_N);
+        int i;
+        for (i = 0; i < MT_N; i++) key->iv[i] = (long)g->mt[i];
+        sdict_put(d, "bit_generator", mkcstr("MT19937"));
+        sdict_put(s, "key", ndv(key));
+        sdict_put(s, "pos", mkint((long)g->mpos));
+        sdict_put(d, "state", mkobj(s, T_DICT));
+    }
+    return mkobj(d, T_DICT);
+}
+BI(bg_state_set)
+{
+    RG *g = self_rg(x);
+    Value st, name, s;
+    if (x->n < 2)
+        throw_new(cls_TypeError, "state setter needs a value");
+    st = A(1);
+    name = sdict_get(st, "bit_generator");
+    s = sdict_get(st, "state");
+    if (name.t != T_STR)
+        throw_new(cls_ValueError, "state must be a dict");
+    if (g->kind == 1) {
+        if (strcmp(AS_STR(name)->s, "PCG64") != 0)
+            throw_new(cls_ValueError, "state must be for a PCG64 RNG");
+        u128_parse(sdict_get(s, "state"), &g->sh, &g->sl);
+        u128_parse(sdict_get(s, "inc"), &g->ih, &g->il);
+        g->has32 = (int)need_long(sdict_get(st, "has_uint32"),
+            "has_uint32");
+        g->u32 = (unsigned long)need_long(sdict_get(st, "uinteger"),
+            "uinteger") & U32M;
+    } else {
+        Nd *key;
+        int i;
+        if (strcmp(AS_STR(name)->s, "MT19937") != 0)
+            throw_new(cls_ValueError,
+                "state must be for a MT19937 RNG");
+        key = nd_from_value(sdict_get(s, "key"), ND_INT);
+        if (key->size != MT_N)
+            throw_new(cls_ValueError,
+            "state vector is the wrong size");
+        for (i = 0; i < MT_N; i++) g->mt[i] = (unsigned long)
+            key->iv[i] & U32M;
+        g->mpos = (int)need_long(sdict_get(s, "pos"), "pos");
+        g->has_gauss = 0;
+    }
     return NONE_V;
 }
-static void rnd_methods(Class *c)
+/* SeedSequence(entropy=None): keeps the entropy and the pool;
+   generate_state(n) */
+/* (re)build the pool of the SeedSequence instance `in` from its
+   entropy and spawn_key */
+static void ss_build(Inst *in, Value ent, Value skey)
 {
-    def_bi(c, "random", rg_random);
-    def_bi(c, "random_sample", rg_random);
-    def_bi(c, "standard_normal", rg_stdnorm);
-    def_bi(c, "normal", rg_normal);
-    def_bi(c, "uniform", rg_uniform);
-    def_bi(c, "exponential", rg_exponential);
-    def_bi(c, "standard_exponential", rg_stdexp);
-    def_bi(c, "integers", rg_integers);
-    def_bi(c, "randint", rg_randint);
-    def_bi(c, "choice", rg_choice); def_bi(c, "shuffle", rg_shuffle);
-    def_bi(c, "permutation", rg_permutation);
-    def_bi(c, "poisson", rg_poisson);
-    def_bi(c, "binomial", rg_binomial); def_bi(c, "rand", rg_rand);
-    def_bi(c, "randn", rg_randn); def_bi(c, "seed", rg_seed);
+    unsigned long *w = NULL, *kw = NULL, pool[4];
+    long n, kn = 0, i;
+    List *pl;
+    n = ss_entropy(ent, &w);
+    if (skey.t == T_TUPLE && AS_LIST(skey)->n > 0) {
+        unsigned long *all;
+        long k, cap = AS_LIST(skey)->n * 4 + 8, got;
+        kw
+            = (unsigned long *)xmalloc(sizeof(unsigned long)
+            * (size_t)cap);
+        for (k = 0; k < AS_LIST(skey)->n; k++) {
+            unsigned long *t;
+            got = ss_entropy(AS_LIST(skey)->a[k], &t);
+            while (kn + got > cap) { cap *= 2;
+                kw = (unsigned long *)xrealloc(kw,
+                sizeof(unsigned long) * (size_t)cap); }
+            for (i = 0; i < got; i++) kw[kn++] = t[i];
+            free(t);
+        }
+        all
+            = (unsigned long *)xmalloc(sizeof(unsigned long)
+            * (size_t)(n + 4 + kn + 1));
+        for (i = 0; i < n; i++) all[i] = w[i];
+        for (; i < 4; i++) all[i] = 0UL;
+        if (n < 4) n = 4;
+        for (i = 0; i < kn; i++) all[n + i] = kw[i];
+        free(w); free(kw);
+        w = all;
+        n += kn;
+    }
+    ss_pool(pool, w, n);
+    free(w);
+    pl = list_new(4);
+    for (i = 0; i < 4; i++) list_push(pl, mkint((long)pool[i]));
+    amap_set(&in->a, intern_c("entropy"), ent);
+    amap_set(&in->a, intern_c("pool"), mklist(pl));
+    amap_set(&in->a, intern_c("spawn_key"), skey);
+}
+BI(ss_init)
+{
+    Value ent = x->n > 1 ? A(1) : kwget(x, "entropy"),
+        skey = kwget(x, "spawn_key"), nch = kwget(x,
+        "n_children_spawned");
+    unsigned long tmp[4];
+    long i;
+    if (x->n < 1 || A(0).t != T_INST) return NONE_V;
+    if (!np_has(ent)) {
+        Value big = mkint(0);
+        entropy_words(tmp, 4);
+        for (i = 0; i < 4; i++)
+            big = int_add(int_mul(big, mkint(65536L)),
+            mkint((long)(tmp[i] >> 16)));
+        for (i = 0; i < 4; i++)
+            big = int_add(int_mul(big, mkint(65536L)),
+            mkint((long)(tmp[i] & 0xFFFFUL)));
+        ent = big;
+    }
+    if (!np_has(skey)) skey = mktuple_from(NULL, 0);
+    else if (skey.t == T_LIST)
+        skey = mktuple_from(AS_LIST(skey)->a, AS_LIST(skey)->n);
+    ss_build(AS_INST(A(0)), ent, skey);
+    amap_set(&AS_INST(A(0))->a, intern_c("n_children_spawned"),
+        np_has(nch) ? nch : mkint(0));
+    amap_set(&AS_INST(A(0))->a, intern_c("pool_size"), mkint(4));
+    return NONE_V;
+}
+BI(ss_spawn)
+{
+    Inst *p;
+    Value *ent, *sk, *nc;
+    long n, i, base;
+    List *out;
+    if (x->n < 2 || A(0).t != T_INST) throw_new(cls_TypeError,
+        "spawn() missing required argument 'n_children'");
+    p = AS_INST(A(0));
+    n = need_long(A(1), "n_children");
+    ent = amap_get(&p->a, intern_c("entropy"));
+    sk = amap_get(&p->a, intern_c("spawn_key"));
+    nc = amap_get(&p->a, intern_c("n_children_spawned"));
+    if (!ent || !sk || !nc)
+        throw_new(cls_TypeError, "uninitialised SeedSequence");
+    base = nc->u.i;
+    out = list_new(n);
+    for (i = 0; i < n; i++) {
+        Value child = call_value(mkobj(cls_rng[4], T_CLASS), 0, NULL,
+            0, NULL);
+        List *key = tuple_new(AS_LIST(*sk)->n + 1);
+        long k;
+        for (k = 0; k < AS_LIST(*sk)->n; k++) key->a[k] = AS_LIST(*sk)
+            ->a[k];
+        key->a[AS_LIST(*sk)->n] = mkint(base + i);
+        ss_build(AS_INST(child), *ent, mkobj(key, T_TUPLE));
+        amap_set(&AS_INST(child)->a, intern_c("n_children_spawned"),
+            mkint(0));
+        amap_set(&AS_INST(child)->a, intern_c("pool_size"), mkint(4));
+        list_push(out, child);
+    }
+    amap_set(&p->a, intern_c("n_children_spawned"), mkint(base + n));
+    return mklist(out);
+}
+BI(ss_generate_state)
+{
+    Value *pv;
+    unsigned long pool[4], *st;
+    long n, i, words;
+    List *l;
+    int u32 = 0;
+    Value dt = x->n > 2 ? A(2) : kwget(x, "dtype");
+    if (x->n < 2)
+        throw_new(cls_TypeError,
+        "generate_state() missing required argument 'n_words'");
+    n = need_long(A(1), "n_words");
+    u32 = !np_has(dt)
+        || (dt.t == T_STR && strcmp(AS_STR(dt)->s, "uint32") == 0);
+    pv = amap_get(&AS_INST(A(0))->a, intern_c("pool"));
+    if (!pv || pv->t != T_LIST)
+        throw_new(cls_TypeError, "uninitialised SeedSequence");
+    for (i = 0; i < 4; i++) pool[i] = (unsigned long)AS_LIST(*pv)
+        ->a[i].u.i;
+    words = u32 ? n : 2 * n;
+    st
+        = (unsigned long *)xmalloc(sizeof(unsigned long)
+        * (size_t)(words + 1));
+    ss_state(pool, st, words);
+    l = list_new(n);
+    for (i = 0; i < n; i++) {
+        if (u32) list_push(l, mkint((long)st[i]));
+        else list_push(l, u64_value(u64_c(st[2 * i + 1], st[2 * i])));
+    }
+    free(st);
+    {
+        Nd *r = nd_from_value(mklist(l), u32 ? ND_INT : ND_FLOAT);
+        if (!u32) {
+            /* uint64 values do not fit a long: return them as a list
+               of Python ints */
+            return mklist(l);
+        }
+        return ndv(r);
+    }
+}
+/* get_state / set_state of the legacy generator */
+static Value rg_get_state(RG *g)
+{
+    Value parts[5];
+    Nd *key = nd_new1(ND_INT, MT_N);
+    int i;
+    if (g->kind != 0)
+        throw_new(cls_NotImplementedError,
+        "get_state needs the MT19937 generator");
+    for (i = 0; i < MT_N; i++) key->iv[i] = (long)g->mt[i];
+    parts[0] = mkcstr("MT19937");
+    parts[1] = ndv(key);
+    parts[2] = mkint((long)g->mpos);
+    parts[3] = mkint(g->has_gauss);
+    parts[4] = mkfloat(g->gauss);
+    return mktuple_from(parts, 5);
+}
+static void rg_set_state(RG *g, Value st)
+{
+    Nd *key;
+    int i;
+    if (st.t != T_TUPLE || AS_LIST(st)->n < 3
+        || AS_LIST(st)->a[0].t != T_STR)
+        throw_new(cls_ValueError, "state must be a tuple");
+    if (strcmp(AS_STR(AS_LIST(st)->a[0])->s, "MT19937") != 0)
+        throw_new(cls_ValueError, "state must be for a MT19937 RNG");
+    key = nd_from_value(AS_LIST(st)->a[1], ND_INT);
+    if (key->size != MT_N)
+        throw_new(cls_ValueError, "state vector is the wrong size");
+    for (i = 0; i < MT_N; i++) g->mt[i] = (unsigned long)
+        key->iv[i] & U32M;
+    g->mpos = (int)need_long(AS_LIST(st)->a[2], "pos");
+    g->has_gauss = 0;
+    g->gauss = 0.0;
+    if (AS_LIST(st)->n >= 5) {
+        g->has_gauss = (int)need_long(AS_LIST(st)->a[3], "has_gauss");
+        g->gauss = to_dbl(AS_LIST(st)->a[4]);
+    }
+}
+BI(rm_get_state) { (void)x; return rg_get_state(&g_rs); }
+BI(rs_get_state) { return rg_get_state(self_rg(x)); }
+BI(rm_set_state) {
+    if (x->n < 1) throw_new(cls_TypeError,
+    "set_state() missing argument");
+    rg_set_state(&g_rs, A(0)); return NONE_V; }
+BI(rs_set_state) {
+    if (x->n < 2) throw_new(cls_TypeError,
+    "set_state() missing argument");
+    rg_set_state(self_rg(x), A(1)); return NONE_V; }
+
+#define MD(m, name, fn) mod_def(m, name, fn)
+static void rnd_methods_legacy(Class *c)
+{
+#define RM(name, fn) def_bi(c, name, fn)
+    RM("seed", rs_seed);
+    RM("random_sample", rs_random);
+    RM("random", rs_random);
+    RM("ranf", rs_random);
+    RM("sample", rs_random);
+    RM("rand", rs_rand);
+    RM("randn", rs_randn);
+    RM("randint", rs_randint);
+    RM("standard_normal", rs_stdnorm);
+    RM("normal", rs_normal);
+    RM("uniform", rs_uniform); RM("standard_exponential", rs_stdexp);
+    RM("exponential", rs_exponential);
+    RM("standard_gamma", rs_stdgamma);
+    RM("gamma", rs_gamma);
+    RM("beta", rs_beta); RM("chisquare", rs_chisquare);
+    RM("noncentral_chisquare", rs_ncchisq);
+    RM("f", rs_f);
+    RM("noncentral_f", rs_ncf);
+    RM("standard_cauchy", rs_cauchy);
+    RM("standard_t", rs_t);
+    RM("pareto", rs_pareto);
+    RM("weibull", rs_weibull);
+    RM("power", rs_power);
+    RM("laplace", rs_laplace);
+    RM("gumbel", rs_gumbel);
+    RM("logistic", rs_logistic);
+    RM("lognormal", rs_lognormal);
+    RM("rayleigh", rs_rayleigh);
+    RM("wald", rs_wald);
+    RM("vonmises", rs_vonmises);
+    RM("triangular", rs_triangular);
+    RM("poisson", rs_poisson);
+    RM("binomial", rs_binomial);
+    RM("geometric", rs_geometric); RM("negative_binomial", rs_negbin);
+    RM("logseries", rs_logseries);
+    RM("zipf", rs_zipf);
+    RM("choice", rs_choice);
+    RM("shuffle", rs_shuffle);
+    RM("permutation", rs_permutation);
+    RM("bytes", rs_bytes);
+    RM("hypergeometric", rs_hyper);
+    RM("multinomial", rs_multinomial);
+    RM("dirichlet",
+        rs_dirichlet);
+    RM("get_state", rs_get_state); RM("set_state", rs_set_state);
+#undef RM
+}
+static void rnd_methods_gen(Class *c)
+{
+#define RM(name, fn) def_bi(c, name, fn)
+    RM("random", gn_random);
+    RM("integers", gn_integers);
+    RM("standard_normal", gn_stdnorm);
+    RM("normal", gn_normal); RM("uniform", gn_uniform);
+    RM("standard_exponential", gn_stdexp);
+    RM("exponential", gn_exponential);
+    RM("standard_gamma", gn_stdgamma);
+    RM("gamma", gn_gamma);
+    RM("beta", gn_beta);
+    RM("chisquare", gn_chisquare);
+    RM("noncentral_chisquare", gn_ncchisq);
+    RM("f", gn_f);
+    RM("noncentral_f", gn_ncf);
+    RM("standard_cauchy", gn_cauchy);
+    RM("standard_t", gn_t);
+    RM("pareto", gn_pareto);
+    RM("weibull", gn_weibull);
+    RM("power", gn_power);
+    RM("laplace", gn_laplace);
+    RM("gumbel", gn_gumbel);
+    RM("logistic", gn_logistic);
+    RM("lognormal", gn_lognormal);
+    RM("rayleigh", gn_rayleigh);
+    RM("wald", gn_wald);
+    RM("vonmises", gn_vonmises);
+    RM("triangular", gn_triangular);
+    RM("poisson", gn_poisson);
+    RM("binomial", gn_binomial); RM("geometric", gn_geometric);
+    RM("negative_binomial", gn_negbin);
+    RM("logseries", gn_logseries);
+    RM("zipf", gn_zipf);
+    RM("choice", gn_choice);
+    RM("shuffle", rs_shuffle);
+    RM("permutation", rs_permutation);
+    RM("bytes", rs_bytes);
+    RM("hypergeometric", gn_hyper);
+    RM("multinomial", gn_multinomial);
+    RM("dirichlet",
+        gn_dirichlet);
+#undef RM
 }
 static void rnd_init(Module *np)
 {
     Module *m = new_module("numpy.random");
     int i;
-    static const char *nm[2] = { "Generator", "RandomState" };
-    (void)rm_integers;
-    for (i = 0; i < 2; i++) {
+    static const char *nm[5] = {
+        "Generator", "RandomState", "PCG64", "MT19937",
+        "SeedSequence" };
+    for (i = 0; i < 5; i++) {
         Class **b = (Class **)xmalloc(sizeof(Class *));
         b[0] = cls_object;
         cls_rng[i] = make_class(intern_c(nm[i]), b, 1,
             intern_c("numpy.random"));
-        rnd_methods(cls_rng[i]);
         mod_val(m, nm[i], mkobj(cls_rng[i], T_CLASS));
     }
+    rnd_methods_gen(cls_rng[0]);
+    rnd_methods_legacy(cls_rng[1]);
+    def_bi(cls_rng[2], "random_raw", bg_random_raw);
+    def_bi(cls_rng[3], "random_raw", bg_random_raw);
+    for (i = 2; i < 4; i++)
+        amap_set(&cls_rng[i]->ns, intern_c("state"),
+                 mk_prop(T_PROP, mkbuiltin("state", bg_state_get),
+                     mkbuiltin("state",
+                     bg_state_set)));
+    cls_rng[2]->flags |= CF_PROPS; cls_rng[3]->flags |= CF_PROPS;
+    def_bi(cls_rng[4], "__init__", ss_init);
+    def_bi(cls_rng[4], "generate_state", ss_generate_state);
+    def_bi(cls_rng[4], "spawn", ss_spawn);
+    cls_rng[0]->ctor = rm_Generator;
     cls_rng[1]->ctor = rm_RandomState;
-    nrng_seed(g_rs,
-        u64_mul(u64_ul(host_seed()), u64_ul(2654435761UL)));
-    mod_def(m, "seed", rm_seed);
-    mod_def(m, "default_rng", rm_default_rng);
-    mod_def(m, "random", rm_random);
-    mod_def(m, "random_sample", rm_random);
-    mod_def(m, "ranf", rm_random); mod_def(m, "sample", rm_random);
-    mod_def(m, "rand", rm_rand); mod_def(m, "randn", rm_randn);
-    mod_def(m, "standard_normal", rm_stdnorm);
-    mod_def(m, "normal", rm_normal);
-    mod_def(m, "uniform", rm_uniform);
-    mod_def(m, "exponential", rm_exponential);
-    mod_def(m, "standard_exponential", rm_stdexp);
-    mod_def(m, "randint", rm_randint); mod_def(m, "choice", rm_choice);
-    mod_def(m, "shuffle", rm_shuffle);
-    mod_def(m, "permutation", rm_permutation);
-    mod_def(m, "poisson", rm_poisson);
-    mod_def(m, "binomial", rm_binomial);
+    cls_rng[2]->ctor = rm_PCG64;
+    cls_rng[3]->ctor = rm_MT19937;
+    memset(&g_rs, 0, sizeof(g_rs));
+    rg_seed_mt(&g_rs, NONE_V);
+    MD(m, "seed", rm_seed); MD(m, "default_rng", rm_default_rng);
+    MD(m, "get_state", rm_get_state); MD(m, "set_state", rm_set_state);
+    MD(m, "random", rm_random); MD(m, "random_sample", rm_random);
+    MD(m, "ranf", rm_random); MD(m, "sample", rm_random);
+    MD(m, "rand", rm_rand); MD(m, "randn", rm_randn);
+    MD(m, "standard_normal", rm_stdnorm); MD(m, "normal", rm_normal);
+    MD(m, "uniform", rm_uniform); MD(m, "exponential", rm_exponential);
+    MD(m, "standard_exponential", rm_stdexp);
+    MD(m, "standard_gamma", rm_stdgamma);
+    MD(m, "gamma", rm_gamma);
+    MD(m, "beta", rm_beta);
+    MD(m, "chisquare", rm_chisquare);
+    MD(m, "noncentral_chisquare", rm_ncchisq);
+    MD(m, "f", rm_f);
+    MD(m, "noncentral_f", rm_ncf);
+    MD(m, "standard_cauchy", rm_cauchy);
+    MD(m, "standard_t", rm_t);
+    MD(m, "pareto", rm_pareto);
+    MD(m, "weibull", rm_weibull);
+    MD(m, "power", rm_power);
+    MD(m, "laplace", rm_laplace);
+    MD(m, "gumbel", rm_gumbel); MD(m, "logistic", rm_logistic);
+    MD(m, "lognormal", rm_lognormal);
+    MD(m, "rayleigh", rm_rayleigh);
+    MD(m, "wald", rm_wald);
+    MD(m, "vonmises", rm_vonmises); MD(m, "triangular", rm_triangular);
+    MD(m, "poisson", rm_poisson); MD(m, "binomial", rm_binomial);
+    MD(m, "geometric", rm_geometric);
+    MD(m, "negative_binomial", rm_negbin);
+    MD(m, "logseries", rm_logseries); MD(m, "zipf", rm_zipf);
+    MD(m, "randint", rm_randint); MD(m, "choice", rm_choice);
+    MD(m, "shuffle", rm_shuffle); MD(m, "permutation", rm_permutation);
+    MD(m, "bytes", rm_bytes);
+    MD(m, "hypergeometric", rm_hyper);
+    MD(m, "multinomial", rm_multinomial);
+    MD(m, "dirichlet", rm_dirichlet);
     mod_val(np, "random", mkobj(m, T_MODULE));
+}
+/* ===== p7_pyrand.c ===== */
+/* ====================================================================
+   p7_pyrand.c the random module with CPython's exact generator and
+   algorithms: MT19937 seeded
+                 by init_by_array (int / hash / SHA-512 of str, bytes),
+                 random(), getrandbits(), _randbelow(), randrange,
+                 choice, shuffle, sample, choices and the real-valued
+                 distributions of Lib/random.py (3.13), getstate /
+                 setstate, Random instances with independent state
+                 (subclasses may override random / getrandbits /
+                 _randbelow) and SystemRandom. The MT19937 core and the
+                 u64 helpers come from p7_rnd.c.
+   ================================================================= */
+static double d_lgamma(double x);
+static double log2_d(double v);
+
+/* ---- SHA-512 (needed for string and bytes seeds), built on the u64
+   operations ---- */
+static const unsigned long sha_k[80][2] = {
+    { 0x428A2F98UL, 0xD728AE22UL },
+    { 0x71374491UL, 0x23EF65CDUL },
+    { 0xB5C0FBCFUL, 0xEC4D3B2FUL },
+    { 0xE9B5DBA5UL, 0x8189DBBCUL },
+    { 0x3956C25BUL, 0xF348B538UL },
+    { 0x59F111F1UL, 0xB605D019UL },
+    { 0x923F82A4UL, 0xAF194F9BUL },
+    { 0xAB1C5ED5UL, 0xDA6D8118UL },
+    { 0xD807AA98UL, 0xA3030242UL },
+    { 0x12835B01UL, 0x45706FBEUL },
+    { 0x243185BEUL, 0x4EE4B28CUL },
+    { 0x550C7DC3UL, 0xD5FFB4E2UL },
+    { 0x72BE5D74UL, 0xF27B896FUL },
+    { 0x80DEB1FEUL, 0x3B1696B1UL },
+    { 0x9BDC06A7UL, 0x25C71235UL },
+    { 0xC19BF174UL, 0xCF692694UL },
+    { 0xE49B69C1UL, 0x9EF14AD2UL },
+    { 0xEFBE4786UL, 0x384F25E3UL },
+    { 0x0FC19DC6UL, 0x8B8CD5B5UL },
+    { 0x240CA1CCUL, 0x77AC9C65UL },
+    { 0x2DE92C6FUL, 0x592B0275UL },
+    { 0x4A7484AAUL, 0x6EA6E483UL },
+    { 0x5CB0A9DCUL, 0xBD41FBD4UL },
+    { 0x76F988DAUL, 0x831153B5UL },
+    { 0x983E5152UL, 0xEE66DFABUL },
+    { 0xA831C66DUL, 0x2DB43210UL },
+    { 0xB00327C8UL, 0x98FB213FUL },
+    { 0xBF597FC7UL, 0xBEEF0EE4UL },
+    { 0xC6E00BF3UL, 0x3DA88FC2UL },
+    { 0xD5A79147UL, 0x930AA725UL },
+    { 0x06CA6351UL, 0xE003826FUL },
+    { 0x14292967UL, 0x0A0E6E70UL },
+    { 0x27B70A85UL, 0x46D22FFCUL },
+    { 0x2E1B2138UL, 0x5C26C926UL },
+    { 0x4D2C6DFCUL, 0x5AC42AEDUL },
+    { 0x53380D13UL, 0x9D95B3DFUL },
+    { 0x650A7354UL, 0x8BAF63DEUL },
+    { 0x766A0ABBUL, 0x3C77B2A8UL },
+    { 0x81C2C92EUL, 0x47EDAEE6UL },
+    { 0x92722C85UL, 0x1482353BUL },
+    { 0xA2BFE8A1UL, 0x4CF10364UL },
+    { 0xA81A664BUL, 0xBC423001UL },
+    { 0xC24B8B70UL, 0xD0F89791UL },
+    { 0xC76C51A3UL, 0x0654BE30UL },
+    { 0xD192E819UL, 0xD6EF5218UL },
+    { 0xD6990624UL, 0x5565A910UL },
+    { 0xF40E3585UL, 0x5771202AUL },
+    { 0x106AA070UL, 0x32BBD1B8UL },
+    { 0x19A4C116UL, 0xB8D2D0C8UL },
+    { 0x1E376C08UL, 0x5141AB53UL },
+    { 0x2748774CUL, 0xDF8EEB99UL },
+    { 0x34B0BCB5UL, 0xE19B48A8UL },
+    { 0x391C0CB3UL, 0xC5C95A63UL },
+    { 0x4ED8AA4AUL, 0xE3418ACBUL },
+    { 0x5B9CCA4FUL, 0x7763E373UL },
+    { 0x682E6FF3UL, 0xD6B2B8A3UL },
+    { 0x748F82EEUL, 0x5DEFB2FCUL },
+    { 0x78A5636FUL, 0x43172F60UL },
+    { 0x84C87814UL, 0xA1F0AB72UL },
+    { 0x8CC70208UL, 0x1A6439ECUL },
+    { 0x90BEFFFAUL, 0x23631E28UL },
+    { 0xA4506CEBUL, 0xDE82BDE9UL },
+    { 0xBEF9A3F7UL, 0xB2C67915UL },
+    { 0xC67178F2UL, 0xE372532BUL },
+    { 0xCA273ECEUL, 0xEA26619CUL },
+    { 0xD186B8C7UL, 0x21C0C207UL },
+    { 0xEADA7DD6UL, 0xCDE0EB1EUL },
+    { 0xF57D4F7FUL, 0xEE6ED178UL },
+    { 0x06F067AAUL, 0x72176FBAUL },
+    { 0x0A637DC5UL, 0xA2C898A6UL },
+    { 0x113F9804UL, 0xBEF90DAEUL },
+    { 0x1B710B35UL, 0x131C471BUL },
+    { 0x28DB77F5UL, 0x23047D84UL },
+    { 0x32CAAB7BUL, 0x40C72493UL },
+    { 0x3C9EBE0AUL, 0x15C9BEBCUL },
+    { 0x431D67C4UL, 0x9C100D4CUL },
+    { 0x4CC5D4BEUL, 0xCB3E42B6UL },
+    { 0x597F299CUL, 0xFC657E2AUL },
+    { 0x5FCB6FABUL, 0x3AD6FAECUL },
+    { 0x6C44198CUL, 0x4A475817UL }
+};
+static const unsigned long sha_h0[8][2] = {
+    { 0x6A09E667UL, 0xF3BCC908UL },
+    { 0xBB67AE85UL, 0x84CAA73BUL },
+    { 0x3C6EF372UL, 0xFE94F82BUL },
+    { 0xA54FF53AUL, 0x5F1D36F1UL },
+    { 0x510E527FUL, 0xADE682D1UL },
+    { 0x9B05688CUL, 0x2B3E6C1FUL },
+    { 0x1F83D9ABUL, 0xFB41BD6BUL },
+    { 0x5BE0CD19UL, 0x137E2179UL }
+};
+static u64 sha_rotr(u64 a, int k) {
+    return u64_or(u64_shr(a, k), u64_shl(a, 64 - k));
+}
+static u64 sha_not(u64 a) { return u64_xor(a, u64_max()); }
+static void sha512_block(u64 *H, const unsigned char *p)
+{
+    u64 W[80], v[8], t1, t2, s0, s1;
+    int t, i;
+    for (t = 0; t < 16; t++) {
+        unsigned long hi = 0, lo = 0;
+        for (i = 0; i < 4; i++) hi = (hi << 8) | p[8 * t + i];
+        for (i = 4; i < 8; i++) lo = (lo << 8) | p[8 * t + i];
+        W[t] = u64_c(hi, lo);
+    }
+    for (t = 16; t < 80; t++) {
+        s0
+            = u64_xor(u64_xor(sha_rotr(W[t - 15], 1),
+            sha_rotr(W[t - 15], 8)), u64_shr(W[t - 15],
+            7));
+        s1
+            = u64_xor(u64_xor(sha_rotr(W[t - 2], 19),
+            sha_rotr(W[t - 2], 61)), u64_shr(W[t - 2], 6));
+        W[t] = u64_add(u64_add(W[t - 16], s0), u64_add(W[t - 7], s1));
+    }
+    for (i = 0; i < 8; i++) v[i] = H[i];
+    for (t = 0; t < 80; t++) {
+        u64 e = v[4], a = v[0], ch, maj, S1, S0;
+        S1 = u64_xor(u64_xor(sha_rotr(e, 14), sha_rotr(e, 18)),
+            sha_rotr(e, 41));
+        ch = u64_xor(u64_and(e, v[5]), u64_and(sha_not(e), v[6]));
+        t1 = u64_add(u64_add(v[7], S1),
+            u64_add(ch, u64_add(u64_c(sha_k[t][0], sha_k[t][1]),
+            W[t])));
+        S0 = u64_xor(u64_xor(sha_rotr(a, 28), sha_rotr(a, 34)),
+            sha_rotr(a, 39));
+        maj = u64_xor(u64_xor(u64_and(a, v[1]), u64_and(a, v[2])),
+            u64_and(v[1], v[2]));
+        t2 = u64_add(S0, maj);
+        v[7] = v[6]; v[6] = v[5]; v[5] = v[4];
+        v[4] = u64_add(v[3], t1);
+        v[3] = v[2]; v[2] = v[1]; v[1] = v[0];
+        v[0] = u64_add(t1, t2);
+    }
+    for (i = 0; i < 8; i++) H[i] = u64_add(H[i], v[i]);
+}
+/* digest[64] = SHA-512 of msg[0..len) */
+static void sha512(const unsigned char *msg, long len,
+    unsigned char *digest)
+{
+    u64 H[8];
+    long total = ((len + 16) / 128 + 1) * 128, off, bits_hi, i;
+    unsigned char *buf = (unsigned char *)xmalloc((size_t)total);
+    unsigned long bl = (unsigned long)len;
+    for (i = 0; i < 8; i++) H[i] = u64_c(sha_h0[i][0], sha_h0[i][1]);
+    memset(buf, 0, (size_t)total);
+    if (len > 0) memcpy(buf, msg, (size_t)len);
+    buf[len] = 0x80;
+    bits_hi = (long)(bl >> 29);
+    /* bits 61.. of the length * 8 */
+    buf[total - 8] = (unsigned char)((bits_hi >> 24) & 0xFF);
+    buf[total - 7] = (unsigned char)((bits_hi >> 16) & 0xFF);
+    buf[total - 6] = (unsigned char)((bits_hi >> 8) & 0xFF);
+    buf[total - 5] = (unsigned char)(bits_hi & 0xFF);
+    {
+        unsigned long lo = (bl << 3) & U32M;
+        /* low 32 bits of the bit count */
+        buf[total - 4] = (unsigned char)((lo >> 24) & 0xFF);
+        buf[total - 3] = (unsigned char)((lo >> 16) & 0xFF);
+        buf[total - 2] = (unsigned char)((lo >> 8) & 0xFF);
+        buf[total - 1] = (unsigned char)(lo & 0xFF);
+    }
+    for (off = 0; off < total; off += 128) sha512_block(H, buf + off);
+    for (i = 0; i < 8; i++) {
+        unsigned long hi = u64_hi(H[i]), lo = u64_lo(H[i]);
+        int k;
+        for (k = 0; k < 4; k++) {
+            digest[8 * i + k]
+                = (unsigned char)((hi >> (24 - 8 * k)) & 0xFF);
+            digest[8 * i + 4 + k]
+                = (unsigned char)((lo >> (24 - 8 * k)) & 0xFF);
+        }
+    }
+    free(buf);
+}
+
+/* ---- instances, seeding, state ---------------------------------- */
+static Class *cls_pyrand, *cls_sysrand;
+static Value pr_inst;
+/* the instance behind the module level functions */
+static Value bi_pr_random, bi_pr_getrandbits, bi_pr_randbelow;
+static Str *S_pr_s, *S_pr_gauss, *S_pr_random, *S_pr_getrandbits,
+    *S_pr_randbelow, *S_pr_seed;
+
+/* an unsigned 32-bit word as a Python int (long may be 32 bits) */
+static Value u32v(unsigned long w)
+{
+    unsigned long d[2];
+    w &= U32M;
+    if (w <= 0x7FFFFFFFUL) return mkint((long)w);
+    d[0] = w & 0xFFFFUL; d[1] = w >> 16;
+    return int_from_bin(d, 2, 0);
+}
+static unsigned long v_u32(Value v)
+{
+    unsigned long *d, r;
+    int n;
+    if (v.t == T_BOOL) return (unsigned long)v.u.i;
+    if (v.t == T_INT && v.u.i >= 0 && (unsigned long)v.u.i <= U32M)
+        return (unsigned long)v.u.i;
+    if (v.t != T_INT && v.t != T_BIG)
+        throw_new(cls_TypeError, "state values must be integers");
+    if (int_sign(v) < 0) throw_new(cls_ValueError, "invalid state");
+    n = int_to_bin(v, &d);
+    if (n > 2) { free(d); throw_new(cls_ValueError, "invalid state"); }
+    r = (n > 0 ? d[0] : 0UL) | (n > 1 ? d[1] << 16 : 0UL);
+    free(d);
+    return r;
+}
+static void pr_seed_urandom(RG *g)
+{
+    unsigned char b[MT_N * 4];
+    unsigned long key[MT_N];
+    int i;
+    host_urandom(b, MT_N * 4);
+    for (i = 0; i < MT_N; i++)
+        key[i] = ((unsigned long)b[4 * i] << 24)
+            | ((unsigned long)b[4 * i + 1] << 16) |
+            ((unsigned long)b[4 * i + 2] << 8)
+                | (unsigned long)b[4 * i + 3];
+    mt_init_array(g->mt, key, MT_N);
+    g->mpos = MT_N;
+}
+static RG *pr_rg(Value self)
+{
+    Value *sv;
+    if (self.t != T_INST)
+        throw_new(cls_TypeError,
+        "descriptor requires a 'random.Random' object");
+    sv = amap_get(&AS_INST(self)->a, S_pr_s);
+    if (!sv) {
+        Value h;
+        VPUSH(self);
+        h = rg_holder();
+        amap_set(&AS_INST(self)->a, S_pr_s, h);
+        vsp--;
+        {
+            RG *g = (RG *)AS_ND(h)->iv;
+            g->kind = 0;
+            pr_seed_urandom(g);
+            return g;
+        }
+    }
+    return (RG *)AS_ND(*sv)->iv;
+}
+/* the key words (little endian, 32 bit) of |n| given as base 65536
+   digits */
+static long key_from_digits(const unsigned long *d, long nd,
+    unsigned long *key)
+{
+    long i, kw;
+    while (nd > 0 && d[nd - 1] == 0) nd--;
+    kw = nd == 0 ? 1 : (nd + 1) / 2;
+    for (i = 0; i < kw; i++)
+        key[i] = (2 * i < nd ? d[2 * i] : 0UL)
+            | (2 * i + 1 < nd ? d[2 * i + 1] << 16 : 0UL);
+    return kw;
+}
+static void seed_digits(RG *g, const unsigned long *d, long nd)
+{
+    unsigned long *key
+        = (unsigned long *)xmalloc(sizeof(unsigned long)
+        * (size_t)(nd / 2 + 2));
+    long kw = key_from_digits(d, nd, key);
+    mt_init_array(g->mt, key, kw);
+    g->mpos = MT_N;
+    free(key);
+}
+static void seed_int(RG *g, Value n)
+{
+    unsigned long *d;
+    int nd = int_to_bin(n, &d);
+    seed_digits(g, d, nd);
+    free(d);
+}
+/* int.from_bytes(a + sha512(a).digest()) as the seed */
+static void seed_bytes_v2(RG *g, const unsigned char *a, long len)
+{
+    unsigned char dg[64];
+    unsigned char *all = (unsigned char *)xmalloc((size_t)(len + 64));
+    unsigned long *d;
+    long total = len + 64, i;
+    sha512(a, len, dg);
+    if (len > 0) memcpy(all, a, (size_t)len);
+    memcpy(all + len, dg, 64);
+    d
+        = (unsigned long *)xmalloc(sizeof(unsigned long)
+        * (size_t)(total / 2 + 2));
+    for (i = 0; 2 * i < total; i++) {
+        unsigned long lo = all[total - 1 - 2 * i];
+        unsigned long hi = 2 * i + 1 < total ? all[total - 2 - 2 * i]
+            : 0UL;
+        d[i] = lo | (hi << 8);
+    }
+    seed_digits(g, d, (total + 1) / 2);
+    free(d);
+    free(all);
+}
+/* version 1 string seeds: the old hash, as an unsigned 64-bit number
+   */
+static void seed_str_v1(RG *g, const unsigned char *s, long len)
+{
+    u64 x = u64_ul(0UL), mask = u64_max(), mult = u64_ul(1000003UL);
+    long i = 0, cnt = 0;
+    unsigned long first = 0;
+    unsigned long *cps
+        = (unsigned long *)xmalloc(sizeof(unsigned long)
+        * (size_t)(len + 1));
+    unsigned long d[5];
+    while (i < len) {                                /* UTF-8 decode */
+        unsigned long c = s[i];
+        int extra = 0;
+        if (c >= 0xF0) { c &= 7; extra = 3; }
+        else if (c >= 0xE0) { c &= 15; extra = 2; }
+        else if (c >= 0xC0) { c &= 31; extra = 1; }
+        i++;
+        while (extra-- > 0 && i < len) c = (c << 6) | (s[i++] & 63);
+        cps[cnt++] = c;
+    }
+    if (cnt > 0) first = cps[0];
+    x = u64_shl(u64_ul(first), 7);
+    for (i = 0; i < cnt; i++)
+        x = u64_and(u64_xor(u64_mul(mult, x), u64_ul(cps[i])), mask);
+    x = u64_xor(x, u64_ul((unsigned long)cnt));
+    free(cps);
+    d[0] = u64_lo(x) & 0xFFFFUL; d[1] = u64_lo(x) >> 16;
+    d[2] = u64_hi(x) & 0xFFFFUL; d[3] = u64_hi(x) >> 16;
+    seed_digits(g, d, 4);
+}
+static void pr_seed(RG *g, Value a, int version)
+{
+    Value av = a;
+    if (av.t == T_INST && AS_INST(av)->pay.t != T_UNSET)
+        av = AS_INST(av)->pay;
+    if (av.t == T_UNSET || av.t == T_NONE) { pr_seed_urandom(g);
+        return;
+    }
+    if (version == 1 && av.t == T_STR)
+        { seed_str_v1(g, (const unsigned char *)AS_STR(av)->s,
+        AS_STR(av)->len); return; }
+    if (version == 1 && av.t == T_BYTES) {
+        /* latin-1 decoded: each byte is one character */
+        Str *s = AS_STR(av);
+        unsigned long *cp
+            = (unsigned long *)xmalloc(sizeof(unsigned long)
+            * (size_t)(s->len + 1));
+        u64 x
+            = u64_shl
+            (u64_ul(s->len > 0 ? (unsigned char)s->s[0] : 0UL), 7),
+            mask = u64_max();
+        unsigned long d[4];
+        long i;
+        for (i = 0; i < s->len; i++) cp[i] = (unsigned char)s->s[i];
+        for (i = 0; i < s->len; i++)
+            x
+                = u64_and(u64_xor(u64_mul(u64_ul(1000003UL), x),
+                u64_ul(cp[i])), mask);
+        x = u64_xor(x, u64_ul((unsigned long)s->len));
+        free(cp);
+        d[0] = u64_lo(x) & 0xFFFFUL; d[1] = u64_lo(x) >> 16;
+        d[2] = u64_hi(x) & 0xFFFFUL; d[3] = u64_hi(x) >> 16;
+        seed_digits(g, d, 4);
+        return;
+    }
+    if (av.t == T_STR || av.t == T_BYTES) {
+        seed_bytes_v2(g, (const unsigned char *)AS_STR(av)->s,
+            AS_STR(av)->len);
+        return;
+    }
+    if (av.t == T_BARR)
+        {
+        seed_bytes_v2(g, (const unsigned char *)AS_BARR(av)->s,
+        AS_BARR(av)->n);
+    return; }
+    if (av.t == T_INT || av.t == T_BIG) { seed_int(g, av); return; }
+    if (av.t == T_BOOL) { seed_int(g, mkint(av.u.i)); return; }
+    if (av.t == T_FLOAT) {
+        Value h = float_hash_exact(av.u.d);
+        /* the hash as an unsigned 64-bit number */
+        if (int_sign(h) < 0) h = int_add(h, int_pow2(64));
+        seed_int(g, h);
+        return;
+    }
+    throw_new(cls_TypeError,
+        "The only supported seed types are:\nNone, int, float, "
+            "str, bytes, and bytearray.");
+}
+
+/* ---- the three primitives, dispatched through the instance when a
+   subclass overrides them -- */
+typedef struct Rn {
+    Value self;
+    RG *g;
+    int fast;
+    /* random / getrandbits / _randbelow are the native ones */
+    Value rnd;           /* bound self.random, when not fast */
+} Rn;
+static int pr_is_native(Value self, Str *nm, Value native)
+{
+    Value *f = class_find(AS_INST(self)->cls, nm);
+    return f && f->t == T_BUILTIN && f->u.o == native.u.o;
+}
+static void rn_init(Rn *r, Value self)
+{
+    if (self.t != T_INST)
+        throw_new(cls_TypeError,
+        "descriptor requires a 'random.Random' object");
+    r->self = self;
+    r->fast = AS_INST(self)->cls == cls_pyrand ||
+        (pr_is_native(self, S_pr_random, bi_pr_random) &&
+         pr_is_native(self, S_pr_getrandbits, bi_pr_getrandbits) &&
+         pr_is_native(self, S_pr_randbelow, bi_pr_randbelow));
+    r->g = r->fast || pr_is_native(self, S_pr_random, bi_pr_random) ||
+        pr_is_native(self, S_pr_getrandbits, bi_pr_getrandbits)
+            ? pr_rg(self) : NULL;
+    r->rnd = UNSET_V;
+}
+static double rr_random(Rn *r)
+{
+    Value v;
+    if (r->g && pr_is_native(r->self, S_pr_random, bi_pr_random))
+        return rg_double(r->g);
+    if (r->rnd.t == T_UNSET) {
+        r->rnd = get_attr(r->self, S_pr_random);
+        VPUSH(r->rnd);
+    }
+    v = call0(r->rnd);
+    if (v.t != T_FLOAT && v.t != T_INT && v.t != T_BIG
+        && v.t != T_BOOL)
+        throw_new(cls_TypeError,
+            "random() must return a number, not '%.40s'",
+            type_name(v));
+    return to_dbl(v);
+}
+static double rg_rand(Rn *r) {
+    return r->fast ? rg_double(r->g) : rr_random(r);
+}
+
+/* k random bits as an integer, the way _random.Random.getrandbits
+   builds them */
+static Value gb_value(RG *g, long k)
+{
+    long words, i, nd;
+    unsigned long *d, w;
+    Value v;
+    if (k < 0)
+        throw_new(cls_ValueError,
+        "number of bits must be non-negative");
+    if (k == 0) return mkint(0);
+    if (k <= 32) {
+        w = mt_next(g) >> (32 - k);
+        return u32v(w);
+    }
+    words = (k - 1) / 32 + 1;
+    nd = 2 * words;
+    d = (unsigned long *)xmalloc(sizeof(unsigned long) * (size_t)nd);
+    for (i = 0; i < words; i++) {
+        w = mt_next(g);
+        if (k < 32) w >>= (32 - k);
+        d[2 * i] = w & 0xFFFFUL;
+        d[2 * i + 1] = w >> 16;
+        k -= 32;
+    }
+    v = int_from_bin(d, (int)nd, 0);
+    free(d);
+    return v;
+}
+static Value rr_getrandbits(Rn *r, long k)
+{
+    Value f, v;
+    if (r->g
+        && pr_is_native(r->self, S_pr_getrandbits, bi_pr_getrandbits))
+        return gb_value(r->g,
+        k);
+    f = get_attr(r->self, S_pr_getrandbits);
+    v = call1(f, mkint(k));
+    if (v.t != T_INT && v.t != T_BIG)
+        throw_new(cls_TypeError, "getrandbits() must return an int");
+    return v;
+}
+/* Random._randbelow_without_getrandbits */
+static Value below_without(Rn *r, Value nv)
+{
+    double maxsize = 9007199254740992.0, rem, limit, x;
+    if (int_cmp(nv, int_pow2(53)) >= 0)
+        return int_from_double(floor(rr_random(r) * to_dbl(nv)));
+    rem = fmod(maxsize, to_dbl(nv));
+    limit = (maxsize - rem) / maxsize;
+    x = rr_random(r);
+    while (x >= limit) x = rr_random(r);
+    return int_mod(int_from_double(floor(x * maxsize)), nv);
+}
+/* _randbelow_with_getrandbits */
+static Value below_with(Rn *r, Value nv)
+{
+    long k = int_bitlen(nv);
+    Value x = rr_getrandbits(r, k);
+    while (int_cmp(x, nv) >= 0) x = rr_getrandbits(r, k);
+    return x;
+}
+/* which algorithm Random.__init_subclass__ picks for this class: 1 =
+   getrandbits, 0 = random only,
+   -1 = a user _randbelow */
+static int below_mode(Value self)
+{
+    Class *c = AS_INST(self)->cls, *k;
+    int i = 0;
+    for (;;) {
+        if (c->mro) { if (i >= c->nmro) break; k = c->mro[i++]; }
+        else { k = c; c = c->base; if (!k) break; }
+        if (k == cls_pyrand) return 1;
+        if (amap_get(&k->ns, S_pr_randbelow)) return -1;
+        if (amap_get(&k->ns, S_pr_getrandbits)) return 1;
+        if (amap_get(&k->ns, S_pr_random)) return 0;
+        if (!c) break;
+    }
+    return 1;
+}
+static Value rr_below(Rn *r, Value nv)
+{
+    long n;
+    if (r->fast) {
+        RG *g = r->g;
+        if (nv.t == T_INT) {
+            n = nv.u.i;
+            if (n <= 0)
+                throw_new(cls_ValueError,
+                "empty range for randrange()");
+            {
+                long k = int_bitlen(nv);
+                if (k <= 32) {
+                    unsigned long x = mt_next(g) >> (32 - k);
+                    while (x >= (unsigned long)n) x = mt_next(g)
+                        >> (32 - k);
+                    return mkint((long)x);
+                } else {
+                    u64 lim = u64_l(n), x;
+                    for (;;) {
+                        unsigned long lo = mt_next(g),
+                            hi = mt_next(g) >> (32 - (k - 32));
+                        x = u64_c(hi, lo);
+                        if (u64_lt(x, lim)) return mkint(u64_tol(x));
+                    }
+                }
+            }
+        }
+        if (int_sign(nv) <= 0)
+            throw_new(cls_ValueError, "empty range for randrange()");
+        return below_with(r, nv);
+    }
+    {
+        int mode = below_mode(r->self);
+        if (mode < 0) {
+            Value *f = class_find(AS_INST(r->self)->cls,
+                S_pr_randbelow);
+            if (f
+                && !(f->t == T_BUILTIN
+                && f->u.o == bi_pr_randbelow.u.o))
+                return call1(get_attr(r->self, S_pr_randbelow), nv);
+        }
+        if (int_sign(nv) <= 0)
+            throw_new(cls_ValueError, "empty range for randrange()");
+        return mode == 0 ? below_without(r, nv) : below_with(r, nv);
+    }
+}
+
+/* ---- argument and arithmetic helpers ---------------------------- */
+#define HAS(v) ((v).t != T_UNSET)
+#define NOARG(v) ((v).t == T_UNSET || (v).t == T_NONE)
+static int is_intlike(Value v)
+{
+    return v.t == T_INT || v.t == T_BIG || v.t == T_BOOL ||
+        (v.t == T_INST
+            && (AS_INST(v)->pay.t == T_INT
+            || AS_INST(v)->pay.t == T_BIG));
+}
+/* operator.index(v) with CPython's message */
+static Value idx_of(Value v)
+{
+    if (v.t == T_INST && AS_INST(v)->pay.t != T_INT
+        && AS_INST(v)->pay.t != T_BIG &&
+        !class_find(AS_INST(v)->cls, S_index))
+        throw_new(cls_TypeError,
+            "'%.40s' object cannot be interpreted as an integer",
+            type_name(v));
+    if (v.t != T_INT && v.t != T_BIG && v.t != T_BOOL && v.t != T_INST)
+        throw_new(cls_TypeError,
+            "'%.40s' object cannot be interpreted as an integer",
+            type_name(v));
+    return need_intv(v, "value");
+}
+static double dnum(Value v)
+{
+    if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET) v = AS_INST(v)
+        ->pay;
+    if (v.t != T_INT && v.t != T_BIG && v.t != T_BOOL
+        && v.t != T_FLOAT)
+        throw_new(cls_TypeError, "must be real number, not %.40s",
+            type_name(v));
+    return to_dbl(v);
+}
+static double fdiv0(double a, double b)
+{
+    if (b == 0.0)
+        throw_new(cls_ZeroDivisionError, "float division by zero");
+    return a / b;
+}
+static double fpow(double x, double y)
+{
+    double r;
+    if (x == 0.0 && y < 0.0) throw_new(cls_ZeroDivisionError,
+        "0.0 cannot be raised to a negative power");
+    r = pow(x, y);
+    if ((r == HUGE_VAL || r == -HUGE_VAL) && x - x == 0.0
+        && y - y == 0.0)
+        throw_new(cls_OverflowError,
+            "(34, 'Numerical result out of range')");
+    return r;
+}
+static double flog(double x)
+{
+    if (x <= 0.0) throw_new(cls_ValueError, "math domain error");
+    return log(x);
+}
+static double fmodpy(double a, double b)
+{
+    double m;
+    if (b == 0.0)
+        throw_new(cls_ZeroDivisionError, "float modulo by zero");
+    m = fmod(a, b);
+    if (m != 0.0) { if ((b < 0.0) != (m < 0.0)) m += b; }
+    else m = b < 0.0 ? -0.0 : 0.0;
+    return m;
+}
+/* a - b the way Python subtracts two numbers: exactly for ints, then
+   converted */
+static double dsub(Value a, Value b)
+{
+    if (is_intlike(a) && is_intlike(b))
+        return to_dbl(int_sub(idx_of(a), idx_of(b)));
+    return dnum(a) - dnum(b);
+}
+static Value rarg_n(Args *x, int off, int pos, const char *nm)
+{
+    if (pos < x->n - off) return x->a[off + pos];
+    return kwget(x, nm);
+}
+#define ARG(i, nm) rarg_n(x, off, (i), (nm))
+static Value need_arg(Args *x, int off, int pos, const char *nm,
+    const char *fname)
+{
+    Value v = ARG(pos, nm);
+    if (!HAS(v))
+        throw_new(cls_TypeError,
+        "%s() missing required argument: '%s'", fname, nm);
+    return v;
+}
+#define ARGD(var, i, nm, fname) var \
+    = dnum(need_arg(x, off, (i), (nm), (fname)))
+
+/* ---- seed / state / primitives ---------------------------------- */
+static void set_gauss_next(Value self, Value v) {
+    amap_set(&AS_INST(self)->a, S_pr_gauss, v);
+}
+static Value get_gauss_next(Value self)
+{
+    Value *p = amap_get(&AS_INST(self)->a, S_pr_gauss);
+    return p ? *p : NONE_V;
+}
+static Value pyf_seed(Value self, Args *x, int off)
+{
+    Value a = ARG(0, "a"), ver = ARG(1, "version");
+    int version = 2;
+    RG *g;
+    if (HAS(ver)) version = (int)need_long(ver, "version");
+    g = pr_rg(self);
+    pr_seed(g, a, version);
+    set_gauss_next(self, NONE_V);
+    return NONE_V;
+}
+static Value pyf_getstate(Value self, Args *x, int off)
+{
+    RG *g = pr_rg(self);
+    List *t = tuple_new(MT_N + 1);
+    Value parts[3];
+    int i;
+    (void)x; (void)off;
+    for (i = 0; i < MT_N; i++) t->a[i] = u32v(g->mt[i]);
+    t->a[MT_N] = mkint((long)g->mpos);
+    parts[0] = mkint(3);
+    parts[1] = mkobj(t, T_TUPLE);
+    parts[2] = get_gauss_next(self);
+    return mktuple_from(parts, 3);
+}
+static Value pyf_setstate(Value self, Args *x, int off)
+{
+    Value st = need_arg(x, off, 0, "state", "setstate"), ver, internal;
+    RG *g = pr_rg(self);
+    long version, i;
+    unsigned long w[MT_N];
+    List *t;
+    if (st.t != T_TUPLE && st.t != T_LIST)
+        throw_new(cls_TypeError, "'%.40s' object is not subscriptable",
+            type_name(st));
+    if (AS_LIST(st)->n < 1)
+        throw_new(cls_IndexError, "tuple index out of range");
+    ver = AS_LIST(st)->a[0];
+    version = is_intlike(ver) ? need_long(ver, "version") : -1;
+    if (version != 3 && version != 2)
+        throw_new(cls_ValueError,
+            "state with version %s passed to Random.setstate() of "
+            "version 3",
+                  AS_STR(py_str(ver))->s);
+    if (AS_LIST(st)->n != 3)
+        throw_new(cls_ValueError,
+            AS_LIST(st)->n > 3
+            ? "too many values to unpack (expected 3)" :
+                  "not enough values to unpack (expected 3, "
+                      "got %d)", (int)AS_LIST(st)->n);
+    internal = AS_LIST(st)->a[1];
+    if (internal.t != T_TUPLE)
+        throw_new(cls_TypeError, "state vector must be a tuple");
+    t = AS_LIST(internal);
+    if (t->n != MT_N + 1)
+        throw_new(cls_ValueError, "state vector is the wrong size");
+    for (i = 0; i < MT_N; i++) {
+        Value e = t->a[i];
+        if (version == 2 && is_intlike(e)) {
+            Value m = int_mod(idx_of(e), int_pow2(32));
+            w[i] = v_u32(m);
+        } else w[i] = v_u32(e);
+    }
+    {
+        Value iv = t->a[MT_N];
+        long idx;
+        if (!is_intlike(iv))
+            throw_new(cls_TypeError,
+            "state vector items must be integers");
+        idx = need_long(iv, "index");
+        if (idx < 0 || idx > MT_N)
+            throw_new(cls_ValueError, "invalid state");
+        for (i = 0; i < MT_N; i++) g->mt[i] = w[i];
+        g->mpos = (int)idx;
+    }
+    set_gauss_next(self, AS_LIST(st)->a[2]);
+    return NONE_V;
+}
+static Value pyf_random(Value self, Args *x, int off)
+{
+    (void)x; (void)off;
+    return mkfloat(rg_double(pr_rg(self)));
+}
+static Value pyf_getrandbits(Value self, Args *x, int off)
+{
+    Value kv = need_arg(x, off, 0, "k", "getrandbits");
+    return gb_value(pr_rg(self), need_long(idx_of(kv), "k"));
+}
+static Value pyf_randbytes(Value self, Args *x, int off)
+{
+    Rn r;
+    Value nv = need_arg(x, off, 0, "n", "randbytes");
+    long n = need_long(idx_of(nv), "n"), i;
+    Value bits;
+    unsigned char *buf;
+    Value res;
+    rn_init(&r, self);
+    if (n < 0)
+        throw_new(cls_ValueError,
+        "number of bits must be non-negative");
+    if (r.g && pr_is_native(self, S_pr_getrandbits, bi_pr_getrandbits))
+        {
+        long k = n * 8, words, j;
+        RG *g = r.g;
+        buf = (unsigned char *)xmalloc((size_t)(n + 8));
+        words = k == 0 ? 0 : (k - 1) / 32 + 1;
+        for (i = 0; i < words; i++) {
+            unsigned long w = mt_next(g);
+            if (k < 32) w >>= (32 - k);
+            for (j = 0; j < 4 &&
+                4 * i + j < n;
+                j++) buf[4 * i + j]
+                    = (unsigned char)((w >> (8 * j)) & 0xFF);
+            k -= 32;
+        }
+        res = mkbytes((const char *)buf, n);
+        free(buf);
+        return res;
+    }
+    bits = rr_getrandbits(&r, n * 8);
+    {
+        unsigned long *d;
+        int nd = int_to_bin(bits, &d);
+        buf = (unsigned char *)xmalloc((size_t)(n + 2));
+        memset(buf, 0, (size_t)(n + 2));
+        for (i = 0; i < nd && 2 * i < n; i++) {
+            buf[2 * i] = (unsigned char)(d[i] & 0xFF);
+            if (2 * i + 1 < n) buf[2 * i + 1] = (unsigned char)
+                ((d[i] >> 8) & 0xFF);
+        }
+        free(d);
+        res = mkbytes((const char *)buf, n);
+        free(buf);
+        return res;
+    }
+}
+static Value pyf_randbelow(Value self, Args *x, int off)
+{
+    Rn r;
+    Value nv = idx_of(need_arg(x, off, 0, "n", "_randbelow"));
+    rn_init(&r, self);
+    if (int_sign(nv) <= 0)
+        throw_new(cls_ValueError, "empty range for randrange()");
+    r.fast = r.g != NULL
+        && pr_is_native(self, S_pr_getrandbits, bi_pr_getrandbits);
+    if (r.fast) return rr_below(&r, nv);
+    return below_with(&r, nv);
+}
+
+/* ---- integers --------------------------------------------------- */
+#define SMALLI(v) ((v).t == T_INT && (v).u.i > -1000000000L \
+    && (v).u.i < 1000000000L)
+static Value pyf_randrange(Value self, Args *x, int off)
+{
+    Rn r;
+    Value start = need_arg(x, off, 0, "start", "randrange"),
+        stop = ARG(1, "stop"),
+        step = ARG(2, "step"), istart, istop, istep, width, n = NONE_V;
+    rn_init(&r, self);
+    istart = idx_of(start);
+    if (NOARG(stop)) {
+        if (HAS(step) && !(step.t == T_INT && step.u.i == 1))
+            throw_new(cls_TypeError,
+                "Missing a non-None stop argument");
+        if (int_sign(istart) > 0) return rr_below(&r, istart);
+        throw_new(cls_ValueError, "empty range for randrange()");
+    }
+    istop = idx_of(stop);
+    if (SMALLI(istart) && SMALLI(istop)
+        && (!HAS(step) || (step.t == T_INT && step.u.i == 1))) {
+        long w = istop.u.i - istart.u.i;
+        if (w > 0)
+            return mkint(istart.u.i + rr_below(&r, mkint(w)).u.i);
+        throw_new(cls_ValueError, "empty range in randrange(%s, %s)",
+            AS_STR(py_str(start))->s,
+                  AS_STR(py_str(stop))->s);
+    }
+    width = int_sub(istop, istart);
+    istep = HAS(step) ? idx_of(step) : mkint(1);
+    if (istep.t == T_INT && istep.u.i == 1) {
+        if (int_sign(width) > 0)
+            return int_add(istart, rr_below(&r, width));
+        throw_new(cls_ValueError, "empty range in randrange(%s, %s)",
+            AS_STR(py_str(start))->s,
+                  AS_STR(py_str(stop))->s);
+    }
+    if (int_sign(istep) > 0)
+        n = int_floordiv(int_sub(int_add(width, istep), mkint(1)),
+        istep);
+    else if (int_sign(istep) < 0)
+        n = int_floordiv(int_add(int_add(width, istep), mkint(1)),
+        istep);
+    else throw_new(cls_ValueError, "zero step for randrange()");
+    if (int_sign(n) <= 0)
+        throw_new(cls_ValueError,
+            "empty range in randrange(%s, %s, %s)",
+            AS_STR(py_str(start))->s,
+                  AS_STR(py_str(stop))->s, AS_STR(py_str(step))->s);
+    return int_add(istart, int_mul(istep, rr_below(&r, n)));
+}
+static Value pyf_randint(Value self, Args *x, int off)
+{
+    Value a = need_arg(x, off, 0, "a", "randint"),
+        b = need_arg(x, off, 1, "b", "randint");
+    Rn r;
+    Value ia, ib;
+    rn_init(&r, self);
+    ib = int_add(idx_of(b), mkint(1));
+    ia = idx_of(a);
+    if (int_cmp(ib, ia) <= 0)
+        throw_new(cls_ValueError, "empty range in randrange(%s, %s)",
+            AS_STR(py_str(a))->s,
+                  AS_STR(py_str(ib))->s);
+    return int_add(ia, rr_below(&r, int_sub(ib, ia)));
+}
+
+/* ---- sequences -------------------------------------------------- */
+static Value seq_get(Value seq, long i)
+{
+    if (seq.t == T_LIST || seq.t == T_TUPLE) {
+        if (i < 0 || i >= AS_LIST(seq)->n)
+            throw_new(cls_IndexError, "list index out of range");
+        return AS_LIST(seq)->a[i];
+    }
+    return subscr(seq, mkint(i));
+}
+static Value pyf_choice(Value self, Args *x, int off)
+{
+    Rn r;
+    Value seq = need_arg(x, off, 0, "seq", "choice"), idx;
+    long n;
+    rn_init(&r, self);
+    n = py_len(seq);
+    if (n == 0)
+        throw_new(cls_IndexError,
+        "Cannot choose from an empty sequence");
+    idx = rr_below(&r, mkint(n));
+    return seq.t == T_LIST
+        || seq.t == T_TUPLE ? seq_get(seq, idx.u.i) : subscr(seq, idx);
+}
+static Value pyf_shuffle(Value self, Args *x, int off)
+{
+    Rn r;
+    Value seq = need_arg(x, off, 0, "x", "shuffle");
+    long n, i, j;
+    rn_init(&r, self);
+    n = py_len(seq);
+    for (i = n - 1; i >= 1; i--) {
+        j = rr_below(&r, mkint(i + 1)).u.i;
+        if (seq.t == T_LIST) {
+            List *l = AS_LIST(seq);
+            Value t;
+            if (i >= l->n || j >= l->n)
+                throw_new(cls_IndexError, "list index out of range");
+            t = l->a[i]; l->a[i] = l->a[j]; l->a[j] = t;
+        } else {
+            Value a = subscr(seq, mkint(i)), b = subscr(seq, mkint(j));
+            VPUSH(a); VPUSH(b);
+            setitem(seq, mkint(i), b);
+            setitem(seq, mkint(j), a);
+            vsp -= 2;
+        }
+    }
+    return NONE_V;
+}
+static int is_sequence(Value v)
+{
+    switch (v.t) {
+    case T_LIST: case T_TUPLE: case T_STR: case T_BYTES: case T_BARR
+        : case T_RANGE: return 1;
+    case T_INST:
+        return class_find(AS_INST(v)->cls, intern_c("__getitem__"))
+            != NULL &&
+            class_find(AS_INST(v)->cls, intern_c("__len__")) != NULL &&
+            !(AS_INST(v)->pay.t == T_DICT
+                || AS_INST(v)->pay.t == T_SET);
+    default: return 0;
+    }
+}
+/* k distinct indices from range(n), in selection order (the pool / set
+   algorithm of sample) */
+static long *sample_idx(Rn *r, long n, long k)
+{
+    long *res = (long *)xmalloc(sizeof(long) * (size_t)(k + 1)),
+        setsize = 21, i, j;
+    if (k > 5) {
+        double lg = ceil(log((double)k * 3.0) / log(4.0));
+        long p = 1, e;
+        for (e = 0; e < (long)lg; e++) p *= 4;
+        setsize += p;
+    }
+    if (n <= setsize) {
+        long *pool = (long *)xmalloc(sizeof(long) * (size_t)(n + 1));
+        for (i = 0; i < n; i++) pool[i] = i;
+        for (i = 0; i < k; i++) {
+            j = rr_below(r, mkint(n - i)).u.i;
+            res[i] = pool[j];
+            pool[j] = pool[n - i - 1];
+        }
+        free(pool);
+    } else {
+        unsigned long cap = 16, mask;
+        long *hs;
+        while (cap < (unsigned long)k * 3UL) cap <<= 1;
+        mask = cap - 1;
+        hs = (long *)xmalloc(sizeof(long) * (size_t)cap);
+        for (i = 0; i < (long)cap; i++) hs[i] = -1;
+        for (i = 0; i < k; i++) {
+            for (;;) {
+                unsigned long h;
+                j = rr_below(r, mkint(n)).u.i;
+                h = (unsigned long)j * 2654435761UL & mask;
+                while (hs[h] != -1 && hs[h] != j) h = (h + 1UL) & mask;
+                if (hs[h] == j) continue;
+                hs[h] = j;
+                break;
+            }
+            res[i] = j;
+        }
+        free(hs);
+    }
+    return res;
+}
+static Value pyf_sample(Value self, Args *x, int off)
+{
+    Rn r;
+    Value pop = need_arg(x, off, 0, "population", "sample"),
+        kv = ARG(1, "k"), counts = kwget(x,
+        "counts");
+    long n, k, i, *idx;
+    List *out;
+    rn_init(&r, self);
+    if (!HAS(kv)) throw_new(cls_TypeError,
+        "Random.sample() missing 1 required positional argument: 'k'");
+    if (!is_sequence(pop))
+        throw_new(cls_TypeError,
+            "Population must be a sequence.  For dicts or "
+                "sets, use sorted(d).");
+    n = py_len(pop);
+    if (HAS(counts) && counts.t != T_NONE) {
+        Value cl = iter_to_list(counts), total;
+        long m = AS_LIST(cl)->n;
+        Value *cum;
+        long *sel, tot;
+        if (m != n)
+            throw_new(cls_ValueError,
+            "The number of counts does not match the population");
+        cum = (Value *)xmalloc(sizeof(Value) * (size_t)(m + 1));
+        VPUSH(cl);
+        total = mkint(0);
+        for (i = 0; i < m; i++) {
+            Value c = AS_LIST(cl)->a[i];
+            if (i == 0) total = c; else total = is_intlike(total) &&
+                is_intlike(c) ? int_add(idx_of(total), idx_of(c))
+                    : mkfloat(dnum(total) + dnum(c));
+            cum[i] = total;
+        }
+        vsp--;
+        if (m == 0) total = mkint(0);
+        if (!is_intlike(total)) { free(cum);
+            throw_new(cls_TypeError, "Counts must be integers");
+        }
+        if (int_sign(idx_of(total)) < 0) { free(cum);
+            throw_new(cls_ValueError,
+            "Counts must be non-negative"); }
+        tot = need_long(total, "total");
+        k = need_long(idx_of(kv), "k");
+        if (k < 0 || k > tot) { free(cum); throw_new(cls_ValueError,
+            "Sample larger than population or is negative"); }
+        sel = sample_idx(&r, tot, k);
+        out = list_new(k);
+        VPUSH(mklist(out));
+        for (i = 0; i < k; i++) {
+            long lo = 0, hi = m > 0 ? m - 1 : 0;
+            /* bisect_right(cum_counts, s) over cum_counts[:-1] */
+            while (lo < hi) {
+                long mid = (lo + hi) / 2;
+                if (dnum(mkint(sel[i])) < dnum(cum[mid])) hi = mid;
+                else lo = mid + 1;
+            }
+            list_push(out, seq_get(pop, lo));
+        }
+        vsp--;
+        free(sel); free(cum);
+        return mklist(out);
+    }
+    k = need_long(idx_of(kv), "k");
+    if (k < 0 || k > n)
+        throw_new(cls_ValueError,
+        "Sample larger than population or is negative");
+    idx = sample_idx(&r, n, k);
+    out = list_new(k);
+    VPUSH(mklist(out));
+    for (i = 0; i < k; i++) list_push(out, seq_get(pop, idx[i]));
+    vsp--;
+    free(idx);
+    return mklist(out);
+}
+static Value pyf_choices(Value self, Args *x, int off)
+{
+    Rn r;
+    Value pop = need_arg(x, off, 0, "population", "choices"),
+        weights = ARG(1, "weights"),
+        cumw = kwget(x, "cum_weights"), kv = kwget(x, "k");
+    long n, k = 1, i;
+    List *out;
+    double total;
+    double *cw = NULL;
+    rn_init(&r, self);
+    if (x->n - off > 2)
+        throw_new(cls_TypeError,
+            "choices() takes from 2 to 3 positional arguments "
+                "but %d were given", x->n - off + 1);
+    if (HAS(kv)) k = need_long(idx_of(kv), "k");
+    n = py_len(pop);
+    out = list_new(k > 0 ? k : 0);
+    VPUSH(mklist(out));
+    if (NOARG(cumw)) {
+        if (NOARG(weights)) {
+            double nf = (double)n + 0.0;
+            for (i = 0; i < k; i++) {
+                double u = rg_rand(&r) * nf;
+                list_push(out, seq_get(pop, (long)floor(u)));
+            }
+            vsp--;
+            return mklist(out);
+        }
+        {
+            Value wl;
+            long m, j;
+            if (is_intlike(weights) && weights.t != T_INST) {
+                throw_new(cls_TypeError,
+                    "The number of choices must be a keyword "
+                    "argument: k=%s",
+                          AS_STR(py_str(weights))->s);
+            }
+            wl = iter_to_list(weights);
+            m = AS_LIST(wl)->n;
+            cw = (double *)xmalloc(sizeof(double) * (size_t)(m + 1));
+            {
+                Value acc = mkint(0);
+                for (j = 0; j < m; j++) {
+                    Value c = AS_LIST(wl)->a[j];
+                    if (j == 0) acc = c;
+                    else if (is_intlike(acc) && is_intlike(c))
+                        acc = int_add(idx_of(acc),
+                        idx_of(c));
+                    else acc = mkfloat(dnum(acc) + dnum(c));
+                    cw[j] = dnum(acc);
+                }
+            }
+            if (m != n) { free(cw); throw_new(cls_ValueError,
+                "The number of weights does not match the "
+                    "population"); }
+        }
+    } else {
+        Value wl;
+        long m, j;
+        if (!NOARG(weights)) throw_new(cls_TypeError,
+            "Cannot specify both weights and cumulative weights");
+        wl = iter_to_list(cumw);
+        m = AS_LIST(wl)->n;
+        cw = (double *)xmalloc(sizeof(double) * (size_t)(m + 1));
+        for (j = 0; j < m; j++) cw[j] = dnum(AS_LIST(wl)->a[j]);
+        if (m != n) { free(cw); throw_new(cls_ValueError,
+            "The number of weights does not match the population"); }
+    }
+    total = (n > 0 ? cw[n - 1] : 0.0) + 0.0;
+    if (n == 0) { free(cw);
+        throw_new(cls_IndexError, "list index out of range");
+    }
+    if (total <= 0.0) { free(cw); throw_new(cls_ValueError,
+        "Total of weights must be greater than zero"); }
+    if (total - total != 0.0) { free(cw); throw_new(cls_ValueError,
+        "Total of weights must be finite"); }
+    for (i = 0; i < k; i++) {
+        double t = rg_rand(&r) * total;
+        long lo = 0, hi = n - 1;
+        while (lo < hi) {
+            long mid = (lo + hi) / 2;
+            if (t < cw[mid]) hi = mid; else lo = mid + 1;
+        }
+        list_push(out, seq_get(pop, lo));
+    }
+    free(cw);
+    vsp--;
+    return mklist(out);
+}
+
+/* ---- real-valued distributions ---------------------------------- */
+#define TWOPI_C (2.0 * 3.14159265358979323846)
+static double nv_magic(void) { return 4.0 * exp(-0.5) / sqrt(2.0); }
+static Value pyf_uniform(Value self, Args *x, int off)
+{
+    Rn r;
+    Value a = need_arg(x, off, 0, "a", "uniform"),
+        b = need_arg(x, off, 1, "b", "uniform");
+    double d;
+    rn_init(&r, self);
+    d = dsub(b, a);
+    return mkfloat(dnum(a) + d * rg_rand(&r));
+}
+static Value pyf_triangular(Value self, Args *x, int off)
+{
+    Rn r;
+    Value lo = ARG(0, "low"), hi = ARG(1, "high"),
+        mode = ARG(2, "mode");
+    double u, c, l, h;
+    Value lov;
+    rn_init(&r, self);
+    lov = HAS(lo) ? lo : mkfloat(0.0);
+    if (!HAS(hi)) hi = mkfloat(1.0);
+    u = rg_rand(&r);
+    if (NOARG(mode)) c = 0.5;
+    else {
+        double den = dsub(hi, lov);
+        if (den == 0.0) return lov;
+        c = dsub(mode, lov) / den;
+    }
+    l = dnum(lov); h = dnum(hi);
+    if (u > c) {
+        double t;
+        u = 1.0 - u;
+        c = 1.0 - c;
+        t = l; l = h; h = t;
+    }
+    return mkfloat(l + (h - l) * sqrt(u * c));
+}
+static double normalvariate_d(Rn *r, double mu, double sigma)
+{
+    double u1, u2, z, zz, magic = nv_magic();
+    for (;;) {
+        u1 = rg_rand(r);
+        u2 = 1.0 - rg_rand(r);
+        z = magic * (u1 - 0.5) / u2;
+        zz = z * z / 4.0;
+        if (zz <= -flog(u2)) break;
+    }
+    return mu + z * sigma;
+}
+static Value pyf_normalvariate(Value self, Args *x, int off)
+{
+    Rn r;
+    Value m = ARG(0, "mu"), s = ARG(1, "sigma");
+    rn_init(&r, self);
+    return mkfloat(normalvariate_d(&r, HAS(m) ? dnum(m) : 0.0,
+        HAS(s) ? dnum(s) : 1.0));
+}
+static Value pyf_gauss(Value self, Args *x, int off)
+{
+    Rn r;
+    Value m = ARG(0, "mu"), s = ARG(1, "sigma"), zv;
+    double mu, sigma, z;
+    rn_init(&r, self);
+    mu = HAS(m) ? dnum(m) : 0.0;
+    sigma = HAS(s) ? dnum(s) : 1.0;
+    zv = get_gauss_next(self);
+    set_gauss_next(self, NONE_V);
+    if (zv.t == T_NONE || zv.t == T_UNSET) {
+        double x2pi = rg_rand(&r) * TWOPI_C, g2rad;
+        g2rad = sqrt(-2.0 * flog(1.0 - rg_rand(&r)));
+        z = cos(x2pi) * g2rad;
+        set_gauss_next(self, mkfloat(sin(x2pi) * g2rad));
+    } else z = dnum(zv);
+    return mkfloat(mu + z * sigma);
+}
+static Value pyf_lognormvariate(Value self, Args *x, int off)
+{
+    Rn r;
+    Value m = need_arg(x, off, 0, "mu", "lognormvariate"),
+        s = need_arg(x, off, 1, "sigma",
+        "lognormvariate");
+    double v;
+    rn_init(&r, self);
+    v = normalvariate_d(&r, dnum(m), dnum(s));
+    return mkfloat(exp(v));
+}
+static Value pyf_expovariate(Value self, Args *x, int off)
+{
+    Rn r;
+    Value l = ARG(0, "lambd");
+    double lambd = HAS(l) ? dnum(l) : 1.0;
+    rn_init(&r, self);
+    return mkfloat(fdiv0(-flog(1.0 - rg_rand(&r)), lambd));
+}
+static Value pyf_vonmises(Value self, Args *x, int off)
+{
+    Rn r;
+    double mu, kappa, s, rr, u1, u2, u3, z, d, q, f, theta;
+    ARGD(mu, 0, "mu", "vonmisesvariate");
+    ARGD(kappa, 1, "kappa", "vonmisesvariate");
+    rn_init(&r, self);
+    if (kappa <= 1e-6) return mkfloat(TWOPI_C * rg_rand(&r));
+    s = 0.5 / kappa;
+    rr = s + sqrt(1.0 + s * s);
+    for (;;) {
+        u1 = rg_rand(&r);
+        z = cos(3.14159265358979323846 * u1);
+        d = z / (rr + z);
+        u2 = rg_rand(&r);
+        if (u2 < 1.0 - d * d || u2 <= (1.0 - d) * exp(d)) break;
+    }
+    q = 1.0 / rr;
+    f = (q + z) / (1.0 + q * z);
+    u3 = rg_rand(&r);
+    if (f > 1.0 || f < -1.0)
+        throw_new(cls_ValueError, "math domain error");
+    if (u3 > 0.5) theta = fmodpy(mu + acos(f), TWOPI_C);
+    else theta = fmodpy(mu - acos(f), TWOPI_C);
+    return mkfloat(theta);
+}
+static double gammavariate_d(Rn *r, double alpha, double beta)
+{
+    double ainv, bbb, ccc, u1, u2, v, xx, z, rr, u, b, p,
+        e = 2.71828182845904523536;
+    if (alpha <= 0.0 || beta <= 0.0)
+        throw_new(cls_ValueError,
+            "gammavariate: alpha and beta must be > 0.0");
+    if (alpha > 1.0) {
+        ainv = sqrt(2.0 * alpha - 1.0);
+        bbb = alpha - log(4.0);
+        ccc = alpha + ainv;
+        for (;;) {
+            u1 = rg_rand(r);
+            if (!(1e-7 < u1 && u1 < 0.9999999)) continue;
+            u2 = 1.0 - rg_rand(r);
+            v = flog(fdiv0(u1, 1.0 - u1)) / ainv;
+            xx = alpha * exp(v);
+            z = u1 * u1 * u2;
+            rr = bbb + ccc * v - xx;
+            if (rr + (1.0 + log(4.5)) - 4.5 * z >= 0.0
+                || rr >= flog(z)) return xx * beta;
+        }
+    } else if (alpha == 1.0) {
+        return -flog(1.0 - rg_rand(r)) * beta;
+    }
+    for (;;) {
+        u = rg_rand(r);
+        b = (e + alpha) / e;
+        p = b * u;
+        if (p <= 1.0) xx = fpow(p, 1.0 / alpha);
+        else xx = -flog((b - p) / alpha);
+        u1 = rg_rand(r);
+        if (p > 1.0) {
+            if (u1 <= fpow(xx, alpha - 1.0)) break;
+        } else if (u1 <= exp(-xx)) break;
+    }
+    return xx * beta;
+}
+static Value pyf_gammavariate(Value self, Args *x, int off)
+{
+    Rn r;
+    double a, b;
+    ARGD(a, 0, "alpha", "gammavariate");
+    ARGD(b, 1, "beta", "gammavariate");
+    rn_init(&r, self);
+    return mkfloat(gammavariate_d(&r, a, b));
+}
+static Value pyf_betavariate(Value self, Args *x, int off)
+{
+    Rn r;
+    double a, b, y;
+    ARGD(a, 0, "alpha", "betavariate");
+    ARGD(b, 1, "beta", "betavariate");
+    rn_init(&r, self);
+    y = gammavariate_d(&r, a, 1.0);
+    if (y != 0.0) return mkfloat(y / (y + gammavariate_d(&r, b, 1.0)));
+    return mkfloat(0.0);
+}
+static Value pyf_paretovariate(Value self, Args *x, int off)
+{
+    Rn r;
+    double a, u;
+    ARGD(a, 0, "alpha", "paretovariate");
+    rn_init(&r, self);
+    u = 1.0 - rg_rand(&r);
+    return mkfloat(fpow(u, fdiv0(-1.0, a)));
+}
+static Value pyf_weibullvariate(Value self, Args *x, int off)
+{
+    Rn r;
+    double a, b, u;
+    ARGD(a, 0, "alpha", "weibullvariate");
+    ARGD(b, 1, "beta", "weibullvariate");
+    rn_init(&r, self);
+    u = 1.0 - rg_rand(&r);
+    return mkfloat(a * fpow(-flog(u), fdiv0(1.0, b)));
+}
+static Value pyf_binomialvariate(Value self, Args *x, int off)
+{
+    Rn r;
+    Value nv = ARG(0, "n"), pv = ARG(1, "p");
+    long n, k, m = 0, sub = 0;
+    double p, spq, b, a, c, vr, u, us, v, alpha = 0.0, lpq = 0.0,
+        h = 0.0;
+    int setup = 0;
+    rn_init(&r, self);
+    n = HAS(nv) ? need_long(idx_of(nv), "n") : 1;
+    p = HAS(pv) ? dnum(pv) : 0.5;
+    if (n < 0) throw_new(cls_ValueError, "n must be non-negative");
+    if (p <= 0.0 || p >= 1.0) {
+        if (p == 0.0) return mkint(0);
+        if (p == 1.0) return mkint(n);
+        throw_new(cls_ValueError,
+            "p must be in the range 0.0 <= p <= 1.0");
+    }
+    if (n == 1) return mkint(rg_rand(&r) < p ? 1 : 0);
+    if (p > 0.5) { sub = 1; p = 1.0 - p; }
+    if ((double)n * p < 10.0) {
+        long xx = 0, y = 0;
+        double c2 = log2_d(1.0 - p);
+        if (c2 == 0.0) return mkint(sub ? n - xx : xx);
+        for (;;) {
+            double rv = rg_rand(&r);
+            if (rv <= 0.0) continue;
+            y += (long)floor(log2_d(rv) / c2) + 1;
+            if (y > n) return mkint(sub ? n - xx : xx);
+            xx++;
+        }
+    }
+    spq = sqrt((double)n * p * (1.0 - p));
+    b = 1.15 + 2.53 * spq;
+    a = -0.0873 + 0.0248 * b + 0.01 * p;
+    c = (double)n * p + 0.5;
+    vr = 0.92 - 4.2 / b;
+    for (;;) {
+        u = rg_rand(&r);
+        u -= 0.5;
+        us = 0.5 - fabs(u);
+        if (us == 0.0) continue;
+        k = (long)floor((2.0 * a / us + b) * u + c);
+        if (k < 0 || k > n) continue;
+        v = rg_rand(&r);
+        if (us >= 0.07 && v <= vr) return mkint(sub ? n - k : k);
+        if (!setup) {
+            alpha = (2.83 + 5.1 / b) * spq;
+            lpq = flog(p / (1.0 - p));
+            m = (long)floor((double)(n + 1) * p);
+            h = d_lgamma((double)m + 1.0)
+                + d_lgamma((double)(n - m) + 1.0);
+            setup = 1;
+        }
+        v *= alpha / (a / (us * us) + b);
+        if (flog(v) <= h - d_lgamma((double)k + 1.0)
+            - d_lgamma((double)(n - k) + 1.0) +
+            (double)(k - m) * lpq)
+            return mkint(sub ? n - k : k);
+    }
+}
+
+/* ---- __init__, SystemRandom, registration ----------------------- */
+BI(pr_init)
+{
+    Value seedf, xv;
+    if (x->n < 1 || A(0).t != T_INST) throw_new(cls_TypeError,
+        "descriptor '__init__' requires a 'random.Random' object");
+    xv = x->n > 1 ? A(1) : kwget(x, "x");
+    if (x->n > 2)
+        throw_new(cls_TypeError,
+        "Random() takes at most 1 argument (%d given)",
+        x->n - 1);
+    seedf = get_attr(A(0), S_pr_seed);
+    VPUSH(seedf);
+    call1(seedf, HAS(xv) ? xv : NONE_V);
+    vsp--;
+    set_gauss_next(A(0), NONE_V);
+    return NONE_V;
+}
+static double sys_random(void)
+{
+    unsigned char b[7];
+    unsigned long hi, lo;
+    host_urandom(b, 7);
+    hi = ((unsigned long)b[0] << 16) | ((unsigned long)b[1] << 8)
+        | (unsigned long)b[2];
+    lo = ((unsigned long)b[3] << 24) | ((unsigned long)b[4] << 16) |
+        ((unsigned long)b[5] << 8) | (unsigned long)b[6];
+    /* int.from_bytes(urandom(7), 'big') >> 3: a 53-bit integer */
+    return floor(((double)hi * 4294967296.0 + (double)lo) / 8.0)
+        * (1.0 / 9007199254740992.0);
+}
+BI(sr_random) { (void)x; return mkfloat(sys_random()); }
+BI(sr_getrandbits)
+{
+    long k, nb, i;
+    unsigned char *b;
+    unsigned long *d;
+    Value v;
+    if (x->n < 2)
+        throw_new(cls_TypeError,
+        "getrandbits() missing required argument 'k' (pos 1)");
+    k = need_long(idx_of(A(1)), "k");
+    if (k < 0)
+        throw_new(cls_ValueError,
+        "number of bits must be non-negative");
+    if (k == 0) return mkint(0);
+    nb = (k + 7) / 8;
+    b = (unsigned char *)xmalloc((size_t)nb);
+    host_urandom(b, nb);
+    /* x = int.from_bytes(b, 'big') >> (nb * 8 - k): drop the low
+       (nb*8-k) bits */
+    d
+        = (unsigned long *)xmalloc(sizeof(unsigned long)
+        * (size_t)(nb + 2));
+    {
+        int drop = (int)(nb * 8 - k);
+        long nd = 0;
+        unsigned char *t = (unsigned char *)xmalloc((size_t)nb + 1);
+        long j;
+        /* little-endian copy, shifted right by `drop` bits */
+        for (j = 0; j < nb; j++) t[j] = b[nb - 1 - j];
+        t[nb] = 0;
+        for (j = 0; j < nb; j++)
+            t[j]
+                = (unsigned char)
+                (((t[j] >> drop) | ((unsigned)t[j + 1] << (8 - drop)))
+                & 0xFF);
+        for (i = 0; 2 * i < nb; i++) {
+            d[i] = t[2 * i]
+                | (2 * i + 1 < nb ? (unsigned long)t[2 * i + 1] << 8
+                : 0UL);
+            nd++;
+        }
+        v = int_from_bin(d, (int)nd, 0);
+        free(t);
+    }
+    free(d);
+    free(b);
+    return v;
+}
+BI(sr_randbytes)
+{
+    long n;
+    unsigned char *b;
+    Value r;
+    if (x->n < 2)
+        throw_new(cls_TypeError,
+        "randbytes() missing required argument 'n' (pos 1)");
+    n = need_long(idx_of(A(1)), "n");
+    if (n < 0)
+        throw_new(cls_ValueError, "negative argument not allowed");
+    b = (unsigned char *)xmalloc((size_t)n + 1);
+    host_urandom(b, n);
+    r = mkbytes((const char *)b, n);
+    free(b);
+    return r;
+}
+BI(sr_seed) { (void)x; return NONE_V; }
+BI(sr_state) { (void)x; throw_new(cls_NotImplementedError,
+    "System entropy source does not have state."); return NONE_V; }
+
+#define PYR_METHOD(nm) \
+  BI(pm_##nm) \
+  { \
+  if (x->n < 1) \
+      throw_new(cls_TypeError, \
+      "descriptor '" #nm "' needs an object"); \
+  return pyf_##nm(A(0), x, 1); \
+  } \
+  BI(pf_##nm) { return pyf_##nm(pr_inst, x, 0); }
+PYR_METHOD(seed) PYR_METHOD(getstate) PYR_METHOD(setstate) PYR_METHOD
+    (random)
+PYR_METHOD(getrandbits) PYR_METHOD(randbytes) PYR_METHOD(randbelow)
+    PYR_METHOD(randrange)
+PYR_METHOD(randint) PYR_METHOD(choice) PYR_METHOD(shuffle) PYR_METHOD
+    (sample)
+PYR_METHOD(choices) PYR_METHOD(uniform) PYR_METHOD(triangular)
+PYR_METHOD(normalvariate) PYR_METHOD(gauss) PYR_METHOD(lognormvariate)
+    PYR_METHOD(expovariate)
+PYR_METHOD(vonmises) PYR_METHOD(gammavariate) PYR_METHOD(betavariate)
+    PYR_METHOD(paretovariate)
+PYR_METHOD(weibullvariate) PYR_METHOD(binomialvariate)
+
+BI(pf_sha512)
+{
+    unsigned char dg[64];
+    Value a;
+    if (x->n < 1)
+        throw_new(cls_TypeError, "sha512() missing required argument");
+    a = A(0);
+    if (a.t == T_BYTES || a.t == T_STR)
+        sha512((const unsigned char *)AS_STR(a)->s, AS_STR(a)->len,
+        dg);
+    else if (a.t == T_BARR)
+        sha512((const unsigned char *)AS_BARR(a)->s, AS_BARR(a)->n,
+        dg);
+    else throw_new(cls_TypeError,
+        "a bytes-like object is required, not '%.40s'", type_name(a));
+    return mkbytes((const char *)dg, 64);
+}
+
+static void pyrand_init(void)
+{
+    Module *m = new_module("random");
+    Class **b = (Class **)xmalloc(sizeof(Class *));
+    Class **b2 = (Class **)xmalloc(sizeof(Class *));
+    Value sysinst;
+    S_pr_s = intern_c("_s");
+    S_pr_gauss = intern_c("gauss_next");
+    S_pr_random = intern_c("random");
+    S_pr_getrandbits = intern_c("getrandbits");
+    S_pr_randbelow = intern_c("_randbelow");
+    S_pr_seed = intern_c("seed");
+    b[0] = cls_object;
+    cls_pyrand = make_class(intern_c("Random"), b, 1,
+        intern_c("random"));
+    b2[0] = cls_pyrand;
+    cls_sysrand = make_class(intern_c("SystemRandom"), b2, 1,
+        intern_c("random"));
+#define PM(py, nm) def_bi(cls_pyrand, py, pm_##nm)
+    PM("seed", seed);
+    PM("getstate", getstate);
+    PM("setstate", setstate);
+    PM("random", random);
+    PM("getrandbits", getrandbits);
+    PM("randbytes", randbytes);
+    PM("_randbelow", randbelow);
+    PM("randrange", randrange);
+    PM("randint", randint);
+    PM("choice", choice);
+    PM("shuffle",
+        shuffle);
+    PM("sample", sample);
+    PM("choices", choices);
+    PM("uniform", uniform);
+    PM("triangular",
+        triangular);
+    PM("normalvariate", normalvariate);
+    PM("gauss", gauss);
+    PM("lognormvariate", lognormvariate);
+    PM("expovariate", expovariate);
+    PM("vonmisesvariate", vonmises);
+    PM("gammavariate",
+        gammavariate);
+    PM("betavariate", betavariate); PM("paretovariate", paretovariate);
+    PM("weibullvariate", weibullvariate);
+    PM("binomialvariate", binomialvariate);
+#undef PM
+    def_bi(cls_pyrand, "__init__", pr_init);
+    amap_set(&cls_pyrand->ns, intern_c("VERSION"), mkint(3));
+    bi_pr_random = *amap_get(&cls_pyrand->ns, S_pr_random);
+    bi_pr_getrandbits = *amap_get(&cls_pyrand->ns, S_pr_getrandbits);
+    bi_pr_randbelow = *amap_get(&cls_pyrand->ns, S_pr_randbelow);
+    def_bi(cls_sysrand, "random", sr_random);
+    def_bi(cls_sysrand, "getrandbits", sr_getrandbits);
+    def_bi(cls_sysrand, "randbytes", sr_randbytes);
+    def_bi(cls_sysrand, "seed", sr_seed);
+    def_bi(cls_sysrand, "getstate", sr_state);
+    def_bi(cls_sysrand, "setstate", sr_state);
+    mod_val(m, "Random", mkobj(cls_pyrand, T_CLASS));
+    mod_val(m, "SystemRandom", mkobj(cls_sysrand, T_CLASS));
+    {
+        Args none;
+        none.n = 0; none.a = NULL; none.nk = 0; none.kw = NULL;
+        pr_inst = call_value(mkobj(cls_pyrand, T_CLASS), 0, NULL, 0,
+            NULL);
+        (void)none;
+    }
+    mod_val(m, "_inst", pr_inst);
+    sysinst = UNSET_V;
+    (void)sysinst;
+#define PF(py, nm) mod_def(m, py, pf_##nm)
+    PF("seed", seed);
+    PF("getstate", getstate);
+    PF("setstate", setstate);
+    PF("random", random);
+    PF("getrandbits", getrandbits);
+    PF("randbytes", randbytes);
+    PF("randrange", randrange);
+    PF("randint", randint);
+    PF("choice", choice);
+    PF("shuffle", shuffle);
+    PF("sample", sample);
+    PF("choices", choices);
+    PF("uniform", uniform);
+    PF("triangular", triangular);
+    PF("normalvariate", normalvariate);
+    PF("gauss", gauss);
+    PF("lognormvariate", lognormvariate);
+    PF("expovariate", expovariate);
+    PF("vonmisesvariate", vonmises);
+    PF("gammavariate",
+        gammavariate);
+    PF("betavariate", betavariate); PF("paretovariate", paretovariate);
+    PF("weibullvariate", weibullvariate);
+    PF("binomialvariate", binomialvariate);
+#undef PF
+    mod_def(m, "_sha512", pf_sha512);
+    mod_def(m, "_randbelow", pf_randbelow);
+    mod_val(m, "TWOPI", mkfloat(TWOPI_C));
+    mod_val(m, "NV_MAGICCONST", mkfloat(nv_magic()));
+    mod_val(m, "LOG4", mkfloat(log(4.0)));
+    mod_val(m, "SG_MAGICCONST", mkfloat(1.0 + log(4.5)));
+    mod_val(m, "BPF", mkint(53));
+    mod_val(m, "RECIP_BPF", mkfloat(1.0 / 9007199254740992.0));
 }
 /* ===== p7_imp.c ===== */
 /* ====================================================================
@@ -26803,21 +32582,8 @@ BI(m_fsum)
     free(p);
     return mkfloat(hi);
 }
-static double d_log1p(double x)
-{
-    double u = 1.0 + x;
-    if (u == 1.0) return x;
-    return log(u) * x / (u - 1.0);
-}
-static double d_expm1(double x)
-{
-    double u = exp(x), um1;
-    if (u == 1.0) return x;
-    um1 = u - 1.0;
-    if (um1 == -1.0) return -1.0;
-    if (u - u != 0) return u;
-    return um1 * x / log(u);
-}
+static double d_log1p(double x) { return n_log1p(x); }
+static double d_expm1(double x) { return n_expm1(x); }
 static double d_erf_series(double x)
 {
     double term = x, sum = x, x2 = x * x;
@@ -27039,269 +32805,6 @@ BI(m_dist)
     }
     vsp -= 2;
     return mkfloat(sqrt(s));
-}
-
-/* ---- random ----------------------------------------------------- */
-static unsigned long rng_state = 2463534242UL;
-static unsigned long rng_next(void)
-{
-    unsigned long s = rng_state & 0xffffffffUL;
-    s ^= (s << 13) & 0xffffffffUL;
-    s ^= (s >> 17);
-    s ^= (s << 5) & 0xffffffffUL;
-    rng_state = s & 0xffffffffUL;
-    return rng_state;
-}
-static double rng_double(void)
-{
-    unsigned long a = rng_next() >> 5, b = rng_next() >> 6;
-    return ((double)a * 67108864.0 + (double)b) / 9007199254740992.0;
-}
-static long rng_below(long n)
-{
-    if (n <= 0) return 0;
-    return (long)(rng_double() * (double)n);
-}
-BI(r_seed)
-{
-    unsigned long h = 2463534242UL;
-    if (x->n > 0 && A(0).t != T_NONE)
-        h = (py_hash(A(0)) * 2654435761UL + 12345UL) & 0xffffffffUL;
-    else h = host_seed() & 0xffffffffUL;
-    if (h == 0) h = 88172645UL;
-    rng_state = h;
-    rng_next(); rng_next();
-    return NONE_V;
-}
-BI(r_random) { (void)x; return mkfloat(rng_double()); }
-/* k random bits as an integer (any k) */
-static Value rng_bits_v(long k)
-{
-    Value r = mkint(0);
-    while (k > 0) {
-        long take = k > 24 ? 24 : k;
-        unsigned long w = (rng_next() >> 8) & 0xffffffUL;
-        w >>= 24 - take;
-        r = int_add(int_mul(r, mkint(1L << take)), mkint((long)w));
-        k -= take;
-    }
-    return r;
-}
-/* a random integer in [0, n) for n > 0 of any size */
-static Value rng_below_v(Value n)
-{
-    if (n.t == T_INT && n.u.i < 1073741824L)
-        return mkint(rng_below(n.u.i));
-    {
-        long bits = int_bitlen(int_sub(n, mkint(1)));
-        Value r;
-        do r = rng_bits_v(bits); while (int_cmp(r, n) >= 0);
-        return r;
-    }
-}
-BI(r_randint)
-{
-    Value a, b;
-    need(x, 2, 2, "randint");
-    a = need_intv(A(0), "randint"); b = need_intv(A(1), "randint");
-    if (int_cmp(b, a) < 0) {
-        Buf bf;
-        buf_init(&bf);
-        int_str(a, &bf);
-        buf_add(&bf, ", ");
-        int_str(int_add(b, mkint(1)), &bf);
-        throw_new(cls_ValueError, "empty range in randrange(%.200s)",
-            bf.s);
-    }
-    return int_add(a, rng_below_v(int_add(int_sub(b, a), mkint(1))));
-}
-BI(r_randrange)
-{
-    Value a = mkint(0), b, s = mkint(1), n, w;
-    need(x, 1, 3, "randrange");
-    if (x->n == 1) {
-        b = need_intv(A(0), "randrange");
-        if (int_sign(b) <= 0)
-            throw_new(cls_ValueError, "empty range for randrange()");
-        return rng_below_v(b);
-    }
-    a = need_intv(A(0), "randrange"); b = need_intv(A(1), "randrange");
-    if (x->n == 3) s = need_intv(A(2), "randrange");
-    if (int_sign(s) == 0)
-        throw_new(cls_ValueError, "zero step for randrange()");
-    w = int_sub(b, a);
-    if (int_sign(s) > 0)
-        n = int_floordiv(int_add(w, int_sub(s, mkint(1))), s);
-    else n = int_floordiv(int_add(w, int_add(s, mkint(1))), s);
-    if (int_sign(n) <= 0) {
-        Buf bf;
-        buf_init(&bf);
-        int_str(a, &bf); buf_add(&bf, ", "); int_str(b, &bf);
-        if (!(s.t == T_INT && s.u.i == 1)) { buf_add(&bf, ", ");
-            int_str(s, &bf);
-        }
-        throw_new(cls_ValueError, "empty range in randrange(%.300s)",
-            bf.s);
-    }
-    return int_add(a, int_mul(s, rng_below_v(n)));
-}
-BI(r_getrandbits)
-{
-    long k;
-    need(x, 1, 1, "getrandbits");
-    k = need_long(A(0), "k");
-    if (k < 0)
-        throw_new(cls_ValueError,
-        "number of bits must be non-negative");
-    return rng_bits_v(k);
-}
-BI(r_randbytes)
-{
-    long n, i;
-    char *buf;
-    Value r;
-    need(x, 1, 1, "randbytes");
-    n = need_long(A(0), "n");
-    if (n < 0)
-        throw_new(cls_ValueError, "negative argument not allowed");
-    if (n > 400000000L) throw_new(cls_MemoryError, "");
-    buf = (char *)xmalloc((size_t)n + 1);
-    for (i = 0; i < n; i++) buf[i] = (char)
-        ((rng_next() >> 12) & 255UL);
-    r = mkbytes(buf, n);
-    free(buf);
-    return r;
-}
-/* normal deviate with the polar method (two uniforms) */
-static double rng_gauss(void)
-{
-    double u, v, q;
-    do {
-        u = 2.0 * rng_double() - 1.0;
-        v = 2.0 * rng_double() - 1.0;
-        q = u * u + v * v;
-    } while (q >= 1.0 || q == 0.0);
-    return u * sqrt(-2.0 * log(q) / q);
-}
-BI(r_gauss)
-{
-    double mu = 0.0, sigma = 1.0;
-    need(x, 0, 2, "gauss");
-    if (x->n > 0) mu = dbl_arg(x, 0);
-    if (x->n > 1) sigma = dbl_arg(x, 1);
-    return mkfloat(mu + sigma * rng_gauss());
-}
-BI(r_expovariate)
-{
-    double lambd;
-    need(x, 1, 1, "expovariate");
-    lambd = dbl_arg(x, 0);
-    if (lambd == 0.0)
-        throw_new(cls_ZeroDivisionError, "float division by zero");
-    return mkfloat(-log(1.0 - rng_double()) / lambd);
-}
-BI(r_choices)
-{
-    Value l, kv = kwget(x, "k"), wv = kwget(x, "weights"), res;
-    long n, k = 1, i;
-    List *out;
-    need(x, 1, 3, "choices");
-    if (x->n > 1) wv = A(1);
-    if (x->n > 2) kv = A(2);
-    if (kv.t != T_UNSET) k = need_long(kv, "k");
-    l = iter_to_list(A(0));
-    VPUSH(l);
-    n = AS_LIST(l)->n;
-    if (n == 0 && k > 0)
-        throw_new(cls_IndexError,
-        "Cannot choose from an empty sequence");
-    out = list_new(k > 0 ? k : 0);
-    res = mklist(out);
-    VPUSH(res);
-    if (wv.t != T_UNSET && wv.t != T_NONE) {
-        Value wl = iter_to_list(wv);
-        double total = 0.0;
-        VPUSH(wl);
-        if (AS_LIST(wl)->n != n)
-            throw_new(cls_ValueError,
-                "The number of weights does not match the "
-                "population");
-        for (i = 0; i < n; i++) total += to_dbl(AS_LIST(wl)->a[i]);
-        for (i = 0; i < k; i++) {
-            double t = rng_double() * total, c = 0.0;
-            long j;
-            for (j = 0; j < n - 1; j++)
-                { c += to_dbl(AS_LIST(wl)->a[j]);
-                if (t < c) break;
-            }
-            list_push(out, AS_LIST(l)->a[j]);
-        }
-    } else {
-        for (i = 0; i < k; i++)
-            list_push(out, AS_LIST(l)->a[rng_below(n)]);
-    }
-    vsp = vsp - 2 - (wv.t != T_UNSET && wv.t != T_NONE ? 1 : 0);
-    return res;
-}
-BI(r_uniform)
-{
-    double a, b;
-    need(x, 2, 2, "uniform");
-    a = dbl_arg(x, 0); b = dbl_arg(x, 1);
-    return mkfloat(a + (b - a) * rng_double());
-}
-BI(r_choice)
-{
-    Value l, r;
-    long n;
-    need(x, 1, 1, "choice");
-    l = iter_to_list(A(0));
-    n = AS_LIST(l)->n;
-    if (n == 0)
-        throw_new(cls_IndexError,
-        "Cannot choose from an empty sequence");
-    r = AS_LIST(l)->a[rng_below(n)];
-    return r;
-}
-BI(r_shuffle)
-{
-    List *l;
-    long i;
-    need(x, 1, 1, "shuffle");
-    if (A(0).t != T_LIST)
-        throw_new(cls_TypeError, "shuffle requires a list");
-    l = AS_LIST(A(0));
-    for (i = l->n - 1; i > 0; i--) {
-        long j = rng_below(i + 1);
-        Value t = l->a[i];
-        l->a[i] = l->a[j];
-        l->a[j] = t;
-    }
-    return NONE_V;
-}
-BI(r_sample)
-{
-    Value l;
-    long k, n, i;
-    List *p;
-    need(x, 2, 2, "sample");
-    l = iter_to_list(A(0));
-    VPUSH(l);
-    p = AS_LIST(l);
-    n = p->n;
-    k = to_index(A(1));
-    if (k < 0 || k > n)
-        throw_new(cls_ValueError,
-        "Sample larger than population or is negative");
-    for (i = 0; i < k; i++) {
-        long j = i + rng_below(n - i);
-        Value t = p->a[i];
-        p->a[i] = p->a[j];
-        p->a[j] = t;
-    }
-    p->n = k;
-    vsp--;
-    return l;
 }
 
 /* ---- sys / time ------------------------------------------------- */
@@ -27566,6 +33069,7 @@ static void init_runtime(int argc, char **argv)
             CF_BUILTIN | CF_EXC);
     }
     cls_BaseException->flags |= CF_EXC;
+    eg_init_classes();
     set_global(intern_c("IOError"), mkobj(cls_OSError, T_CLASS));
     set_global(intern_c("None"), NONE_V);
     set_global(intern_c("True"), TRUE_V);
@@ -27979,28 +33483,7 @@ static void init_runtime(int argc, char **argv)
     mod_val(m, "inf", mkfloat(HUGE_VAL));
     mod_val(m, "nan", mkfloat(HUGE_VAL - HUGE_VAL));
     np_init();
-    m = new_module("random");
-    mod_def(m, "seed", r_seed);
-    mod_def(m, "random", r_random);
-    mod_def(m, "randint", r_randint);
-    mod_def(m, "randrange", r_randrange);
-    mod_def(m, "uniform", r_uniform);
-    mod_def(m, "choice", r_choice);
-    mod_def(m, "shuffle", r_shuffle);
-    mod_def(m, "sample", r_sample);
-    mod_def(m, "getrandbits", r_getrandbits);
-    mod_def(m, "randbytes", r_randbytes);
-    mod_def(m, "gauss", r_gauss); mod_def(m, "normalvariate", r_gauss);
-    mod_def(m, "expovariate", r_expovariate);
-    mod_def(m, "choices", r_choices);
-    {
-        Args seedargs;
-        seedargs.n = 0;
-        seedargs.a = NULL;
-        seedargs.nk = 0;
-        seedargs.kw = NULL;
-        r_seed(&seedargs);
-    }
+    pyrand_init();
     re_init();
     json_init();
     struct_init();

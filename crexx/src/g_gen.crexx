@@ -163,6 +163,12 @@ gx_unw: procedure = .int
     else if t = N_TRY then do
       st = gs_s[rb + sp]
       if st = 1 & unw = U_RAISE & n_c[n] > 0 then do
+        if n_d[al[n_b[n]]] = 1 then do
+          gs_s[rb + sp] = 2
+          call exec_star n, fb
+          if unw = 0 then return sp
+        end
+        else do
         exc = unw_v
         matched = 0
         do i = 0 to n_c[n] - 1
@@ -197,6 +203,7 @@ gx_unw: procedure = .int
           end
         end
         if unw = 0 then return sp
+        end
       end
       st = gs_s[rb + sp]
       if n_e[n] > 0 & st >= 1 & st <= 3 then do

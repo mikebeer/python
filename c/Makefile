@@ -12,7 +12,7 @@ BOGUS = -DPY_LIBDIR='"/nonexistent/pylib"'
 
 SRC = src/py.c src/p0_os.c src/p0_base.c src/p1_num.c src/p2_lex.c src/p3_parse.c src/p4_res.c \
       src/p5_eval.c src/p6_obj.c src/p7_fmt.c src/p7_bi.c src/p7_bytes.c src/p7_cplx.c src/p7_np.c src/p7_np2.c src/p7_la.c \
-      src/p7_rnd.c src/p7_imp.c src/p7_mod.c src/p7_re.c src/p7_json.c src/p7_sock.c src/p8_main.c
+      src/p7_rnd.c src/p7_pyrand.c src/p7_imp.c src/p7_mod.c src/p7_re.c src/p7_json.c src/p7_sock.c src/p8_main.c
 PYLIBS = $(shell find ../pylib -name '*.py' 2>/dev/null)
 
 py: py_all.c

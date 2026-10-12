@@ -73,20 +73,153 @@ static double n_hypot(double a, double b)
     h = h + res / (2.0 * h);
     return ldexp(h, ea);
 }
+/* high 32 bits of the IEEE-754 representation of x (sign, 11 exponent bits, 20 mantissa bits),
+   computed arithmetically so that no byte order or type punning is involved */
+static unsigned long dbl_hw(double x)
+{
+    unsigned long sign = 0, hw;
+    double m;
+    int e;
+    if (x != x) return 0x7ff80000UL;
+    if (x < 0.0) { sign = 0x80000000UL; x = -x; }
+    else if (x == 0.0) return 1.0 / x < 0.0 ? 0x80000000UL : 0UL;
+    if (x > 1.7976931348623157e308) return sign | 0x7ff00000UL;
+    m = frexp(x, &e);                       /* x = m * 2**e, 0.5 <= m < 1 */
+    if (e + 1022 <= 0) hw = (unsigned long)ldexp(x, 1042);
+    else hw = ((unsigned long)(e + 1022) << 20) | (unsigned long)((m * 2.0 - 1.0) * 1048576.0);
+    return sign | hw;
+}
+/* log1p(x), a transcription of fdlibm's s_log1p.c (what glibc computes) */
 static double n_log1p(double x)
 {
-    double u = 1.0 + x;
-    if (u == 1.0) return x;
-    return log(u) * x / (u - 1.0);
+    static const double ln2_hi = 6.93147180369123816490e-01, ln2_lo = 1.90821492927058770002e-10,
+        two54 = 1.80143985094819840000e+16, Lp1 = 6.666666666666735130e-01,
+        Lp2 = 3.999999999940941908e-01, Lp3 = 2.857142874366239149e-01,
+        Lp4 = 2.222219843214978396e-01, Lp5 = 1.818357216161805012e-01,
+        Lp6 = 1.531383769920937332e-01, Lp7 = 1.479819860511658591e-01;
+    double hfsq, f = 0.0, c = 0.0, s, z, R, u, m;
+    unsigned long hx = dbl_hw(x), ax = hx & 0x7fffffffUL, hu = 0;
+    int neg = (hx & 0x80000000UL) != 0, k = 1, e;
+    if (x != x) return x;
+    if (neg || hx < 0x3FDA827AUL) {                       /* x < 0.41422 */
+        if (ax >= 0x3ff00000UL) {                         /* x <= -1.0 */
+            if (x == -1.0) return -HUGE_VAL;
+            return (x - x) / (x - x);
+        }
+        if (ax < 0x3e200000UL) {                          /* |x| < 2**-29 */
+            if (two54 + x > 0.0 && ax < 0x3c900000UL) return x;
+            return x - x * x * 0.5;
+        }
+        if (!neg || ax <= 0x3fd2bec4UL) { k = 0; f = x; hu = 1; }   /* -0.2929 < x < 0.41422 */
+    }
+    if (ax >= 0x7ff00000UL) return x + x;
+    if (k != 0) {
+        double uu;
+        if (ax < 0x43400000UL) {
+            uu = 1.0 + x;
+            frexp(uu, &e);
+            k = e - 1;
+            c = (k > 0) ? 1.0 - (uu - x) : x - (uu - 1.0);
+            c /= uu;
+        } else {
+            uu = x;
+            frexp(uu, &e);
+            k = e - 1;
+            c = 0.0;
+        }
+        m = ldexp(uu, -k);                                /* 1 <= m < 2 */
+        hu = (unsigned long)((m - 1.0) * 1048576.0);
+        if (hu < 0x6a09eUL) {
+            u = m;
+        } else {
+            k += 1;
+            u = m * 0.5;
+            hu = (0x00100000UL - hu) >> 2;
+        }
+        f = u - 1.0;
+    }
+    hfsq = 0.5 * f * f;
+    if (hu == 0) {                                        /* |f| < 2**-20 */
+        if (f == 0.0) {
+            if (k == 0) return 0.0;
+            c += (double)k * ln2_lo;
+            return (double)k * ln2_hi + c;
+        }
+        R = hfsq * (1.0 - 0.66666666666666666 * f);
+        if (k == 0) return f - R;
+        return (double)k * ln2_hi - ((R - ((double)k * ln2_lo + c)) - f);
+    }
+    s = f / (2.0 + f);
+    z = s * s;
+    R = z * (Lp1 + z * (Lp2 + z * (Lp3 + z * (Lp4 + z * (Lp5 + z * (Lp6 + z * Lp7))))));
+    if (k == 0) return f - (hfsq - s * (hfsq + R));
+    return (double)k * ln2_hi - ((hfsq - (s * (hfsq + R) + ((double)k * ln2_lo + c))) - f);
 }
+/* expm1(x), a transcription of fdlibm's s_expm1.c */
 static double n_expm1(double x)
 {
-    double u = exp(x), um1;
-    if (u == 1.0) return x;
-    um1 = u - 1.0;
-    if (um1 == -1.0) return -1.0;
-    if (u - u != 0) return u;
-    return um1 * x / log(u);
+    static const double o_threshold = 7.09782712893383973096e+02,
+        ln2_hi = 6.93147180369123816490e-01, ln2_lo = 1.90821492927058770002e-10,
+        invln2 = 1.44269504088896338700e+00, Q1 = -3.33333333333331316428e-02,
+        Q2 = 1.58730158725481460165e-03, Q3 = -7.93650757867487942473e-05,
+        Q4 = 4.00821782732936239552e-06, Q5 = -2.01099218183624371326e-07;
+    double y, hi, lo, c = 0.0, t, e, hxs, hfx, r1;
+    int k, xsb;
+    unsigned long hx = dbl_hw(x);
+    xsb = (hx & 0x80000000UL) != 0;
+    hx &= 0x7fffffffUL;
+    if (x != x) return x;
+    if (hx >= 0x4043687AUL) {                             /* |x| >= 56*ln2 */
+        if (hx >= 0x40862E42UL) {                         /* |x| >= 709.78... */
+            if (hx >= 0x7ff00000UL) return xsb ? -1.0 : x;
+            if (x > o_threshold) return HUGE_VAL;
+        }
+        if (xsb) return -1.0;
+    }
+    if (hx > 0x3fd62e42UL) {                              /* |x| > 0.5 ln2 */
+        if (hx < 0x3FF0A2B2UL) {                          /* and |x| < 1.5 ln2 */
+            if (!xsb) { hi = x - ln2_hi; lo = ln2_lo; k = 1; }
+            else { hi = x + ln2_hi; lo = -ln2_lo; k = -1; }
+        } else {
+            k = (int)(invln2 * x + (xsb ? -0.5 : 0.5));
+            t = (double)k;
+            hi = x - t * ln2_hi;
+            lo = t * ln2_lo;
+        }
+        x = hi - lo;
+        c = (hi - x) - lo;
+    } else if (hx < 0x3c900000UL) {                       /* |x| < 2**-54 */
+        return x;
+    } else k = 0;
+    hfx = 0.5 * x;
+    hxs = x * hfx;
+    r1 = 1.0 + hxs * (Q1 + hxs * (Q2 + hxs * (Q3 + hxs * (Q4 + hxs * Q5))));
+    t = 3.0 - r1 * hfx;
+    e = hxs * ((r1 - t) / (6.0 - x * t));
+    if (k == 0) return x - (x * e - hxs);
+    e = (x * (e - c) - c);
+    e -= hxs;
+    if (k == -1) return 0.5 * (x - e) - 0.5;
+    if (k == 1) {
+        if (x < -0.25) return -2.0 * (e - (x + 0.5));
+        return 1.0 + 2.0 * (x - e);
+    }
+    if (k <= -2 || k > 56) {                              /* exp(x) - 1 = exp(x) */
+        y = 1.0 - (e - x);
+        y = ldexp(y, k);
+        return y - 1.0;
+    }
+    if (k < 20) {
+        t = 1.0 - ldexp(1.0, -k);                         /* 1 - 2**-k */
+        y = t - (e - x);
+        y = ldexp(y, k);
+    } else {
+        t = ldexp(1.0, -k);                               /* 2**-k */
+        y = x - (e + t);
+        y += 1.0;
+        y = ldexp(y, k);
+    }
+    return y;
 }
 static double n_asinh(double v)
 {

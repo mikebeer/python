@@ -1,0 +1,7 @@
+12 True True False ['hello', 'world'] 2 b'\x00\x01'
+via open _pl_test.txt 8
+False True via open
+False
+FileNotFoundError
+FileNotFoundError read
+True

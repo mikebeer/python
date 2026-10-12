@@ -1,0 +1,483 @@
+/* ---------------------------------------------------------------------
+   Pattern matching (match / case), ExceptionGroup and except*
+   --------------------------------------------------------------------- */
+
+/* a new ExceptionGroup(msg, [exceptions]); lst is a list object */
+eg_new: procedure = .int
+  arg msg = .int, lst = .int
+  o = .int
+  t = .int
+  o = inst_new(C_EXCEPTIONGROUP)
+  t = mktuple(2)
+  sl[ob_p[t % 2]] = msg
+  sl[ob_p[t % 2] + 1] = lst
+  call inst_set o, M_ARGS, t
+  call inst_set o, M_MESSAGE, msg
+  call inst_set o, M_EXCEPTIONS, tup_of_list(lst)
+  return o
+
+/* __init__ part of BaseExceptionGroup(msg, excs): checks the arguments and sets .message / .exceptions */
+eg_init: procedure = .int
+  arg slf = .int, base = .int, na = .int
+  msg = .int
+  ex = .int
+  k = .int
+  i = .int
+  e = .int
+  r = .int
+  if na \= 3 then return raise_exc(C_TYPEERROR, "BaseExceptionGroup.__new__() takes exactly 2 arguments (" || (na - 1) || " given)")
+  msg = ast[base + 2]
+  ex = ast[base + 3]
+  if kind_of(msg) \= K_STR then return raise_exc(C_TYPEERROR, "BaseExceptionGroup.__new__() argument 1 must be str, not " || type_name(msg))
+  k = kind_of(ex)
+  if k \= K_LIST & k \= K_TUPLE then return raise_exc(C_TYPEERROR, "second argument (exceptions) must be a sequence")
+  if ob_n[ex % 2] = 0 then return raise_exc(C_VALUEERROR, "second argument (exceptions) must be a non-empty sequence")
+  do i = 0 to ob_n[ex % 2] - 1
+    e = sl[ob_p[ex % 2] + i]
+    if kind_of(e) \= K_INST then return raise_exc(C_VALUEERROR, "Item " || i || " of second argument (exceptions) is not an exception")
+    if cls_issub(ob_c[e % 2], C_BASEEXCEPTION) = 0 then return raise_exc(C_VALUEERROR, "Item " || i || " of second argument (exceptions) is not an exception")
+  end
+  call inst_set slf, M_MESSAGE, msg
+  if k = K_LIST then call inst_set slf, M_EXCEPTIONS, tup_of_list(ex)
+  else call inst_set slf, M_EXCEPTIONS, ex
+  return NONE_OOP
+
+/* split the group g by the exception type ty: sp_m = matching part (0 none), sp_r = rest (0 none) */
+eg_split: procedure = .void
+  arg g = .int, ty = .int
+  tv = .int
+  i = .int
+  tup = .int
+  e = .int
+  ml = .int
+  rl = .int
+  tv = exc_matches(g, ty)
+  if unw > 0 then return
+  if tv = 1 then do
+    sp_m = g
+    sp_r = 0
+    return
+  end
+  tup = inst_get(g, M_EXCEPTIONS)
+  ml = mklist(4)
+  rl = mklist(4)
+  call push ml
+  call push rl
+  do i = 0 to ob_n[tup % 2] - 1
+    e = sl[ob_p[tup % 2] + i]
+    if cls_issub(ob_c[e % 2], C_BASEEXCEPTIONGROUP) = 1 then do
+      call eg_split e, ty
+      if unw > 0 then do
+        asp = asp - 2
+        return
+      end
+      if sp_m > 0 then call list_append ml, sp_m
+      if sp_r > 0 then call list_append rl, sp_r
+    end
+    else do
+      tv = exc_matches(e, ty)
+      if unw > 0 then do
+        asp = asp - 2
+        return
+      end
+      if tv = 1 then call list_append ml, e
+      else call list_append rl, e
+    end
+  end
+  asp = asp - 2
+  sp_m = 0
+  sp_r = 0
+  if ob_n[ml % 2] > 0 then sp_m = eg_new(inst_get(g, M_MESSAGE), ml)
+  if ob_n[rl % 2] > 0 then sp_r = eg_new(inst_get(g, M_MESSAGE), rl)
+  if sp_m = 0 then sp_r = g
+  if sp_r = 0 then sp_m = g
+  return
+
+/* group.split(type) -> (match, rest) ; group.subgroup(type) -> match */
+bi_eg_split: procedure = .int
+  arg base = .int, na = .int, which = .int
+  g = .int
+  t = .int
+  if na \= 2 then return raise_exc(C_TYPEERROR, "split() takes exactly one argument")
+  g = ast[base + 1]
+  if cls_issub(ob_c[g % 2], C_BASEEXCEPTIONGROUP) = 0 then return raise_exc(C_TYPEERROR, "not an exception group")
+  call eg_split g, ast[base + 2]
+  if unw > 0 then return 0
+  if which = 2 then do
+    if sp_m = 0 then return NONE_OOP
+    return sp_m
+  end
+  t = mktuple(2)
+  sl[ob_p[t % 2]] = NONE_OOP
+  sl[ob_p[t % 2] + 1] = NONE_OOP
+  if sp_m > 0 then sl[ob_p[t % 2]] = sp_m
+  if sp_r > 0 then sl[ob_p[t % 2] + 1] = sp_r
+  return t
+
+/* handlers of a try statement written with except*: the exception is in unw_v */
+exec_star: procedure = .void
+  arg n = .int, fb = .int
+  hs = .int
+  hc = .int
+  i = .int
+  h = .int
+  ty = .int
+  orig = .int
+  rem = .int
+  newl = .int
+  rrl = .int
+  m = .int
+  naked = .int
+  p0 = .int
+  sv_cur = .int
+  sv_unw = .int
+  sv_v = .int
+  lst = .int
+  reg = .int
+  hs = n_b[n]
+  hc = n_c[n]
+  orig = unw_v
+  unw = 0
+  p0 = asp
+  newl = mklist(4)
+  rrl = mklist(4)
+  call push orig
+  call push newl
+  call push rrl
+  call push 0
+  call push 0
+  rem = orig
+  naked = 0
+  if cls_issub(ob_c[orig % 2], C_BASEEXCEPTIONGROUP) = 0 then do
+    lst = mklist(4)
+    call list_append lst, orig
+    rem = eg_new(mkstr(""), lst)
+    call inst_set rem, M_ARGS, mkargs2(mkstr(""), inst_get(rem, M_EXCEPTIONS))
+    naked = 1
+  end
+  ast[p0 + 4] = rem
+  do i = 0 to hc - 1
+    if rem = 0 then leave
+    h = al[hs + i]
+    ty = ev(n_a[h], fb)
+    if ty = 0 then do
+      call list_append newl, unw_v
+      unw = 0
+      leave
+    end
+    call eg_split rem, ty
+    if unw > 0 then do
+      call list_append newl, unw_v
+      unw = 0
+      leave
+    end
+    m = sp_m
+    if m > 0 then do
+      rem = sp_r
+      ast[p0 + 4] = rem
+      ast[p0 + 5] = m
+      if n_b[h] > 0 then call store n_b[h], m, fb
+      sv_cur = exc_cur
+      exc_cur = m
+      call ex n_c[h], fb
+      exc_cur = sv_cur
+      if n_b[h] > 0 then do
+        sv_unw = unw
+        sv_v = unw_v
+        unw = 0
+        call store n_b[h], 0, fb
+        unw = sv_unw
+        unw_v = sv_v
+      end
+      if unw = U_RAISE then do
+        if unw_v = m then call list_append rrl, m
+        else call list_append newl, unw_v
+        unw = 0
+      end
+      else if unw > 0 then do
+        asp = p0
+        return
+      end
+    end
+  end
+  if rem > 0 then call list_append rrl, rem
+  reg = 0
+  if ob_n[rrl % 2] > 0 then do
+    if naked = 1 then reg = orig
+    else if ob_n[rrl % 2] = 1 then reg = sl[ob_p[rrl % 2]]
+    else reg = eg_new(inst_get(orig, M_MESSAGE), rrl)
+  end
+  if ob_n[newl % 2] = 0 then do
+    if reg = 0 then unw = 0
+    else do
+      unw = U_RAISE
+      unw_v = reg
+    end
+    asp = p0
+    return
+  end
+  if reg > 0 then call list_append newl, reg
+  unw = U_RAISE
+  if ob_n[newl % 2] > 1 then unw_v = eg_new(mkstr(""), newl)
+  else unw_v = sl[ob_p[newl % 2]]
+  asp = p0
+  return
+
+/* the tuple (a, b) */
+mkargs2: procedure = .int
+  arg a = .int, b = .int
+  t = .int
+  t = mktuple(2)
+  sl[ob_p[t % 2]] = a
+  sl[ob_p[t % 2] + 1] = b
+  return t
+
+/* ---- patterns ---- */
+/* match the value v against the pattern node p; captures are stored.  1 = match, 0 = no match (or an exception when unw > 0) */
+pat_match: procedure = .int
+  arg p = .int, v = .int, fb = .int
+  t = .int
+  x = .int
+  r = .int
+  i = .int
+  n = .int
+  cnt = .int
+  star = .int
+  src = .int
+  k = .int
+  idx = .int
+  sub = .int
+  mid = .int
+  e = .int
+  d = .int
+  rest = .int
+  cls = .int
+  cid = .int
+  npos = .int
+  nkw = .int
+  ma = .int
+  nm = .int
+  av = .int
+  hk = .string
+  t = n_t[p]
+  if t = N_PWILD then return 1
+  if t = N_PCAP then do
+    call store n_a[p], v, fb
+    return 1
+  end
+  if t = N_PVAL then do
+    x = ev(n_a[p], fb)
+    if x = 0 then return 0
+    r = py_eq(v, x)
+    if unw > 0 then return 0
+    return r
+  end
+  if t = N_PSING then do
+    if v = n_a[n_a[p]] then return 1
+    return 0
+  end
+  if t = N_POR then do
+    do i = 0 to n_b[p] - 1
+      r = pat_match(al[n_a[p] + i], v, fb)
+      if unw > 0 then return 0
+      if r = 1 then return 1
+    end
+    return 0
+  end
+  if t = N_PAS then do
+    r = pat_match(n_a[p], v, fb)
+    if r = 1 then call store n_b[p], v, fb
+    return r
+  end
+  if t = N_PSEQ then do
+    k = kind_of(v)
+    if k = K_LIST | k = K_TUPLE then src = v
+    else if k = K_RANGE then do
+      src = iter_list(v)
+      if src = 0 then return 0
+    end
+    else return 0
+    n = ob_n[src % 2]
+    cnt = n_b[p]
+    star = n_c[p] - 1
+    if star < 0 then do
+      if n \= cnt then return 0
+    end
+    else do
+      if n < cnt - 1 then return 0
+    end
+    do i = 0 to cnt - 1
+      sub = al[n_a[p] + i]
+      if i = star then do
+        mid = mklist(4)
+        do idx = star to n - (cnt - 1 - star) - 1
+          call list_append mid, sl[ob_p[src % 2] + idx]
+        end
+        if n_t[n_a[sub]] = N_PCAP then call store n_a[n_a[sub]], mid, fb
+      end
+      else do
+        idx = i
+        if star >= 0 & i > star then idx = n - (cnt - i)
+        if idx >= ob_n[src % 2] then return 0
+        r = pat_match(sub, sl[ob_p[src % 2] + idx], fb)
+        if unw > 0 then return 0
+        if r = 0 then return 0
+      end
+    end
+    return 1
+  end
+  if t = N_PMAP then do
+    if kind_of(v) \= K_DICT then return 0
+    cnt = n_b[p]
+    d = 0
+    if n_c[p] > 0 then do
+      d = dict_copy(v)
+      call push d
+    end
+    do i = 0 to cnt - 1
+      x = ev(al[n_a[p] + 2 * i], fb)
+      if x = 0 then do
+        if d > 0 then asp = asp - 1
+        return 0
+      end
+      hk = hashkey(x)
+      if unw > 0 then do
+        if d > 0 then asp = asp - 1
+        return 0
+      end
+      e = dict_find(ob_x[v % 2], hk)
+      if e = 0 then do
+        if d > 0 then asp = asp - 1
+        return 0
+      end
+      r = pat_match(al[n_a[p] + 2 * i + 1], de_val[e], fb)
+      if unw > 0 | r = 0 then do
+        if d > 0 then asp = asp - 1
+        return 0
+      end
+      if d > 0 then r = dict_del(ob_x[d % 2], hk)
+    end
+    if d > 0 then do
+      asp = asp - 1
+      call store n_c[p], d, fb
+    end
+    return 1
+  end
+  if t = N_PCLS then do
+    cls = ev(n_a[p], fb)
+    if cls = 0 then return 0
+    if kind_of(cls) \= K_CLASS then do
+      r = raise_exc(C_TYPEERROR, "called match pattern must be a class")
+      return 0
+    end
+    x = bi_isinstance(v, cls, 0)
+    if x = 0 then return 0
+    if x \= TRUE_OOP then return 0
+    cid = ob_x[cls % 2]
+    npos = n_c[p]
+    nkw = n_d[p]
+    if npos > 0 then do
+      if cls_issub(cid, C_BOOL) = 1 | cls_issub(cid, C_BYTEARRAY) = 1 | cls_issub(cid, C_BYTES) = 1 | cls_issub(cid, C_DICT) = 1 | cls_issub(cid, C_FLOAT) = 1 | cls_issub(cid, C_FROZENSET) = 1 | cls_issub(cid, C_INT) = 1 | cls_issub(cid, C_LIST) = 1 | cls_issub(cid, C_SET) = 1 | cls_issub(cid, C_STR) = 1 | cls_issub(cid, C_TUPLE) = 1 then do
+        if npos > 1 then do
+          r = raise_exc(C_TYPEERROR, cl_name[cid] || "() accepts 1 positional sub-pattern (" || npos || " given)")
+          return 0
+        end
+        r = pat_match(al[n_b[p]], v, fb)
+        if unw > 0 | r = 0 then return 0
+      end
+      else do
+        ma = getattr_obj(cls, M___MATCH_ARGS__, 0)
+        if ma = 0 then do
+          if swallow_attr() = 0 then return 0
+          r = raise_exc(C_TYPEERROR, cl_name[cid] || "() accepts 0 positional sub-patterns (" || npos || " given)")
+          return 0
+        end
+        if kind_of(ma) \= K_TUPLE then do
+          r = raise_exc(C_TYPEERROR, "__match_args__ must be a tuple (got " || type_name(ma) || ")")
+          return 0
+        end
+        if npos > ob_n[ma % 2] then do
+          r = raise_exc(C_TYPEERROR, cl_name[cid] || "() accepts " || ob_n[ma % 2] || " positional sub-patterns (" || npos || " given)")
+          return 0
+        end
+        do i = 0 to npos - 1
+          nm = sl[ob_p[ma % 2] + i]
+          if kind_of(nm) \= K_STR then do
+            r = raise_exc(C_TYPEERROR, "__match_args__ elements must be strings (got " || type_name(nm) || ")")
+            return 0
+          end
+          av = getattr_obj(v, nameid(ob_s[nm % 2]), 0)
+          if av = 0 then do
+            r = swallow_attr()
+            return 0
+          end
+          r = pat_match(al[n_b[p] + i], av, fb)
+          if unw > 0 | r = 0 then return 0
+        end
+      end
+    end
+    do i = 0 to nkw - 1
+      sub = al[n_b[p] + npos + i]
+      av = getattr_obj(v, nameid(n_s[sub]), 0)
+      if av = 0 then do
+        r = swallow_attr()
+        return 0
+      end
+      r = pat_match(n_a[sub], av, fb)
+      if unw > 0 | r = 0 then return 0
+    end
+    return 1
+  end
+  r = raise_exc(C_RUNTIMEERROR, "bad pattern node " || t)
+  return 0
+
+/* name: annotation at module / class level: __annotations__[name] = value (errors in the annotation are ignored) */
+exec_annot: procedure = .void
+  arg n = .int, fb = .int
+  tg = .int
+  tt = .int
+  cur = .int
+  v = .int
+  tg = n_a[n]
+  tt = n_t[tg]
+  cur = 0
+  if tt = N_GLOBAL then cur = vp[gfb + n_a[tg]]
+  else if tt = N_LOCAL then cur = vp[fb + n_a[tg]]
+  if cur = 0 then do
+    cur = dict_new(K_DICT)
+    call store tg, cur, fb
+  end
+  v = ev(n_c[n], fb)
+  if v = 0 then do
+    unw = 0
+    return
+  end
+  call dset cur, n_a[n_b[n]], v
+  return
+
+/* f.__annotations__ : evaluated on request in the frame that defined the function */
+func_annots: procedure = .int
+  arg f = .int
+  d = .int
+  fd = .int
+  fb = .int
+  j = .int
+  a = .int
+  v = .int
+  d = dict_new(K_DICT)
+  fd = ob_x[f % 2]
+  fb = ob_y[f % 2]
+  do j = 1 to fd_nr[fd]
+    a = pr_ann[fd_ps[fd] + j - 1]
+    if a > 0 then do
+      v = ev(a, fb)
+      if v = 0 then unw = 0
+      else call dset d, mkstr(pr_name[fd_ps[fd] + j - 1]), v
+    end
+  end
+  if fd_ret[fd] > 0 then do
+    v = ev(fd_ret[fd], fb)
+    if v = 0 then unw = 0
+    else call dset d, mkstr("return"), v
+  end
+  return d

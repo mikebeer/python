@@ -1,0 +1,26 @@
+*.py ['a.py', 'test_x.py'] False (?s:.*\.py)\Z
+test_* ['test_x.py'] False (?s:test_.*)\Z
+?.txt ['b.txt'] False (?s:.\.txt)\Z
+[ab].* ['a.py', 'b.txt'] False (?s:[ab]\..*)\Z
+data_[0-9]* ['data_01.csv', 'data_1.csv'] False (?s:data_[0-9].*)\Z
+data_[!0]* ['data_1.csv'] False (?s:data_[^0].*)\Z
+*[1]* ['x[1].c', 'data_01.csv', 'data_1.csv'] False (?s:(?>.*?[1]).*)\Z
+* ['a.py', 'b.txt', 'test_x.py', 'Test.PY', 'x[1].c', 'data_01.csv', 'data_1.csv', '.hidden'] True (?s:.*)\Z
+[]x]* ['x[1].c'] False (?s:[]x].*)\Z
+x[[]1].c ['x[1].c'] False (?s:x[\[]1\]\.c)\Z
+['a', 'b c', 'd e', 'f g', 'hi jk', '#', 'comment'] ['x'] ['a', 'bcd']
+'it'"'"'s' safe-1.2/x '' 'a b$c' ls 'my file' 'o'"'"'k'
+['a', '=', 'b', ';', 'c', 'd e'] ['x', '=', '"q r"', 'y']
+['ls', '-l', '|', 'grep', '"a b"', '>', 'out']
+ValueError No closing quotation
+ValueError No escaped character
+&lt;a href=&quot;x&quot;&gt;T&amp;C&#x27;s&lt;/a&gt; "q"
+<b> &amp; "q" AB ©  | &unknown; & 😀 �
+12345678-1234-5678-1234-567812345678 UUID('12345678-1234-5678-1234-567812345678') 12345678123456781234567812345678 24197857161011715162171839636988778104 urn:uuid:12345678-1234-5678-1234-567812345678 None reserved for NCS compatibility (305419896, 4660, 22136, 18, 52, 95073701484152) 305419896 95073701484152 b'\x124Vx\x124Vx\x124Vx\x124Vx' b'xV4\x124\x12xV\x124Vx\x124Vx'
+True True True True True True
+6fa459ea-ee8a-3ca4-894e-db77e160355e 886313e1-3b8a-5372-9b90-0c9aee199e5d 53b14841-9895-312b-bb91-82c1f08c9edd 144f55bc-6061-5bec-955c-53f7e8d6ef63 456e503f-63e3-56c1-b807-4cd79bf8cc22
+4 specified in RFC 4122 36 4 True True 1
+True [UUID('00000000-0000-0000-0000-000000000002'), UUID('00000000-0000-0000-0000-000000000003')]
+ValueError badly formed hexadecimal UUID string
+ValueError badly formed hexadecimal UUID string
+TypeError UUID objects are immutable

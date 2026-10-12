@@ -4,10 +4,11 @@
 enum {
     N_CONST = 1, N_NAME, N_ATTR, N_SUBSCR, N_SLICE, N_CALL, N_BINOP, N_UNARY, N_AND, N_OR,
     N_NOT, N_CMP, N_IFEXP, N_LIST, N_TUPLE, N_DICT, N_SET, N_LAMBDA, N_COMP, N_FSTR, N_FPART,
-    N_STAR, N_DSTAR, N_KW, N_WALRUS,
+    N_STAR, N_DSTAR, N_KW, N_WALRUS, N_MATCH, P_LIT, P_VAL, P_CAP, P_SEQ, P_STAR, P_MAP, P_CLS,
+    P_OR, P_AS,
     S_EXPR, S_ASSIGN, S_AUG, S_IF, S_WHILE, S_FOR, S_BREAK, S_CONTINUE, S_RETURN, S_PASS,
     S_DEF, S_CLASS, S_TRY, S_EXCEPT, S_RAISE, S_ASSERT, S_DEL, S_IMPORT, S_FROM, S_WITH,
-    S_BLOCK, S_YIELD, S_YIELDFROM, S_LISTAPP, S_SETADD, S_DICTSET, S_NOP
+    S_BLOCK, S_YIELD, S_YIELDFROM, S_LISTAPP, S_SETADD, S_DICTSET, S_NOP, S_ANNOT
 };
 enum { C_LT = 1, C_LE, C_GT, C_GE, C_EQ, C_NE, C_IN, C_NOTIN, C_IS, C_ISNOT };
 
@@ -192,7 +193,18 @@ typedef struct Params {
     Str **names; Node **defs; int n, ndef;
     Str **kwnames; Node **kwdefs; int nkw;
     Str *vararg, *varkw;
+    int nposonly;
+    Str **an; Node **ae; int nan;
+    Node *retann;
 } Params;
+
+static void note_annot(Params *p, Str *nm, Node *e)
+{
+    p->an = (Str **)xrealloc(p->an, sizeof(Str *) * (size_t)(p->nan + 1));
+    p->ae = (Node **)xrealloc(p->ae, sizeof(Node *) * (size_t)(p->nan + 1));
+    p->an[p->nan] = nm;
+    p->ae[p->nan++] = e;
+}
 
 static void parse_params(Params *p, int closer, int annot)
 {
@@ -204,21 +216,23 @@ static void parse_params(Params *p, int closer, int annot)
             star = 1;
             if (at(TK_NAME)) {
                 p->vararg = TOK.s; pp++;
-                if (annot && p_accept(':')) parse_test();
+                if (annot && p_accept(':')) note_annot(p, p->vararg, parse_test());
             }
         } else if (at(TK_POW)) {
             pp++;
             if (!at(TK_NAME)) perr("expected name");
             p->varkw = TOK.s; pp++;
-            if (annot && p_accept(':')) parse_test();
+            if (annot && p_accept(':')) note_annot(p, p->varkw, parse_test());
         } else if (at('/')) {
+            if (star || p->n == 0 || p->nposonly) perr("invalid syntax");
+            p->nposonly = p->n;
             pp++;
         } else {
             Str *nm;
             Node *def = NULL;
             if (!at(TK_NAME)) perr("expected parameter name");
             nm = TOK.s; pp++;
-            if (annot && p_accept(':')) parse_test();
+            if (annot && p_accept(':')) note_annot(p, nm, parse_test());
             if (p_accept('=')) def = parse_test();
             if (!star) {
                 p->names = (Str **)xrealloc(p->names, sizeof(Str *) * (size_t)(p->n + 1));
@@ -251,6 +265,11 @@ static FuncDef *fd_new(Str *name, Params *p, int line)
     fd->npos = p->n;
     fd->ndefaults = p->ndef;
     fd->nkwonly = p->nkw;
+    fd->nposonly = p->nposonly;
+    fd->nanns = p->nan;
+    fd->anames = p->an;
+    fd->aexprs = p->ae;
+    fd->retann = p->retann;
     fd->defaults = p->defs;
     fd->kwdefaults = p->kwdefs;
     fd->pnames = (Str **)xmalloc(sizeof(Str *) * (size_t)(p->n + p->nkw + 1));
@@ -289,7 +308,7 @@ static Node *parse_funcdef(void)
     expect('(', "(");
     parse_params(&p, ')', 1);
     expect(')', ")");
-    if (p_accept(TK_ARROW)) parse_test();
+    if (p_accept(TK_ARROW)) p.retann = parse_test();
     expect(':', ":");
     n->name = name;
     n->var = scope_var(cur_scope, name);
@@ -1331,16 +1350,31 @@ static Node *parse_simple(void)
             return a;
         }
         if (at(':') ) {
-            /* annotation: x: int [= v] */
+            /* annotation: x: int [= v]; stored in __annotations__ at module / class level */
+            Node *an = NULL, *ann, *as = NULL;
             pp++;
-            parse_test();
+            ann = parse_test();
+            if (e->kind == N_NAME && (cur_scope->kind == SC_MOD || cur_scope->kind == SC_CLASS)) {
+                an = node_new(S_ANNOT, line);
+                an->name = e->name;
+                an->a = ann;
+                an->var = scope_var(cur_scope, intern_c("__annotations__"));
+                an->var->defined = 1;
+            }
             if (p_accept('=')) {
-                Node *as = node_new(S_ASSIGN, line);
+                as = node_new(S_ASSIGN, line);
                 to_target(e, line);
                 node_add(as, e);
                 as->a = parse_testlist(1);
-                return as;
             }
+            if (as && an) {
+                Node *bl = new_block(line);
+                node_add(bl, as);
+                node_add(bl, an);
+                return bl;
+            }
+            if (as) return as;
+            if (an) return an;
             return node_new(S_NOP, line);
         }
         n = node_new(S_EXPR, line);
@@ -1394,6 +1428,232 @@ static Node *parse_if(void)
     return n;
 }
 
+/* ---- match statement: desugared to an if/elif chain of N_MATCH tests ------------------ */
+static int match_count;
+static Node *pat_as(void);
+
+static Node *pat_target(Str *nm, int line)
+{
+    Node *t = mk_name(nm, line);
+    t->var->defined = 1;
+    return t;
+}
+static Node *pat_name_expr(void)
+{
+    Node *e = mk_name(TOK.s, TOK.line);
+    pp++;
+    while (at('.')) {
+        Node *n = mk(N_ATTR);
+        pp++;
+        if (!at(TK_NAME)) perr("expected attribute name");
+        n->a = e;
+        n->name = TOK.s;
+        pp++;
+        e = n;
+    }
+    return e;
+}
+static Node *pat_maybe_star(void)
+{
+    if (at('*')) {
+        Node *st = mk(P_STAR);
+        pp++;
+        if (!at(TK_NAME)) perr("expected name after '*' in pattern");
+        if (TOK.s != intern_c("_")) st->a = pat_target(TOK.s, st->line);
+        pp++;
+        return st;
+    }
+    return pat_as();
+}
+static Node *pat_closed(void)
+{
+    int line = TOK.line;
+    int t = TOK.type;
+    Node *n;
+    if (t == TK_NUM || t == TK_FLOAT || t == TK_IMAG || t == TK_STR || t == TK_FSTR || t == '-') {
+        n = node_new(P_LIT, line);
+        n->a = parse_arith();
+        return n;
+    }
+    if (t == TK_KW && (TOK.kw == KW_NONE_ || TOK.kw == KW_TRUE || TOK.kw == KW_FALSE)) {
+        n = node_new(P_LIT, line);
+        n->a = parse_atom();
+        n->op = 1;
+        return n;
+    }
+    if (t == TK_NAME) {
+        if (toks[pp + 1].type != '.' && toks[pp + 1].type != '(') {
+            n = node_new(P_CAP, line);
+            if (TOK.s != intern_c("_")) n->a = pat_target(TOK.s, line);
+            pp++;
+            return n;
+        }
+        {
+            Node *e = pat_name_expr();
+            if (!at('(')) {
+                n = node_new(P_VAL, line);
+                n->a = e;
+                return n;
+            }
+            n = node_new(P_CLS, line);
+            n->a = e;
+            n->b = node_new(N_TUPLE, line);
+            n->c = node_new(N_TUPLE, line);
+            pp++;
+            while (!at(')')) {
+                if (at(TK_NAME) && toks[pp + 1].type == '=') {
+                    node_add(n->b, mk_const(perm_str(TOK.s->s, TOK.s->len), line));
+                    pp += 2;
+                    node_add(n->c, pat_as());
+                } else {
+                    if (n->c->n > 0) perr("positional patterns follow keyword patterns");
+                    node_add(n, pat_as());
+                }
+                if (!p_accept(',')) break;
+            }
+            expect(')', ")");
+            return n;
+        }
+    }
+    if (t == '(' || t == '[') {
+        int closer = t == '(' ? ')' : ']';
+        int comma = 0;
+        pp++;
+        n = node_new(P_SEQ, line);
+        while (!at(closer)) {
+            node_add(n, pat_maybe_star());
+            if (!p_accept(',')) break;
+            comma = 1;
+        }
+        expect(closer, t == '(' ? ")" : "]");
+        if (t == '(' && n->n == 1 && !comma && n->list[0]->kind != P_STAR) return n->list[0];
+        return n;
+    }
+    if (t == '{') {
+        n = node_new(P_MAP, line);
+        pp++;
+        while (!at('}')) {
+            if (at(TK_POW)) {
+                pp++;
+                if (!at(TK_NAME)) perr("expected name after '**'");
+                n->a = pat_target(TOK.s, line);
+                pp++;
+            } else {
+                Node *k;
+                if (at(TK_NAME)) k = pat_name_expr(); else k = parse_arith();
+                expect(':', ":");
+                node_add(n, k);
+                node_add(n, pat_as());
+            }
+            if (!p_accept(',')) break;
+        }
+        expect('}', "}");
+        return n;
+    }
+    perr("invalid pattern");
+    return NULL;
+}
+static Node *pat_or(void)
+{
+    Node *first = pat_closed();
+    if (at('|')) {
+        Node *o = node_new(P_OR, first->line);
+        node_add(o, first);
+        while (p_accept('|')) node_add(o, pat_closed());
+        return o;
+    }
+    return first;
+}
+static Node *pat_as(void)
+{
+    Node *p = pat_or();
+    if (atkw(KW_AS)) {
+        Node *a = mk(P_AS);
+        pp++;
+        if (!at(TK_NAME)) perr("expected name after 'as'");
+        a->a = p;
+        a->b = pat_target(TOK.s, a->line);
+        pp++;
+        return a;
+    }
+    return p;
+}
+static int is_match_stmt(void)
+{
+    int i = pp + 1, depth = 0;
+    if (TOK.s != intern_c("match")) return 0;
+    for (;; i++) {
+        int t = toks[i].type;
+        if (t == TK_EOF) return 0;
+        if (t == '(' || t == '[' || t == '{') depth++;
+        else if (t == ')' || t == ']' || t == '}') depth--;
+        else if (t == TK_NEWLINE && depth <= 0) break;
+    }
+    return i > pp + 1 && toks[i - 1].type == ':' && toks[i + 1].type == TK_INDENT &&
+        toks[i + 2].type == TK_NAME && toks[i + 2].s == intern_c("case");
+}
+static Node *parse_match(void)
+{
+    int line = TOK.line;
+    Node *blk = new_block(line);
+    Node *as, *subj, *cases[256], *chain = NULL;
+    Str *tmp;
+    char nm[32];
+    int nc = 0, i;
+    pp++;
+    sprintf(nm, ".m%d", match_count++);
+    tmp = intern_c(nm);
+    subj = parse_testlist(1);
+    expect(':', ":");
+    expect(TK_NEWLINE, "newline");
+    if (!p_accept(TK_INDENT)) perr("expected an indented block");
+    as = node_new(S_ASSIGN, line);
+    as->a = subj;
+    node_add(as, pat_target(tmp, line));
+    node_add(blk, as);
+    while (at(TK_NAME) && TOK.s == intern_c("case")) {
+        Node *c = mk(S_IF), *test, *pat;
+        if (nc >= 255) perr("too many case blocks");
+        pp++;
+        pat = pat_maybe_star();
+        if (at(',') || pat->kind == P_STAR) {
+            Node *sq = node_new(P_SEQ, pat->line);
+            node_add(sq, pat);
+            while (p_accept(',')) {
+                if (at(':') || atkw(KW_IF)) break;
+                node_add(sq, pat_maybe_star());
+            }
+            pat = sq;
+        }
+        test = node_new(N_MATCH, c->line);
+        test->a = mk_name(tmp, c->line);
+        test->b = pat;
+        if (accept_kw(KW_IF)) {
+            Node *g = node_new(N_AND, c->line);
+            g->a = test;
+            g->b = parse_test();
+            test = g;
+        }
+        expect(':', ":");
+        c->sidx = cur_scope->nstate++;
+        c->a = test;
+        c->b = parse_block();
+        cases[nc++] = c;
+    }
+    if (nc == 0) perr("expected 'case' block");
+    if (!p_accept(TK_DEDENT) && !at(TK_EOF)) perr("invalid syntax");
+    for (i = nc - 1; i >= 0; i--) {
+        if (chain) {
+            Node *eb = new_block(cases[i]->line);
+            node_add(eb, chain);
+            cases[i]->c = eb;
+        }
+        chain = cases[i];
+    }
+    node_add(blk, chain);
+    return blk;
+}
+
 static Node *parse_stmt(void)
 {
     int line = TOK.line;
@@ -1435,6 +1695,11 @@ static Node *parse_stmt(void)
             while (atkw(KW_EXCEPT)) {
                 Node *h = mk(S_EXCEPT);
                 pp++;
+                if (at('*')) {
+                    pp++;
+                    if (n->n > 0 && !n->level) perr("cannot have both 'except' and 'except*'");
+                    n->level = 1;
+                } else if (n->level) perr("cannot have both 'except' and 'except*'");
                 if (!at(':')) {
                     h->a = parse_test();
                     if (accept_kw(KW_AS)) {
@@ -1501,6 +1766,7 @@ static Node *parse_stmt(void)
         return d;
     }
     if (at(TK_INDENT)) perr("unexpected indent");
+    if (at(TK_NAME) && is_match_stmt()) return parse_match();
     n = parse_simple();
     if (n->kind == S_DEF || n->kind == S_CLASS) return n;
     end_simple();

@@ -155,6 +155,16 @@ static Func *make_function(Frame *f, Node *def)
         for (i = 0; i < fd->nkwonly; i++)
             if (fd->kwdefaults[i]) fn->kwdefs[i] = eval(f, fd->kwdefaults[i]);
     }
+    if (fd->nanns > 0 || fd->retann) {
+        Dict *ad = dict_new();
+        Value av = mkobj(ad, T_DICT);
+        VPUSH(av);
+        for (i = 0; i < fd->nanns; i++)
+            dict_set(ad, mkobj(fd->anames[i], T_STR), eval(f, fd->aexprs[i]));
+        if (fd->retann) dict_set(ad, mkcstr("return"), eval(f, fd->retann));
+        amap_set(&fn->attrs, intern_c("__annotations__"), av);
+        vsp--;
+    }
     vsp--;
     return fn;
 }
@@ -173,7 +183,9 @@ static Value *bind_args(Func *fn, FuncDef *fd, int n, Value *a, int nk, Value *k
     Value *loc = vsp;
     int i, npos = fd->npos, ncopy;
     Dict *kd = NULL;
+    Buf po;
     vcheck(fd->nlocals + 8);
+    buf_init(&po);
     vsp += fd->nlocals;
     for (i = 0; i < fd->nlocals; i++) loc[i] = UNSET_V;
     ncopy = n < npos ? n : npos;
@@ -200,6 +212,14 @@ static Value *bind_args(Func *fn, FuncDef *fd, int n, Value *a, int nk, Value *k
         int j, found = -1;
         for (j = 0; j < npos + fd->nkwonly; j++)
             if (fd->pnames[j] == nm) { found = j; break; }
+        if (found >= 0 && found < fd->nposonly) {
+            if (kd) { dict_set(kd, kw[2 * i], kw[2 * i + 1]); continue; }
+            if (po.n) buf_add(&po, ", ");
+            buf_addc(&po, '\'');
+            buf_add(&po, nm->s);
+            buf_addc(&po, '\'');
+            continue;
+        }
         if (found >= 0) {
             if (loc[found].t != T_UNSET)
                 throw_new(cls_TypeError, "%.80s() got multiple values for argument '%.80s'",
@@ -212,6 +232,14 @@ static Value *bind_args(Func *fn, FuncDef *fd, int n, Value *a, int nk, Value *k
                       fn->name->s, nm->s);
         }
     }
+    if (po.n) {
+        char b[400];
+        sprintf(b, "%.80s() got some positional-only arguments passed as keyword arguments: "
+            "%.200s", fn->name->s, po.s);
+        buf_free(&po);
+        throw_val(new_exc(cls_TypeError, b));
+    }
+    buf_free(&po);
     if (n < npos || nk > 0) {
         int miss = 0;
         Buf nb;
@@ -780,6 +808,195 @@ static void unpack_assign(Frame *f, Node *t, Value x)
     vsp = base;
 }
 
+/* ---- match statement patterns ------------------------------------------------------ */
+static int isinst(Value v, Value c);
+static int try_attr(Value o, Str *nm, Value *out);
+static Value iter_to_list(Value o);
+static int pat_match(Frame *f, Node *p, Value v);
+static int pat_is_selfmatch(Class *c)
+{
+    return c == cls_bool || c == cls_bytearray || c == cls_bytes || c == cls_dict ||
+        c == cls_float || c == cls_frozenset || c == cls_int || c == cls_list || c == cls_set ||
+        c == cls_str || c == cls_tuple;
+}
+/* the list/tuple behind a sequence-pattern subject, or NULL (str/bytes never match) */
+static List *pat_seq(Value v)
+{
+    if (v.t == T_LIST || v.t == T_TUPLE) return AS_LIST(v);
+    if (v.t == T_INST && (AS_INST(v)->pay.t == T_LIST || AS_INST(v)->pay.t == T_TUPLE))
+        return AS_LIST(AS_INST(v)->pay);
+    if (v.t == T_RANGE) {
+        Value l = iter_to_list(v);
+        VPUSH(l);
+        return AS_LIST(l);
+    }
+    return NULL;
+}
+static int pat_seq_match(Frame *f, Node *p, Value v)
+{
+    Value *base = vsp;
+    List *l = pat_seq(v);
+    long n, i, star = -1, nsub = p->n, before, after;
+    int ok = 0;
+    if (!l) return 0;
+    n = l->n;
+    for (i = 0; i < nsub; i++) if (p->list[i]->kind == P_STAR) star = i;
+    if (star < 0) {
+        if (n != nsub) goto done;
+        for (i = 0; i < nsub; i++) {
+            if (i >= l->n || !pat_match(f, p->list[i], l->a[i])) goto done;
+        }
+    } else {
+        before = star;
+        after = nsub - star - 1;
+        if (n < before + after) goto done;
+        for (i = 0; i < before; i++)
+            if (i >= l->n || !pat_match(f, p->list[i], l->a[i])) goto done;
+        for (i = 0; i < after; i++)
+            if (n - after + i >= l->n || !pat_match(f, p->list[star + 1 + i], l->a[n - after + i]))
+                goto done;
+        if (p->list[star]->a) {
+            List *mid = list_new(n - before - after + 1);
+            Value mv;
+            for (i = before; i < n - after && i < l->n; i++) list_push(mid, l->a[i]);
+            mv = mklist(mid);
+            VPUSH(mv);
+            store_var(f, p->list[star]->a->var, mv);
+        }
+    }
+    ok = 1;
+done:
+    vsp = base;
+    return ok;
+}
+static int pat_map_match(Frame *f, Node *p, Value v)
+{
+    Value *base = vsp;
+    Dict *d, *rest = NULL;
+    long i;
+    int ok = 0;
+    if (v.t == T_DICT) d = AS_DICT(v);
+    else if (v.t == T_INST && AS_INST(v)->pay.t == T_DICT) d = AS_DICT(AS_INST(v)->pay);
+    else return 0;
+    if (p->a) {
+        Value rv;
+        rest = dict_new();
+        rv = mkobj(rest, T_DICT);
+        VPUSH(rv);
+        for (i = 0; i < d->used; i++)
+            if (d->e[i].k.t != T_UNSET) dict_set(rest, d->e[i].k, d->e[i].v);
+    }
+    for (i = 0; i + 1 < p->n; i += 2) {
+        Value k = eval(f, p->list[i]), x;
+        VPUSH(k);
+        if (!dict_get(d, k, &x)) goto done;
+        if (!pat_match(f, p->list[i + 1], x)) goto done;
+        if (rest) dict_del(rest, k);
+    }
+    if (p->a) store_var(f, p->a->var, base[0]);
+    ok = 1;
+done:
+    vsp = base;
+    return ok;
+}
+static int pat_cls_match(Frame *f, Node *p, Value v)
+{
+    Value *base = vsp;
+    Value cv = eval(f, p->a), x;
+    Class *c;
+    long i;
+    int ok = 0;
+    VPUSH(cv);
+    if (cv.t != T_CLASS) throw_new(cls_TypeError, "called match pattern must be a class");
+    c = AS_CLASS(cv);
+    if (!isinst(v, cv)) goto done;
+    if (p->n > 0) {
+        if (pat_is_selfmatch(c)) {
+            if (p->n > 1)
+                throw_new(cls_TypeError, "%.60s() accepts 1 positional sub-pattern (%d given)",
+                    c->name->s, p->n);
+            if (!pat_match(f, p->list[0], v)) goto done;
+        } else {
+            Value ma;
+            if (!try_attr(cv, intern_c("__match_args__"), &ma)) {
+                Value df;
+                ma = mktuple_from(NULL, 0);
+                VPUSH(ma);
+                /* dataclass without __match_args__: the init fields that are not keyword-only */
+                if (try_attr(cv, intern_c("__dataclass_fields__"), &df) && df.t == T_DICT) {
+                    List *nl = list_new(4);
+                    Dict *dd = AS_DICT(df);
+                    long j;
+                    ma = mklist(nl);
+                    VPUSH(ma);
+                    for (j = 0; j < dd->used; j++) {
+                        Value fi, ko;
+                        if (dd->e[j].k.t == T_UNSET) continue;
+                        if (try_attr(dd->e[j].v, intern_c("init"), &fi) && fi.t == T_BOOL &&
+                            !fi.u.i) continue;
+                        if (try_attr(dd->e[j].v, intern_c("kw_only"), &ko) && ko.t == T_BOOL &&
+                            ko.u.i) continue;
+                        list_push(nl, dd->e[j].k);
+                    }
+                    ma = mktuple_from(nl->a, nl->n);
+                }
+            }
+            if (ma.t != T_TUPLE) throw_new(cls_TypeError, "__match_args__ must be a tuple");
+            if (AS_LIST(ma)->n < p->n)
+                throw_new(cls_TypeError, "%.60s() accepts %ld positional sub-pattern%s (%d given)",
+                    c->name->s, AS_LIST(ma)->n, AS_LIST(ma)->n == 1 ? "" : "s", p->n);
+            for (i = 0; i < p->n; i++) {
+                Value nm = AS_LIST(ma)->a[i];
+                if (nm.t != T_STR)
+                    throw_new(cls_TypeError, "__match_args__ elements must be strings");
+                if (!try_attr(v, intern_str(AS_STR(nm)), &x)) goto done;
+                VPUSH(x);
+                if (!pat_match(f, p->list[i], x)) goto done;
+            }
+        }
+    }
+    for (i = 0; i < p->b->n; i++) {
+        Value nm = p->b->list[i]->val;
+        if (!try_attr(v, intern_str(AS_STR(nm)), &x)) goto done;
+        VPUSH(x);
+        if (!pat_match(f, p->c->list[i], x)) goto done;
+    }
+    ok = 1;
+done:
+    vsp = base;
+    return ok;
+}
+static int pat_match(Frame *f, Node *p, Value v)
+{
+    long i;
+    switch (p->kind) {
+    case P_CAP:
+        if (p->a) store_var(f, p->a->var, v);
+        return 1;
+    case P_LIT: {
+        Value l = eval(f, p->a);
+        if (p->op) return l.t == v.t && (l.t == T_NONE || l.u.i == v.u.i);
+        return py_eq(v, l);
+    }
+    case P_VAL: {
+        Value l = eval(f, p->a);
+        return py_eq(v, l);
+    }
+    case P_AS:
+        if (!pat_match(f, p->a, v)) return 0;
+        store_var(f, p->b->var, v);
+        return 1;
+    case P_OR:
+        for (i = 0; i < p->n; i++) if (pat_match(f, p->list[i], v)) return 1;
+        return 0;
+    case P_SEQ: return pat_seq_match(f, p, v);
+    case P_MAP: return pat_map_match(f, p, v);
+    case P_CLS: return pat_cls_match(f, p, v);
+    default: break;
+    }
+    return 0;
+}
+
 static Value eval_binop_fast(Frame *f, Node *n)
 {
     Value l = eval(f, n->a), r;
@@ -890,6 +1107,7 @@ static Value eval(Frame *f, Node *n)
         vsp--;
         return wv;
     }
+    case N_MATCH: return mkbool(pat_match(f, n->b, eval(f, n->a)));
     case N_IFEXP:
         return py_truthy(eval(f, n->a)) ? eval(f, n->b) : eval(f, n->c);
     case N_CMP: {
@@ -1092,11 +1310,90 @@ static void do_raise(Value v)
     throw_val(v);
 }
 
+static void eg_split(Value eg, Value cond, Value *m, Value *r);
+static Value eg_new(Class *c, Value msg, Value seq);
+static int eg_is_group(Value v);
+static Value eg_attr(Value eg, const char *nm);
+/* try / except* ... : not resumable inside generators (no yield in handlers) */
+static int exec_try_star(Frame *f, Node *n)
+{
+    Value *sp0 = vsp, exc, rest, match, raised, pending = NONE_V;
+    int st = 0, k, naked = 0, fst;
+    List *rl;
+    VPUSH(NONE_V);          /* sp0[0]: pending exception, sp0[1]: saved return value */
+    VPUSH(NONE_V);
+    VPUSH(NONE_V);          /* sp0[2]: remaining group */
+    VPUSH(NONE_V);          /* sp0[3]: raised list */
+    if (protected_block(f, n->a, &st, &exc)) {
+        Value saved_h = handled_exc;
+        Value grp = exc;
+        st = 0;
+        if (!eg_is_group(exc)) {
+            Value one = mktuple_from(&exc, 1);
+            VPUSH(one);
+            grp = eg_new(cls_BaseExceptionGroup, mkstr("", 0), one);
+            naked = 1;
+        }
+        rest = grp;
+        sp0[2] = rest;
+        raised = mklist(list_new(4));
+        sp0[3] = raised;
+        rl = AS_LIST(raised);
+        for (k = 0; k < n->n && rest.t != T_NONE; k++) {
+            Node *h = n->list[k];
+            Value cond = eval(f, h->a), rest2, hexc;
+            VPUSH(cond);
+            eg_split(rest, cond, &match, &rest2);
+            if (match.t == T_NONE) continue;
+            VPUSH(match);
+            rest = rest2;
+            sp0[2] = rest;
+            if (h->b) store_var(f, h->b->var, match);
+            handled_exc = match;
+            if (protected_block(f, h->c, &st, &hexc)) {
+                list_push(rl, hexc);
+            } else if (st == ST_YIELD) {
+                throw_new(cls_RuntimeError, "yield inside except* is not supported");
+            }
+            handled_exc = saved_h;
+            if (h->b) store_var(f, h->b->var, UNSET_V);
+            if (st != 0) break;
+        }
+        if (rest.t != T_NONE) {
+            if (naked && rl->n == 0) pending = AS_LIST(eg_attr(rest, "exceptions"))->a[0];
+            else if (rl->n == 0) pending = rest;
+            else list_push(rl, rest);
+        }
+        if (pending.t == T_NONE && rl->n > 0) {
+            if (rl->n == 1) pending = rl->a[0];
+            else pending = eg_new(cls_BaseExceptionGroup, mkstr("", 0), raised);
+        }
+        sp0[0] = pending;
+        if (st) sp0[1] = f->ret;
+    } else if (st == 0 && n->c) {
+        Value e2;
+        if (protected_block(f, n->c, &st, &e2)) sp0[0] = e2;
+        else if (st) sp0[1] = f->ret;
+    } else if (st) {
+        sp0[1] = f->ret;
+    }
+    if (n->d) {
+        fst = exec_block(f, n->d);
+        if (fst != 0) { vsp = sp0; return fst; }
+    }
+    pending = sp0[0];
+    if (pending.t != T_NONE) { vsp = sp0; throw_val(pending); }
+    if (st) f->ret = sp0[1];
+    vsp = sp0;
+    return st;
+}
+
 static int exec_try(Frame *f, Node *n)
 {
     int phase = 0, pend = 0, st = 0, k;
     Value *sp0 = vsp, exc;
     Value *slot;
+    if (n->level) return exec_try_star(f, n);
     VPUSH(NONE_V);
     slot = sp0;
     if (f->resuming) {
@@ -1646,6 +1943,22 @@ static int exec(Frame *f, Node *n)
         vsp = base;
         return 0; }
     case S_CLASS: exec_class(f, n); return 0;
+    case S_ANNOT: {
+        Var *v = n->var;
+        Value av = UNSET_V, ann;
+        if (v->kind == VK_NS) {
+            Value *pv = f->ns ? amap_get(&f->ns->ns, v->name) : NULL;
+            if (pv) av = *pv;
+        } else if (v->kind == VK_GLOBAL) av = G[v->slot];
+        ann = eval(f, n->a);
+        VPUSH(ann);
+        if (av.t != T_DICT) {
+            av = mkobj(dict_new(), T_DICT);
+            store_var(f, v, av);
+        }
+        dict_set(AS_DICT(av), mkobj(n->name, T_STR), ann);
+        vsp--;
+        return 0; }
     case S_TRY: return exec_try(f, n);
     case S_RAISE:
         if (n->a) do_raise(eval(f, n->a));

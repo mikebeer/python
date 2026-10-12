@@ -1453,7 +1453,13 @@ exc_repr: procedure = .string
 exc_str: procedure = .string
   arg x = .int
   a = .int
+  n = .int
   a = exc_args(x)
+  if cls_issub(ob_c[x % 2], C_BASEEXCEPTIONGROUP) = 1 & inst_get(x, M_EXCEPTIONS) > 0 then do
+    n = ob_n[inst_get(x, M_EXCEPTIONS) % 2]
+    if n = 1 then return str_of(inst_get(x, M_MESSAGE)) || " (1 sub-exception)"
+    return str_of(inst_get(x, M_MESSAGE)) || " (" || n || " sub-exceptions)"
+  end
   if ob_n[a % 2] = 0 then return ""
   if ob_n[a % 2] = 1 then do
     if cls_issub(ob_c[x % 2], C_KEYERROR) = 1 then return repr_of(sl[ob_p[a % 2]])

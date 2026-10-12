@@ -1,0 +1,37 @@
+DEBUG:app:d 1
+INFO:app:i 2 x
+WARNING:app:w
+ERROR:app:e 5
+CRITICAL:app:c
+Level 25:app:custom
+Level 25 30 INFO
+NOTICE
+True app.sub 10 True
+True True app.sub.z
+WARNING|in both|app.sub
+['INFO:app.sub:not in h2', 'WARNING:app.sub:in both']
+'INFO:app:keep me\n'
+True hello w INFO n
+INFO    |hello w|20
+2023-11-14 22:13:20,005|5|hello w
+22:13:20
+ValueError Invalid format '%(bad' for '%' style
+INFO hello w
+msg ValueError: boom
+root 30 True
+''
+INFO:app:via adapter
+['INFO yes', 'WARNING warn x']
+40 30 50
+[]
+NullHandler 0
+INFO root root info
+WARNING zed from zed 42
+1 20
+root None
+False 40
+<Logger x.y.z (ERROR)> <RootLogger root (INFO)>
+mk hi 1
+'hi 1hi 1'
+1
+['with extra bob']

@@ -389,21 +389,8 @@ BI(m_fsum)
     free(p);
     return mkfloat(hi);
 }
-static double d_log1p(double x)
-{
-    double u = 1.0 + x;
-    if (u == 1.0) return x;
-    return log(u) * x / (u - 1.0);
-}
-static double d_expm1(double x)
-{
-    double u = exp(x), um1;
-    if (u == 1.0) return x;
-    um1 = u - 1.0;
-    if (um1 == -1.0) return -1.0;
-    if (u - u != 0) return u;
-    return um1 * x / log(u);
-}
+static double d_log1p(double x) { return n_log1p(x); }
+static double d_expm1(double x) { return n_expm1(x); }
 static double d_erf_series(double x)
 {
     double term = x, sum = x, x2 = x * x;
@@ -611,240 +598,6 @@ BI(m_dist)
     return mkfloat(sqrt(s));
 }
 
-/* ---- random ----------------------------------------------------------- */
-static unsigned long rng_state = 2463534242UL;
-static unsigned long rng_next(void)
-{
-    unsigned long s = rng_state & 0xffffffffUL;
-    s ^= (s << 13) & 0xffffffffUL;
-    s ^= (s >> 17);
-    s ^= (s << 5) & 0xffffffffUL;
-    rng_state = s & 0xffffffffUL;
-    return rng_state;
-}
-static double rng_double(void)
-{
-    unsigned long a = rng_next() >> 5, b = rng_next() >> 6;
-    return ((double)a * 67108864.0 + (double)b) / 9007199254740992.0;
-}
-static long rng_below(long n)
-{
-    if (n <= 0) return 0;
-    return (long)(rng_double() * (double)n);
-}
-BI(r_seed)
-{
-    unsigned long h = 2463534242UL;
-    if (x->n > 0 && A(0).t != T_NONE) h = (py_hash(A(0)) * 2654435761UL + 12345UL) & 0xffffffffUL;
-    else h = host_seed() & 0xffffffffUL;
-    if (h == 0) h = 88172645UL;
-    rng_state = h;
-    rng_next(); rng_next();
-    return NONE_V;
-}
-BI(r_random) { (void)x; return mkfloat(rng_double()); }
-/* k random bits as an integer (any k) */
-static Value rng_bits_v(long k)
-{
-    Value r = mkint(0);
-    while (k > 0) {
-        long take = k > 24 ? 24 : k;
-        unsigned long w = (rng_next() >> 8) & 0xffffffUL;
-        w >>= 24 - take;
-        r = int_add(int_mul(r, mkint(1L << take)), mkint((long)w));
-        k -= take;
-    }
-    return r;
-}
-/* a random integer in [0, n) for n > 0 of any size */
-static Value rng_below_v(Value n)
-{
-    if (n.t == T_INT && n.u.i < 1073741824L) return mkint(rng_below(n.u.i));
-    {
-        long bits = int_bitlen(int_sub(n, mkint(1)));
-        Value r;
-        do r = rng_bits_v(bits); while (int_cmp(r, n) >= 0);
-        return r;
-    }
-}
-BI(r_randint)
-{
-    Value a, b;
-    need(x, 2, 2, "randint");
-    a = need_intv(A(0), "randint"); b = need_intv(A(1), "randint");
-    if (int_cmp(b, a) < 0) {
-        Buf bf;
-        buf_init(&bf);
-        int_str(a, &bf); buf_add(&bf, ", "); int_str(int_add(b, mkint(1)), &bf);
-        throw_new(cls_ValueError, "empty range in randrange(%.200s)", bf.s);
-    }
-    return int_add(a, rng_below_v(int_add(int_sub(b, a), mkint(1))));
-}
-BI(r_randrange)
-{
-    Value a = mkint(0), b, s = mkint(1), n, w;
-    need(x, 1, 3, "randrange");
-    if (x->n == 1) {
-        b = need_intv(A(0), "randrange");
-        if (int_sign(b) <= 0) throw_new(cls_ValueError, "empty range for randrange()");
-        return rng_below_v(b);
-    }
-    a = need_intv(A(0), "randrange"); b = need_intv(A(1), "randrange");
-    if (x->n == 3) s = need_intv(A(2), "randrange");
-    if (int_sign(s) == 0) throw_new(cls_ValueError, "zero step for randrange()");
-    w = int_sub(b, a);
-    if (int_sign(s) > 0) n = int_floordiv(int_add(w, int_sub(s, mkint(1))), s);
-    else n = int_floordiv(int_add(w, int_add(s, mkint(1))), s);
-    if (int_sign(n) <= 0) {
-        Buf bf;
-        buf_init(&bf);
-        int_str(a, &bf); buf_add(&bf, ", "); int_str(b, &bf);
-        if (!(s.t == T_INT && s.u.i == 1)) { buf_add(&bf, ", "); int_str(s, &bf); }
-        throw_new(cls_ValueError, "empty range in randrange(%.300s)", bf.s);
-    }
-    return int_add(a, int_mul(s, rng_below_v(n)));
-}
-BI(r_getrandbits)
-{
-    long k;
-    need(x, 1, 1, "getrandbits");
-    k = need_long(A(0), "k");
-    if (k < 0) throw_new(cls_ValueError, "number of bits must be non-negative");
-    return rng_bits_v(k);
-}
-BI(r_randbytes)
-{
-    long n, i;
-    char *buf;
-    Value r;
-    need(x, 1, 1, "randbytes");
-    n = need_long(A(0), "n");
-    if (n < 0) throw_new(cls_ValueError, "negative argument not allowed");
-    if (n > 400000000L) throw_new(cls_MemoryError, "");
-    buf = (char *)xmalloc((size_t)n + 1);
-    for (i = 0; i < n; i++) buf[i] = (char)((rng_next() >> 12) & 255UL);
-    r = mkbytes(buf, n);
-    free(buf);
-    return r;
-}
-/* normal deviate with the polar method (two uniforms) */
-static double rng_gauss(void)
-{
-    double u, v, q;
-    do {
-        u = 2.0 * rng_double() - 1.0;
-        v = 2.0 * rng_double() - 1.0;
-        q = u * u + v * v;
-    } while (q >= 1.0 || q == 0.0);
-    return u * sqrt(-2.0 * log(q) / q);
-}
-BI(r_gauss)
-{
-    double mu = 0.0, sigma = 1.0;
-    need(x, 0, 2, "gauss");
-    if (x->n > 0) mu = dbl_arg(x, 0);
-    if (x->n > 1) sigma = dbl_arg(x, 1);
-    return mkfloat(mu + sigma * rng_gauss());
-}
-BI(r_expovariate)
-{
-    double lambd;
-    need(x, 1, 1, "expovariate");
-    lambd = dbl_arg(x, 0);
-    if (lambd == 0.0) throw_new(cls_ZeroDivisionError, "float division by zero");
-    return mkfloat(-log(1.0 - rng_double()) / lambd);
-}
-BI(r_choices)
-{
-    Value l, kv = kwget(x, "k"), wv = kwget(x, "weights"), res;
-    long n, k = 1, i;
-    List *out;
-    need(x, 1, 3, "choices");
-    if (x->n > 1) wv = A(1);
-    if (x->n > 2) kv = A(2);
-    if (kv.t != T_UNSET) k = need_long(kv, "k");
-    l = iter_to_list(A(0));
-    VPUSH(l);
-    n = AS_LIST(l)->n;
-    if (n == 0 && k > 0) throw_new(cls_IndexError, "Cannot choose from an empty sequence");
-    out = list_new(k > 0 ? k : 0);
-    res = mklist(out);
-    VPUSH(res);
-    if (wv.t != T_UNSET && wv.t != T_NONE) {
-        Value wl = iter_to_list(wv);
-        double total = 0.0;
-        VPUSH(wl);
-        if (AS_LIST(wl)->n != n)
-            throw_new(cls_ValueError, "The number of weights does not match the population");
-        for (i = 0; i < n; i++) total += to_dbl(AS_LIST(wl)->a[i]);
-        for (i = 0; i < k; i++) {
-            double t = rng_double() * total, c = 0.0;
-            long j;
-            for (j = 0; j < n - 1; j++) { c += to_dbl(AS_LIST(wl)->a[j]); if (t < c) break; }
-            list_push(out, AS_LIST(l)->a[j]);
-        }
-    } else {
-        for (i = 0; i < k; i++) list_push(out, AS_LIST(l)->a[rng_below(n)]);
-    }
-    vsp = vsp - 2 - (wv.t != T_UNSET && wv.t != T_NONE ? 1 : 0);
-    return res;
-}
-BI(r_uniform)
-{
-    double a, b;
-    need(x, 2, 2, "uniform");
-    a = dbl_arg(x, 0); b = dbl_arg(x, 1);
-    return mkfloat(a + (b - a) * rng_double());
-}
-BI(r_choice)
-{
-    Value l, r;
-    long n;
-    need(x, 1, 1, "choice");
-    l = iter_to_list(A(0));
-    n = AS_LIST(l)->n;
-    if (n == 0) throw_new(cls_IndexError, "Cannot choose from an empty sequence");
-    r = AS_LIST(l)->a[rng_below(n)];
-    return r;
-}
-BI(r_shuffle)
-{
-    List *l;
-    long i;
-    need(x, 1, 1, "shuffle");
-    if (A(0).t != T_LIST) throw_new(cls_TypeError, "shuffle requires a list");
-    l = AS_LIST(A(0));
-    for (i = l->n - 1; i > 0; i--) {
-        long j = rng_below(i + 1);
-        Value t = l->a[i];
-        l->a[i] = l->a[j];
-        l->a[j] = t;
-    }
-    return NONE_V;
-}
-BI(r_sample)
-{
-    Value l;
-    long k, n, i;
-    List *p;
-    need(x, 2, 2, "sample");
-    l = iter_to_list(A(0));
-    VPUSH(l);
-    p = AS_LIST(l);
-    n = p->n;
-    k = to_index(A(1));
-    if (k < 0 || k > n) throw_new(cls_ValueError, "Sample larger than population or is negative");
-    for (i = 0; i < k; i++) {
-        long j = i + rng_below(n - i);
-        Value t = p->a[i];
-        p->a[i] = p->a[j];
-        p->a[j] = t;
-    }
-    p->n = k;
-    vsp--;
-    return l;
-}
-
 /* ---- sys / time ------------------------------------------------------- */
 static Value std_file(FILE *fp, int out)
 {
@@ -1043,6 +796,7 @@ static void init_runtime(int argc, char **argv)
         *exc_table[i].var = new_class(exc_table[i].name, base, CF_BUILTIN | CF_EXC);
     }
     cls_BaseException->flags |= CF_EXC;
+    eg_init_classes();
     set_global(intern_c("IOError"), mkobj(cls_OSError, T_CLASS));
     set_global(intern_c("None"), NONE_V);
     set_global(intern_c("True"), TRUE_V);
@@ -1307,20 +1061,7 @@ static void init_runtime(int argc, char **argv)
     mod_val(m, "inf", mkfloat(HUGE_VAL));
     mod_val(m, "nan", mkfloat(HUGE_VAL - HUGE_VAL));
     np_init();
-    m = new_module("random");
-    mod_def(m, "seed", r_seed); mod_def(m, "random", r_random); mod_def(m, "randint", r_randint);
-    mod_def(m, "randrange", r_randrange); mod_def(m, "uniform", r_uniform);
-    mod_def(m, "choice", r_choice);
-    mod_def(m, "shuffle", r_shuffle);
-    mod_def(m, "sample", r_sample);
-    mod_def(m, "getrandbits", r_getrandbits); mod_def(m, "randbytes", r_randbytes);
-    mod_def(m, "gauss", r_gauss); mod_def(m, "normalvariate", r_gauss);
-    mod_def(m, "expovariate", r_expovariate); mod_def(m, "choices", r_choices);
-    {
-        Args seedargs;
-        seedargs.n = 0; seedargs.a = NULL; seedargs.nk = 0; seedargs.kw = NULL;
-        r_seed(&seedargs);
-    }
+    pyrand_init();
     re_init();
     json_init();
     struct_init();

@@ -48,6 +48,8 @@ dir
 __import__
 _exc_init
 _obj_init
+_eg_split
+_eg_subgroup
 _identity
 _decorator
 _second

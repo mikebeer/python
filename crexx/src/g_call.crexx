@@ -168,6 +168,13 @@ bind_args: procedure = .int
     do j = 1 to nr
       kd = pr_kind[r0 + j - 1]
       if (kd = 0 | kd = 2) & pr_name[r0 + j - 1] == nm then do
+        if pr_po[r0 + j - 1] = 1 then do
+          if fd_ks[fd] = 0 then do
+            call raise_exc C_TYPEERROR, fd_name[fd] || "() got some positional-only arguments passed as keyword arguments: '" || nm || "'"
+            return 0
+          end
+          leave
+        end
         if vp[nf + pr_slot[r0 + j - 1]] \= 0 then do
           call raise_exc C_TYPEERROR, fd_name[fd] || "() got multiple values for argument '" || nm || "'"
           return 0
@@ -474,6 +481,7 @@ getattr_obj: procedure = .int
     if nid = M___NAME__ | nid = M___QUALNAME__ then return mkstr(fd_name[ob_x[o % 2]])
     if nid = M___DOC__ then return NONE_OOP
     if nid = M___CLASS__ then return cl_obj[C_FUNCTION]
+    if nid = M___ANNOTATIONS__ then return func_annots(o)
     return no_attr(o, nid)
   end
   if k = K_BUILTIN then do

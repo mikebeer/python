@@ -1,0 +1,30 @@
+import difflib
+from difflib import SequenceMatcher
+s = SequenceMatcher(None, "abxcd", "abcd")
+print(s.ratio(), s.get_matching_blocks(), s.get_opcodes(), s.quick_ratio(), s.real_quick_ratio())
+s = SequenceMatcher(None, "private Thread currentThread;", "private volatile Thread currentThread;")
+print(round(s.ratio(), 3), s.find_longest_match(0, 29, 0, 38))
+for tag, i1, i2, j1, j2 in s.get_opcodes():
+    print(tag, i1, i2, j1, j2)
+print(SequenceMatcher(lambda c: c == ' ', "a b c", "abc").ratio(), SequenceMatcher(None, [1, 2, 3, 4], [2, 3, 5]).get_opcodes())
+print(difflib.get_close_matches("appel", ["ape", "apple", "peach", "puppy"]), difflib.get_close_matches("wheel", ["wheat", "heel", "whale"], n=2, cutoff=0.5))
+a = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n".splitlines(True)
+b = "one\ntwo\n3\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\nthirteen\n".splitlines(True)
+print(''.join(difflib.unified_diff(a, b, 'a.txt', 'b.txt', '2020-01-01', '2020-01-02')))
+print(''.join(difflib.unified_diff(a, b, n=1)))
+print(''.join(difflib.context_diff(a, b, 'a.txt', 'b.txt')))
+print(list(difflib.unified_diff(['x'], ['x'])))
+print(list(difflib.unified_diff(['a', 'b'], ['a', 'c'], lineterm='')))
+d = list(difflib.ndiff(['hello world\n', 'foo\n', 'bar\n', 'same\n'], ['hello, world\n', 'foo\n', 'baz\n', 'same\n', 'new\n']))
+print(''.join(d))
+print(list(difflib.restore(d, 1)), list(difflib.restore(d, 2)))
+print(list(difflib.Differ().compare(['a b c d e f g'], ['a b x d e f h'])))
+print(difflib.IS_LINE_JUNK('  \n'), difflib.IS_LINE_JUNK('x'), difflib.IS_CHARACTER_JUNK(' '), difflib.IS_CHARACTER_JUNK('x'))
+print(list(difflib.diff_bytes(difflib.unified_diff, [b'a\n'], [b'b\n'], b'x', b'y')))
+words = ['python', 'pythonic', 'pyton', 'java', 'javascript']
+print(difflib.get_close_matches('pythn', words, 5, 0.4))
+m = SequenceMatcher(None, "tide", "diet")
+print(m.get_matching_blocks(), m.ratio())
+big_a = list(range(300)) + [1] * 5
+big_b = list(range(10, 310))
+print(SequenceMatcher(None, big_a, big_b).ratio(), SequenceMatcher(None, big_a, big_b, autojunk=False).ratio())

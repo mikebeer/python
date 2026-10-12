@@ -1,68 +1,76 @@
-# Pure Python additions to the native random module.
-import math as _math
-import random as _r
+# random: the exact CPython Mersenne Twister implementation lives in pyrandom.py (pure Python, bit-exact with
+# CPython 3.13: seeding incl. sha512 str seeds, all distributions, getstate/setstate).
+# While an interpreter keeps its own native `random` module, native names win and this file only supplies the
+# names the native module lacks (Random class, triangular, betavariate, ...); the module level functions defined
+# here then draw from the native generator so that random.seed() stays deterministic.  When the interpreter lets
+# this file replace the native module (or the native module is renamed/removed) everything is exact.
+import pyrandom as _p
+from pyrandom import (Random, SystemRandom, NV_MAGICCONST, LOG4, SG_MAGICCONST, BPF, RECIP_BPF, TWOPI)
 
-_gauss_next = None
+__all__ = _p.__all__ + ["SystemRandom"]
 
-
-def gauss(mu=0.0, sigma=1.0):
-    u1 = _r.random()
-    while u1 <= 1e-300:
-        u1 = _r.random()
-    u2 = _r.random()
-    z = _math.sqrt(-2.0 * _math.log(u1)) * _math.cos(2.0 * _math.pi * u2)
-    return mu + z * sigma
-
-
-normalvariate = gauss
-
-
-def lognormvariate(mu, sigma):
-    return _math.exp(gauss(mu, sigma))
+try:
+    import random as _nat
+    if not hasattr(_nat, 'seed') or type(_nat.seed).__name__ != 'builtin_function_or_method':
+        _nat = None
+except ImportError:
+    _nat = None
 
 
-def expovariate(lambd=1.0):
-    u = _r.random()
-    while u <= 1e-300:
-        u = _r.random()
-    return -_math.log(u) / lambd
+class _NativeBacked(Random):
+    """Used while the interpreter's own (non CPython-exact) native `random` module shadows this file:
+    module level functions that the native module lacks draw from the native generator so that
+    random.seed() keeps working.  When this file is the real `random` module, _nat is None and the
+    exact Mersenne Twister above is used."""
+
+    def seed(self, a=None, version=2):
+        if a is None:
+            return
+        if not isinstance(a, int):
+            Random.seed(self, a, version)
+            a = self.getrandbits(32)
+        _nat.seed(a)
+
+    def random(self):
+        return _nat.random()
+
+    def getrandbits(self, k):
+        r = 0
+        n = 0
+        while n < k:
+            r = (r << 32) | int(_nat.random() * 4294967296.0)
+            n += 32
+        return r >> (n - k) if n > k else r
+
+    def getstate(self):
+        raise NotImplementedError("getstate needs the exact Mersenne Twister")
+
+    def setstate(self, state):
+        raise NotImplementedError("setstate needs the exact Mersenne Twister")
 
 
-def triangular(low=0.0, high=1.0, mode=None):
-    u = _r.random()
-    c = 0.5 if mode is None else (mode - low) / (high - low)
-    if u > c:
-        u = 1.0 - u
-        c = 1.0 - c
-        low, high = high, low
-    return low + (high - low) * _math.sqrt(u * c)
-
-
-def getrandbits(k):
-    r = 0
-    n = 0
-    while n < k:
-        r = r * 2 + int(_r.random() * 2)
-        n += 1
-    return r
-
-
-def choices(population, weights=None, cum_weights=None, k=1):
-    n = len(population)
-    if cum_weights is None and weights is not None:
-        cum_weights = []
-        t = 0.0
-        for w in weights:
-            t += w
-            cum_weights.append(t)
-    out = []
-    for _ in range(k):
-        if cum_weights is None:
-            out.append(population[int(_r.random() * n)])
-        else:
-            u = _r.random() * cum_weights[-1]
-            i = 0
-            while i < n - 1 and cum_weights[i] <= u:
-                i += 1
-            out.append(population[i])
-    return out
+_inst = _NativeBacked() if _nat is not None else _p._inst
+betavariate = _inst.betavariate
+binomialvariate = _inst.binomialvariate
+choice = _inst.choice
+choices = _inst.choices
+expovariate = _inst.expovariate
+gammavariate = _inst.gammavariate
+gauss = _inst.gauss
+getrandbits = _inst.getrandbits
+getstate = _inst.getstate
+lognormvariate = _inst.lognormvariate
+normalvariate = _inst.normalvariate
+paretovariate = _inst.paretovariate
+randbytes = _inst.randbytes
+randint = _inst.randint
+random = _inst.random
+randrange = _inst.randrange
+sample = _inst.sample
+seed = _inst.seed
+setstate = _inst.setstate
+shuffle = _inst.shuffle
+triangular = _inst.triangular
+uniform = _inst.uniform
+vonmisesvariate = _inst.vonmisesvariate
+weibullvariate = _inst.weibullvariate

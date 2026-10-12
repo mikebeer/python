@@ -8,7 +8,7 @@ and passes the tests in `../tests` (stage 1 and the language / import / linalg s
     ./py                      read the program from stdin
 
 Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
-`py.crexx` to bytecode (about 3.5 minutes); later runs start in about 2 s with a stock VM, 0.4 s with the patched one (see `STARTUP.md`, `CREXX_VM`).
+`py.crexx` to bytecode (about 5 to 7 minutes); later runs start in about 2 s with a stock VM, 0.45 s with the patched one (see `STARTUP.md`, `CREXX_VM`).
 
 ## Layout
 
@@ -20,6 +20,7 @@ Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
   j_np and k_np2 (the built-in `numpy` subset: native ndarray objects of kind `K_ARRAY`, broadcasting,
   reductions, indexing, numpy style array printing), l_bytes (bytes / bytearray, encodings), l_cplx (complex,
   bridge to `pylib/numpy/_cplx.py`), l_sub (subclasses of built-in types, `__new__`), l_sock (`_sock` primitive).
+  n_match (`match` patterns, `ExceptionGroup`, `except*`, `__annotations__`).
 - `src/consts.txt`, `classes.txt`, `builtins.txt`: tables that `build.py` turns into symbolic constants.
 - `build.py`: `python3 build.py` regenerates `py.crexx`.
 - `py`: launcher.
@@ -114,13 +115,38 @@ results of any type, `__abs__ __round__ __format__ __call__ __enter__ __exit__`,
 `eval`/`exec` run the text in a temporary module whose names are copied from and back to the given namespace dict
 (`globals()` and `locals()` return snapshots; `exec` at module level writes new names back to the module).
 
+## Newer syntax (Build 9)
+
+- `match` / `case` (soft keyword: a line that starts with `match`, ends in `:` and is followed by an indented block). The parser
+  rewrites it into `.mN = subject` plus an `if / elif` chain whose conditions are `N_PMATCH` nodes (pattern, subject temp) joined
+  with `and` for the guard, so generators, `return`, `break` and `continue` in a case body need nothing special. Patterns are
+  the nodes `N_PWILD N_PCAP N_PVAL N_PSING N_POR N_PAS N_PSEQ N_PSTAR N_PMAP N_PCLS N_PKW`, matched by `pat_match` (`n_match.crexx`):
+  literals and dotted values (`==`), `None/True/False` (identity), capture, `_`, OR, `as`, sequences with `*rest` (list, tuple, range;
+  not str / bytes), mappings with `**rest` (dicts), class patterns with `__match_args__` (dataclasses set it) and keyword
+  sub-patterns (`int(n)`, `str() as s` match the subject itself), guards, nesting. A temp `.mN` and the captures are ordinary variables of the scope.
+- `:=` (`N_WALRUS`): in a comprehension the target is bound in the nearest enclosing non-comprehension scope (the comprehension
+  scope marks the name as `nonlocal`); allowed in `if` / `while` conditions, call arguments, subscripts, f-string fields.
+- `except*` and `ExceptionGroup` / `BaseExceptionGroup` (classes without a real multiple inheritance: `BaseExceptionGroup` derives from
+  `Exception`, so `except Exception` also catches a group of `BaseException`s). Attributes `message`, `exceptions`; `split` and
+  `subgroup` take a type or tuple of types (no predicate); `derive`, notes and tracebacks do not exist. `exec_star` splits the
+  raised group per handler (a plain exception is wrapped as `ExceptionGroup("", [e])`), merges what handlers raise with the
+  unhandled rest. A `yield` inside an `except*` handler is not supported.
+- Annotations: `x: T = v` at module or class level stores `__annotations__["x"]` (an annotation that fails to evaluate is skipped, `list[int]`
+  evaluates to `list`); `f.__annotations__` is built on request from the parameter / return annotations in the defining frame.
+  Annotations in functions are not evaluated. `/` in parameter lists marks positional-only parameters (`pr_po`; passing one by keyword is a `TypeError` unless the function has `**kwargs`). Star expressions in
+  list / tuple / set / dict displays and calls worked before.
+
 ## Hash values
 
 `hash()` follows CPython 3.13 for int, bool, big int, float, complex, None (4238894112), tuples (xxHash scheme,
 `tup_xx` in `f_ops.crexx`: 64-bit unsigned arithmetic done on two 32-bit halves, products with 16-bit limbs, because the
 VM multiply does not wrap) and frozensets. The tuple hash is only computed when `hash()` or a `__hash__` method asks for it;
 dict and set lookups with tuple keys use the text key and are not slower. Hashes of str and bytes differ from CPython's
-(randomized there), so a tuple containing a str hashes differently. Set iteration order is still insertion order: emulating
+(randomized there), so a tuple containing a str hashes differently. The result of a user `__hash__` follows CPython (`hash_ret`): an int that fits 64 bits is the hash (`-1` becomes `-2`), a larger one
+is reduced like `hash(int)` (`2**63` gives 4, `2**64 + 5` gives 13), any other result raises `TypeError: __hash__ method should return an integer`
+(also for `{x}` and `{x: 1}`, `hk_user`). Dict and set lookups use the raw result as text key (`"h" + value`), so objects whose hashes collide only
+after the reduction stay distinct and equal ones need equal results; `tests/34b_hash_values.py` covers all of this. `tests/34_hash64.py` stays in
+`crexx_skip.txt` only for its set-order half. Set iteration order is still insertion order: emulating
 CPython's table would need a numeric hash on every insertion, which the text-keyed dicts do not compute.
 
 ## Memory management (src/m_gc.crexx)

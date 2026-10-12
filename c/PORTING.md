@@ -70,7 +70,7 @@ uses only ISO C (`time`, `clock`, `fopen`, `getenv`).
 | `host_file_exists/isdir/isfile/size/remove/rename` | `os.path.*`, `os.remove`, `os.rename` | stdio | |
 | `host_getenv`, `host_getcwd`, `host_environ` | `os.getenv`, `os.getcwd`, `os.environ`, `$PYLIB` | `getenv`; cwd and environ only with `PY_POSIX` | |
 | `host_isatty_stdin` | REPL prompt detection | `isatty(0)` with `PY_POSIX` | |
-| `host_time`, `host_clock`, `host_sleep`, `host_seed` | `time.time`, `perf_counter`, `sleep`, random seeding | `gettimeofday`, `nanosleep` with `PY_POSIX`; else `time()` / `clock()` busy wait | |
+| `host_time`, `host_clock`, `host_sleep`, `host_seed`, `host_urandom` | `time.time`, `perf_counter`, `sleep`, random seeding (`host_urandom` fills a buffer from `/dev/urandom`: unseeded `random`, numpy `SeedSequence()` and `SystemRandom`) | `gettimeofday`, `nanosleep` with `PY_POSIX`; else `time()` / `clock()` busy wait | |
 
 Not used anywhere, so no adapter exists: `popen`, `system`, directory
 listing (there is no `os.listdir`), threads. Signals: only `SIGPIPE` is

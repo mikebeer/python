@@ -1,0 +1,35 @@
+b'' b'' b''
+b'' b'' b''
+b'Zg==' b'MY======' b'66'
+b'Ac' b'W&' b'Zg=='
+b'Zm8=' b'MZXQ====' b'666F'
+b'Ao@' b'W^V' b'Zm8='
+b'Zm9v' b'MZXW6===' b'666F6F'
+b'AoDS' b'W^Zo' b'Zm9v'
+b'Zm9vYg==' b'MZXW6YQ=' b'666F6F62'
+b'AoDTs' b'W^Zp|' b'Zm9vYg=='
+b'Zm9vYmE=' b'MZXW6YTB' b'666F6F6261'
+b'AoDTs@/' b'W^Zp|VE' b'Zm9vYmE='
+b'Zm9vYmFy' b'MZXW6YTBOI======' b'666F6F626172'
+b'AoDTs@<)' b'W^Zp|VR8' b'Zm9vYmFy'
+b'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKiss' b'AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWHA5DYPSAIJCEMSC' b'000102030405060708090A0B0C0D0E0F10111213'
+b'!!*-\'"9eu7#RLhG$k3[W&.oNg\'GVB"(`=52*$$(B+<_pR,UFcb' b'009C61O)~M2nh-c3=Iws5D^j+6crX17#SKH9337XAR!_nBqb&%' b'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJC'
+b'//79AAAAACA=' b'777P2AAAAAACA===' b'FFFEFD0000000020'
+b's8Mrs!!!!A' b'|Ni{|0000W' b'__79AAAAACA='
+b'CPNMUOJ1E8======' b'foobar'
+b'foobar' b'foobar' b'foob'
+b'eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4\neHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eA==\n'
+b'hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world'
+b'-_8=' b'\xfb\xff'
+b'abcde' b'jk'
+b'BOu!rD]j\n7BEbo7' b'z+<U'
+Error Incorrect padding
+Error Non-base16 digit found
+Error Incorrect padding
+TypeError a bytes-like object is required, not 'str'
+b'01ab' b'\x01\xab' b'78797a' b'6162-6364'
+907060870 222957957 0 50018
+b'aGkgdGhlcmU=\n' b'hi there' b'eA=='
+b'+:&5L;&\\@=V]R;&0 \n' b'hello world'
+Error Odd-length string
+Error Non-hexadecimal digit found

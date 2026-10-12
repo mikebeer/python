@@ -247,6 +247,11 @@ typedef struct FuncDef {
     int npos;            /* positional parameters */
     int ndefaults;
     int nkwonly;
+    int nposonly;        /* leading parameters that cannot be passed by keyword */
+    int nanns;           /* annotations: names, expressions, return annotation */
+    Str **anames;
+    struct Node **aexprs;
+    struct Node *retann;
     int va_slot, kw_slot;
     Str **pnames;        /* npos + nkwonly names */
     Node **defaults;     /* ndefaults nodes */
@@ -315,7 +320,7 @@ static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, 
     *cls_method, *cls_gen, *cls_module, *cls_iter, *cls_prop, *cls_file, *cls_cell,
     *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice, *cls_dview[3], *cls_notimpl,
         *cls_bytes, *cls_bytearray, *cls_complex, *cls_frozenset;
-static Class *cls_MemoryError;
+static Class *cls_MemoryError, *cls_BaseExceptionGroup, *cls_ExceptionGroup;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError, *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError, *cls_KeyError, *cls_ValueError,
     *cls_TypeError, *cls_NameError, *cls_UnboundLocalError, *cls_AttributeError,

@@ -472,6 +472,20 @@ ev: procedure = .int
     ob_y[o % 2] = cd_obj[n_a[n]]
     return o
   end
+  if t = N_WALRUS then do
+    v = ev(n_b[n], fb)
+    if v = 0 then return 0
+    call store n_a[n], v, fb
+    return v
+  end
+  if t = N_PMATCH then do
+    v = ev(n_b[n], fb)
+    if v = 0 then return 0
+    r = pat_match(n_a[n], v, fb)
+    if unw > 0 then return 0
+    if r = 1 then return TRUE_OOP
+    return FALSE_OOP
+  end
   if t = N_LOCALS then return ev_locals(n, fb)
   if t = N_NAMEERR then return unbound(n)
   if t = N_SLICE then return eval_slice(n, fb)
@@ -1064,6 +1078,10 @@ ex: procedure = .void
     call exec_try n, fb
     return
   end
+  if t = N_ANNOT then do
+    call exec_annot n, fb
+    return
+  end
   if t = N_RAISE then do
     if n_a[n] = 0 then do
       if exc_cur = 0 then do
@@ -1266,6 +1284,8 @@ exec_try: procedure = .void
   hc = n_c[n]
   call ex n_a[n], fb
   if unw = U_RAISE & hc > 0 then do
+    if n_d[al[hs]] = 1 then call exec_star n, fb
+    else do
     exc = unw_v
     matched = 0
     do i = 0 to hc - 1
@@ -1301,6 +1321,7 @@ exec_try: procedure = .void
         end
         leave
       end
+    end
     end
   end
   else if unw = 0 & n_d[n] > 0 then call ex n_d[n], fb

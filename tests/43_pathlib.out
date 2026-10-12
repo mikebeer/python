@@ -1,0 +1,15 @@
+/usr/local/lib/python3.13/site.py PurePosixPath('/usr/local/lib/python3.13/site.py') ('/', 'usr', 'local', 'lib', 'python3.13', 'site.py') site.py .py site /usr/local/lib/python3.13 / /  True
+[PurePosixPath('/usr/local/lib/python3.13'), PurePosixPath('/usr/local/lib'), PurePosixPath('/usr/local'), PurePosixPath('/usr'), PurePosixPath('/')] /usr/local/lib / 5
+/usr/local/lib/python3.13/site.txt /usr/local/lib/python3.13/x.y /usr/local/lib/python3.13/zz.py ['.tar', '.gz'] .gz a.tar
+a/b/c.txt /c/d x/y a/b/c . . / //a /a
+b/c True False
+ValueError '/a/b' is not in the subpath of '/c'
+../b
+True True False True False
+True True [PurePosixPath('a'), PurePosixPath('a/c'), PurePosixPath('b')] True 1
+/etc/x y file:///etc/x%20y a/b a/../b  .hidden  ..
+PosixPath PurePosixPath True True True True a
+False True True b True True
+/a/b/c a/b PosixPath('/a/b') ('a',) y
+ValueError Invalid suffix 'txt'
+ValueError PurePosixPath('/') has an empty name

@@ -1,0 +1,11 @@
+True
+1 True
+['a', 'b', 'c', 'd']
+cycle CycleError
+bye
+16 5 True
+Linux True 0
+['ValueError: bad\n']
+['ZeroDivisionError: division by zero\n']
+True
+True
