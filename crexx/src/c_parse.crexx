@@ -1389,19 +1389,23 @@ finish_scope_fd: procedure = .void
 
 p_lambda: procedure = .int
   fd = .int
+  dln = .int
   sc = .int
   base = .int
   body = .int
   r = .int
   n = .int
+  dln = tk_l[tpp]
   tpp = tpp + 1
   base = p_params(":", 0)
   call expect ":"
   nfd = nfd + 1
   fd = nfd
   fd_mod[fd] = parse_mi
+  fd_ln[fd] = dln
   sc = scope_push(SK_FUNC)
   sc_id[sc] = fd
+  fd_sc[fd] = sc
   call setup_params fd, base
   npq = base
   body = p_test()
@@ -2141,6 +2145,8 @@ p_def: procedure = .int
   n = .int
   dmy = .int
   ra = .int
+  dln = .int
+  dln = tk_l[tpp]
   tpp = tpp + 1
   name = expect_name()
   tn = mkname(name)
@@ -2154,8 +2160,10 @@ p_def: procedure = .int
   nfd = nfd + 1
   fd = nfd
   fd_mod[fd] = parse_mi
+  fd_ln[fd] = dln
   sc = scope_push(SK_FUNC)
   sc_id[sc] = fd
+  fd_sc[fd] = sc
   call setup_params fd, base
   fd_ret[fd] = ra
   fd_name[fd] = name

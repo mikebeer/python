@@ -594,6 +594,67 @@ path_join2: procedure = .string
   if right(a, 1) == "/" then return a || b
   return a || "/" || b
 
+os_err: procedure = .int
+  arg c = .int, en = .int, msg = .string, fn = .string
+  e = .int
+  e = exc_new(c, "[Errno " || en || "] " || msg || ": " || repr_str(fn))
+  call inst_set e, nameid("errno"), mkint(en)
+  call inst_set e, nameid("strerror"), mkstr(msg)
+  call inst_set e, nameid("filename"), mkstr(fn)
+  unw = U_RAISE
+  unw_v = e
+  return 0
+
+/* os.mkdir / rmdir / remove / rename / listdir on top of rxfs */
+os_fs: procedure = .int
+  arg bid = .int, base = .int, na = .int
+  s = .string
+  t = .string
+  r = .int
+  i = .int
+  l = .int
+  ents = .string[]
+  if na < 1 then return nargs_err("os function", na, 1, 2)
+  if kind_of(ast[base + 1]) \= K_STR then do
+    if bid = BI_OS_LISTDIR & ast[base + 1] = NONE_OOP then s = "."
+    else return raise_exc(C_TYPEERROR, "expected str, bytes or os.PathLike object, not " || type_name(ast[base + 1]))
+  end
+  else s = ob_s[ast[base + 1] % 2]
+  if bid = BI_OS_MKDIR then do
+    if file_exists(s) = 1 then return os_err(C_FILEEXISTSERROR, 17, "File exists", s)
+    r = rxfs..mkdir(s)
+    if r \= 0 then return os_err(C_FILENOTFOUNDERROR, 2, "No such file or directory", s)
+    return NONE_OOP
+  end
+  if bid = BI_OS_RMDIR then do
+    if file_exists(s) = 0 then return os_err(C_FILENOTFOUNDERROR, 2, "No such file or directory", s)
+    r = rxfs..rmdir(s)
+    if r \= 0 then return os_err(C_OSERROR, 39, "Directory not empty", s)
+    return NONE_OOP
+  end
+  if bid = BI_OS_REMOVE then do
+    if file_exists(s) = 0 then return os_err(C_FILENOTFOUNDERROR, 2, "No such file or directory", s)
+    r = rxfs..delete(s)
+    if r \= 0 then return os_err(C_OSERROR, 1, "Operation not permitted", s)
+    return NONE_OOP
+  end
+  if bid = BI_OS_RENAME then do
+    if na < 2 | kind_of(ast[base + 2]) \= K_STR then return raise_exc(C_TYPEERROR, "rename: src and dst should be str")
+    t = ob_s[ast[base + 2] % 2]
+    if file_exists(s) = 0 then return os_err(C_FILENOTFOUNDERROR, 2, "No such file or directory", s)
+    r = rxfs..rename(s, t)
+    if r \= 0 then return os_err(C_OSERROR, 1, "Operation not permitted", s)
+    return NONE_OOP
+  end
+  /* listdir */
+  if file_exists(s) = 0 then return os_err(C_FILENOTFOUNDERROR, 2, "No such file or directory", s)
+  r = rxfs..listdir(s, ents)
+  l = mklist(8)
+  do i = 1 to ents.0
+    if ents[i] \== "." & ents[i] \== ".." then call list_append l, mkstr(ents[i])
+  end
+  return l
+
 bcall_os: procedure = .int
   arg bid = .int, base = .int, na = .int, nk = .int
   s = .string
@@ -617,6 +678,16 @@ bcall_os: procedure = .int
     return mkstr(s)
   end
   if bid = BI_SYS_GETRECURSIONLIMIT then return mkint(900)
+  if bid = BI_SYS_EXC_INFO then return bi_exc_info()
+  if bid = BI_SYS__GETFRAME then do
+    i = 0
+    if na >= 1 then do
+      if ast[base + 1] // 2 = 0 then return raise_exc(C_TYPEERROR, "an integer is required")
+      i = (ast[base + 1] - 1) % 2
+    end
+    return bi_getframe(i)
+  end
+  if bid = BI_OS_MKDIR | bid = BI_OS_RMDIR | bid = BI_OS_REMOVE | bid = BI_OS_RENAME | bid = BI_OS_LISTDIR then return os_fs(bid, base, na)
   if bid = BI_TIME_TIME_NS then do
     z = ((date("UN") as .int) * 86400) as .float
     z = z * 1000000000.0 + ((time("US") as .int) as .float) * 1000.0
@@ -669,6 +740,7 @@ bcall_os: procedure = .int
     end
     return v
   end
+  if bid = BI_OS_PATH_NORMCASE then return ast[base + 1]
   if bid = BI_OS_PATH_NORMPATH then return mkstr(path_norm(s))
   if bid = BI_OS_PATH_ABSPATH then do
     if left(s, 1) \== "/" then do

@@ -270,6 +270,9 @@ callfunc: procedure = .int
   wd = wd + 1
   pm = ny
   mi = fd_mod[fd]
+  cs_fd[cdepth + 1] = fd
+  cs_ln[cdepth + 1] = fd_ln[fd]
+  cs_fb[cdepth + 1] = nf
   if mi \= cur_mi then do
     sv_g = cur_mi
     cur_mi = mi
@@ -279,6 +282,7 @@ callfunc: procedure = .int
     gfb = mod_fb[sv_g]
   end
   else call ex fd_body[fd], nf
+  if unw = U_RAISE then call tb_add unw_v, fd, cs_ln[cdepth + 1]
   cdepth = cdepth - 1
   if unw = U_RET then do
     unw = 0
@@ -418,6 +422,11 @@ getattr_obj: procedure = .int
     m = cls_find(c, M___GETATTR__)
     if m > 0 then return call2(m, o, mkstr(nid_name[nid]))
     if nid = M___DICT__ then return inst_dict(o)
+    if cls_issub(c, C_BASEEXCEPTION) = 1 then do
+      if nid = M___TRACEBACK__ then return exc_tb(o)
+      if nid = M___CAUSE__ | nid = M___CONTEXT__ then return NONE_OOP
+      if nid = M___SUPPRESS_CONTEXT__ then return FALSE_OOP
+    end
     return no_attr(o, nid)
   end
   if k = K_SLICE then do
@@ -448,7 +457,8 @@ getattr_obj: procedure = .int
     if nid = M___CLASS__ then return cl_obj[C_TYPE]
     ix = c
     if cl_flags[c] // 2 \= 1 then ix = cl_bt[c]
-    if ix = C_OBJECT then ix = 0
+    if ix = C_OBJECT & nid \= M___NEW__ then ix = 0
+    if ix = 0 & nid = M___NEW__ then ix = C_OBJECT
     if ix > 0 & pos(" " || nid_name[nid] || " ", bm_names) > 0 then do
       v = mkbmethb(cl_obj[ix], nid)
       ob_c[v % 2] = 1
@@ -482,6 +492,10 @@ getattr_obj: procedure = .int
     if nid = M___DOC__ then return NONE_OOP
     if nid = M___CLASS__ then return cl_obj[C_FUNCTION]
     if nid = M___ANNOTATIONS__ then return func_annots(o)
+    if nid = M___CODE__ then return mk_code(ob_x[o % 2], 0)
+    if nid = M___DEFAULTS__ then return func_defaults(o)
+    if nid = M___KWDEFAULTS__ then return func_kwdefaults(o)
+    if nid = M___GLOBALS__ then return mod_dict(fd_mod[ob_x[o % 2]])
     return no_attr(o, nid)
   end
   if k = K_BUILTIN then do
@@ -492,6 +506,7 @@ getattr_obj: procedure = .int
     if nid = M___NAME__ then return mkstr(fd_name[ob_x[ob_x[o % 2] % 2]])
     if nid = M___SELF__ then return ob_y[o % 2]
     if nid = M___FUNC__ then return ob_x[o % 2]
+    if kind_of(ob_x[o % 2]) = K_FUNC then return getattr_obj(ob_x[o % 2], nid, 0)
     return no_attr(o, nid)
   end
   if k = K_PROP then do

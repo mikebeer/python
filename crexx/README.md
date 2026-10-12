@@ -136,6 +136,20 @@ results of any type, `__abs__ __round__ __format__ __call__ __enter__ __exit__`,
   Annotations in functions are not evaluated. `/` in parameter lists marks positional-only parameters (`pr_po`; passing one by keyword is a `TypeError` unless the function has `**kwargs`). Star expressions in
   list / tuple / set / dict displays and calls worked before.
 
+## Introspection (Build 10, `o_intro.crexx`, `pylib/_intro.py`)
+
+- `f.__code__` (`co_name co_filename co_firstlineno co_argcount co_posonlyargcount co_kwonlyargcount co_varnames co_flags`; the
+  object is a `_intro.code` instance built from the function record, `fd_ln` holds the `def` line), `__defaults__`, `__kwdefaults__`,
+  `__globals__`; a bound method forwards unknown attributes to its function.
+- Line tracking: `ex` stores the node line in `cs_ln[cdepth + 1]`; `callfunc` fills `cs_fd`, `cs_ln`, `cs_fb` per call depth
+  (index 1 is module level). While an exception leaves a frame (`callfunc`) or is caught (`exec_try`) `tb_add` appends `fd:line;` to the
+  hidden attribute `__tbraw__`; `e.__traceback__` (`exc_tb`) turns that record into `_intro.traceback` / `frame` objects once and caches them.
+  Nodes get their line after parsing, so a statement spanning lines reports its last line.
+- `sys.exc_info()` (from `exc_cur`), `sys._getframe(n)` (frame chain from `cs_*`, `f_locals` via `ns_scope_dict`), `raise X from Y`
+  (`__cause__`, `__suppress_context__`), `__context__` set in `exec_try` when a handler raises, `Class.__new__(Class)`.
+- `os.mkdir rmdir remove unlink rename listdir` (`os_fs` in `h_imp`, over `rxfs`), `os.path.normcase`.
+- Tests 65 and 67 pass; 64 (time natives) and 66 (live `__dict__`, `__init_subclass__`, GenericAlias, ...) stay in `tests/crexx_skip.txt`.
+
 ## Hash values
 
 `hash()` follows CPython 3.13 for int, bool, big int, float, complex, None (4238894112), tuples (xxHash scheme,

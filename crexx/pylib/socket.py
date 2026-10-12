@@ -314,6 +314,9 @@ class socket:
         return self._h
 
     def makefile(self, mode="r", buffering=None, encoding=None, errors=None, newline=None):
+        for ch in mode:
+            if ch not in "rwb":
+                raise ValueError("invalid mode %r (only r, w, b allowed)" % (mode,))
         return _FileObj(self, mode, encoding or "utf-8")
 
     def __enter__(self):

@@ -10,6 +10,7 @@ import rxfnsb
 import rxfloat
 import rxsocket
 import rxplatform
+import rxfs
 import _rxsysb
 @@EXPOSE@@
 
@@ -177,6 +178,7 @@ run_source: procedure = .int
   gfb = alloc_frame(mod_fsz[mi])
   mod_fb[mi] = gfb
   cur_mi = mi
+  main_mi = mi
   call setg mi, "__name__", mkstr("__main__")
   call setg mi, "__file__", mkstr(name)
   call setg mi, "__package__", NONE_OOP
@@ -308,6 +310,8 @@ init: procedure = .void
   fd_ns = .int[]
   fd_fl = .int[]
   fd_cd = .int[]
+  fd_ln = .int[]
+  fd_sc = .int[]
   fd_body = .int[]
   fd_cx = .int[]
   fd_gd = .int[]
@@ -433,6 +437,13 @@ init: procedure = .void
   ast[20000] = 0
   asn[20000] = ""
   cdepth = 0
+  cs_fd = .int[]
+  cs_ln = .int[]
+  cs_fb = .int[]
+  cs_fd[1] = 0
+  cs_ln[1] = 0
+  cs_fb[1] = 0
+  main_mi = 0
   unw = 0
   unw_v = 0
   exc_cur = 0

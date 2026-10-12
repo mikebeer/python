@@ -1,0 +1,232 @@
+/* ==========================================================================
+   Introspection: function.__code__ / __defaults__, sys._getframe, sys.exc_info,
+   exception.__traceback__ (the objects themselves are made by pylib/_intro.py)
+   ========================================================================== */
+
+/* record that exception e passed through the frame running function fd (0 = module level) at line ln */
+tb_add: procedure = .void
+  arg e = .int, fd = .int, ln = .int
+  v = .int
+  s = .string
+  if e // 2 \= 0 then return
+  if kind_of(e) \= K_INST then return
+  v = inst_get(e, nameid("__tbraw__"))
+  s = ""
+  if v > 0 then s = ob_s[v % 2]
+  call inst_set e, nameid("__tbraw__"), mkstr(s || fd || ":" || ln || ";")
+  call inst_set e, M___TRACEBACK__, 0
+  return
+
+/* an exception raised while handling exc gets it as __context__ */
+set_context: procedure = .void
+  arg e = .int, ctx = .int
+  if e = ctx then return
+  if e // 2 \= 0 then return
+  if kind_of(e) \= K_INST then return
+  if inst_get(e, M___CONTEXT__) \= 0 then return
+  call inst_set e, M___CONTEXT__, ctx
+  return
+
+/* code object of function record fd; fd = 0 is module level */
+mk_code: procedure = .int
+  arg fd = .int, mi = .int
+  t = .int
+  vn = .int
+  f = .int
+  m = .int
+  j = .int
+  r0 = .int
+  nr = .int
+  i = .int
+  kd = .int
+  nv = .int
+  fl = .int
+  npo = .int
+  nm = .string
+  fnm = .string
+  fl = 0
+  npo = 0
+  vn = mktuple(0)
+  nm = "<module>"
+  if fd = 0 then do
+    if mi = 0 then mi = main_mi
+    fnm = mod_file[mi]
+    t = mktuple(8)
+    sl[ob_p[t % 2]] = mkstr(nm)
+    sl[ob_p[t % 2] + 1] = mkstr(fnm)
+    sl[ob_p[t % 2] + 2] = mkint(1)
+    sl[ob_p[t % 2] + 3] = mkint(0)
+    sl[ob_p[t % 2] + 4] = mkint(0)
+    sl[ob_p[t % 2] + 5] = mkint(0)
+    sl[ob_p[t % 2] + 6] = vn
+    sl[ob_p[t % 2] + 7] = mkint(64)
+  end
+  else do
+    r0 = fd_ps[fd]
+    nr = fd_nr[fd]
+    vn = mktuple(nr)
+    nv = 0
+    /* positional, keyword-only, *args, **kwargs */
+    do i = 0 to 3
+      kd = i
+      if i = 1 then kd = 2
+      else if i = 2 then kd = 1
+      do j = 0 to nr - 1
+        if pr_kind[r0 + j] = kd then do
+          sl[ob_p[vn % 2] + nv] = mkstr(pr_name[r0 + j])
+          nv = nv + 1
+          if kd = 0 & pr_po[r0 + j] = 1 then npo = npo + 1
+        end
+      end
+    end
+    if fd_vs[fd] > 0 then fl = fl + 4
+    if fd_ks[fd] > 0 then fl = fl + 8
+    if fd_fl[fd] // 2 = 1 then fl = fl + 32
+    fl = fl + 3
+    t = mktuple(8)
+    sl[ob_p[t % 2]] = mkstr(fd_name[fd])
+    sl[ob_p[t % 2] + 1] = mkstr(mod_file[fd_mod[fd]])
+    sl[ob_p[t % 2] + 2] = mkint(fd_ln[fd])
+    sl[ob_p[t % 2] + 3] = mkint(fd_np[fd])
+    sl[ob_p[t % 2] + 4] = mkint(npo)
+    sl[ob_p[t % 2] + 5] = mkint(fd_nk[fd])
+    sl[ob_p[t % 2] + 6] = vn
+    sl[ob_p[t % 2] + 7] = mkint(fl)
+  end
+  return cx_call1_in("_intro", "mkcode", t)
+
+/* f.__defaults__ : tuple of the defaults of the positional parameters, or None */
+func_defaults: procedure = .int
+  arg f = .int
+  fd = .int
+  j = .int
+  n = .int
+  t = .int
+  d = .int
+  fd = ob_x[f % 2]
+  n = 0
+  do j = 1 to fd_nr[fd]
+    if pr_kind[fd_ps[fd] + j - 1] = 0 & sl[ob_p[f % 2] + j - 1] \= 0 then n = n + 1
+  end
+  if n = 0 then return NONE_OOP
+  t = mktuple(n)
+  n = 0
+  do j = 1 to fd_nr[fd]
+    if pr_kind[fd_ps[fd] + j - 1] = 0 & sl[ob_p[f % 2] + j - 1] \= 0 then do
+      sl[ob_p[t % 2] + n] = sl[ob_p[f % 2] + j - 1]
+      n = n + 1
+    end
+  end
+  return t
+
+/* f.__kwdefaults__ : dict of the defaults of the keyword-only parameters, or None */
+func_kwdefaults: procedure = .int
+  arg f = .int
+  fd = .int
+  j = .int
+  d = .int
+  fd = ob_x[f % 2]
+  d = 0
+  do j = 1 to fd_nr[fd]
+    if pr_kind[fd_ps[fd] + j - 1] = 2 & sl[ob_p[f % 2] + j - 1] \= 0 then do
+      if d = 0 then d = dict_new(K_DICT)
+      call dset d, mkstr(pr_name[fd_ps[fd] + j - 1]), sl[ob_p[f % 2] + j - 1]
+    end
+  end
+  if d = 0 then return NONE_OOP
+  return d
+
+/* module index of the frame at call depth i */
+fr_mi: procedure = .int
+  arg fd = .int
+  if fd = 0 then return main_mi
+  return fd_mod[fd]
+
+/* frame object for call depth i (back = frame object of depth i - 1 or None); loc = 1: with a snapshot of the locals */
+mk_frame: procedure = .int
+  arg fd = .int, ln = .int, fb = .int, back = .int, loc = .int
+  t = .int
+  mi = .int
+  c = .int
+  d = .int
+  mi = fr_mi(fd)
+  c = mk_code(fd, mi)
+  if c = 0 then return 0
+  d = dict_new(K_DICT)
+  if loc = 1 then do
+    if fd = 0 then d = mod_dict(mi)
+    else call ns_scope_dict fd_sc[fd], fb, d, 0
+  end
+  t = mktuple(5)
+  sl[ob_p[t % 2]] = c
+  sl[ob_p[t % 2] + 1] = mkint(ln)
+  sl[ob_p[t % 2] + 2] = back
+  sl[ob_p[t % 2] + 3] = mod_dict(mi)
+  sl[ob_p[t % 2] + 4] = d
+  return cx_call1_in("_intro", "mkframe", t)
+
+/* sys._getframe(depth) */
+bi_getframe: procedure = .int
+  arg dp = .int
+  i = .int
+  fr = .int
+  top = .int
+  top = cdepth - dp
+  if dp < 0 | top < 0 then return raise_exc(C_VALUEERROR, "call stack is not deep enough")
+  fr = NONE_OOP
+  do i = 0 to top
+    fr = mk_frame(cs_fd[i + 1], cs_ln[i + 1], cs_fb[i + 1], fr, 1)
+    if fr = 0 then return 0
+  end
+  return fr
+
+/* the traceback chain of exception e (outermost frame first), cached in e.__traceback__ */
+exc_tb: procedure = .int
+  arg e = .int
+  v = .int
+  s = .string
+  p = .int
+  q = .int
+  ent = .string
+  fd = .int
+  ln = .int
+  fr = .int
+  t = .int
+  prev = .int
+  v = inst_get(e, nameid("__tbraw__"))
+  if v = 0 then return NONE_OOP
+  s = ob_s[v % 2]
+  prev = NONE_OOP
+  do while length(s) > 0
+    p = pos(";", s)
+    ent = left(s, p - 1)
+    s = substr(s, p + 1)
+    q = pos(":", ent)
+    fd = left(ent, q - 1) as .int
+    ln = substr(ent, q + 1) as .int
+    fr = mk_frame(fd, ln, 0, NONE_OOP, 0)
+    if fr = 0 then return 0
+    t = mktuple(3)
+    sl[ob_p[t % 2]] = fr
+    sl[ob_p[t % 2] + 1] = mkint(ln)
+    sl[ob_p[t % 2] + 2] = prev
+    prev = cx_call1_in("_intro", "mktb", t)
+    if prev = 0 then return 0
+  end
+  call inst_set e, M___TRACEBACK__, prev
+  return prev
+
+bi_exc_info: procedure = .int
+  t = .int
+  t = mktuple(3)
+  if exc_cur = 0 then do
+    sl[ob_p[t % 2]] = NONE_OOP
+    sl[ob_p[t % 2] + 1] = NONE_OOP
+    sl[ob_p[t % 2] + 2] = NONE_OOP
+  end
+  else do
+    sl[ob_p[t % 2]] = cl_obj[ob_c[exc_cur % 2]]
+    sl[ob_p[t % 2] + 1] = exc_cur
+    sl[ob_p[t % 2] + 2] = exc_tb(exc_cur)
+  end
+  return t

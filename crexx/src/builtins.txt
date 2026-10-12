@@ -136,6 +136,14 @@ os.path.expanduser
 os.path.normpath
 time.time_ns
 time.perf_counter_ns
+os.path.normcase
+os.mkdir
+os.rmdir
+os.remove
+os.rename
+os.listdir
+sys.exc_info
+sys._getframe
 sys.getrecursionlimit
 # numpy (keep last among the library functions)
 numpy.array
@@ -209,6 +217,7 @@ warnings.resetwarnings=_identity
 abc.abstractmethod=_identity
 abc.abstractproperty=_identity
 os.getpid=_identity
+os.unlink=os.remove
 sys.setrecursionlimit=_identity
 numpy.absolute=numpy.abs
 numpy.around=numpy.round

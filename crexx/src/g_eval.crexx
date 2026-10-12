@@ -930,6 +930,7 @@ ex: procedure = .void
   s2 = .string
   ok_range = .int
   t = n_t[n]
+  cs_ln[cdepth + 1] = n_ln[n]
   if t = N_EXPR then do
     v = ev(n_a[n], fb)
     return
@@ -1094,7 +1095,18 @@ ex: procedure = .void
     end
     v = ev(n_a[n], fb)
     if v = 0 then return
+    c = 0
+    if n_b[n] > 0 then do
+      c = ev(n_b[n], fb)
+      if c = 0 then return
+    end
     call do_raise v
+    if unw = U_RAISE & c \= 0 then do
+      if kind_of(unw_v) = K_INST then do
+        call inst_set unw_v, M___CAUSE__, c
+        call inst_set unw_v, M___SUPPRESS_CONTEXT__, TRUE_OOP
+      end
+    end
     return
   end
   if t = N_ASSERT then do
@@ -1306,10 +1318,12 @@ exec_try: procedure = .void
       end
       if matched = 1 then do
         unw = 0
+        call tb_add exc, cs_fd[cdepth + 1], cs_ln[cdepth + 1]
         if n_b[h] > 0 then call store n_b[h], exc, fb
         sv_cur = exc_cur
         exc_cur = exc
         call ex n_c[h], fb
+        if unw = U_RAISE then call set_context unw_v, exc
         exc_cur = sv_cur
         if n_b[h] > 0 then do
           sv_unw = unw
