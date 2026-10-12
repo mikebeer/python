@@ -3,52 +3,6 @@
    ========================================================================= */
 static Class *cls_LinAlgError;
 
-/* portable C89 replacements for hypot / log1p / expm1 / asinh / ... */
-static double n_hypot(double a, double b)
-{
-    double t;
-    a = fabs(a); b = fabs(b);
-    if (a < b) { t = a; a = b; b = t; }
-    if (a == 0.0) return 0.0;
-    if (a - a != 0.0) return a;
-    t = b / a;
-    return a * sqrt(1.0 + t * t);
-}
-static double n_log1p(double x)
-{
-    double u = 1.0 + x;
-    if (u == 1.0) return x;
-    return log(u) * x / (u - 1.0);
-}
-static double n_expm1(double x)
-{
-    double u = exp(x), um1;
-    if (u == 1.0) return x;
-    um1 = u - 1.0;
-    if (um1 == -1.0) return -1.0;
-    if (u - u != 0) return u;
-    return um1 * x / log(u);
-}
-static double n_asinh(double v)
-{
-    double a = fabs(v), r;
-    if (a < 1e-8 || a - a != 0.0) return v;
-    r = a > 1e8 ? log(a) + 0.69314718055994530942 : n_log1p(a + a * a / (1.0 + sqrt(1.0 + a * a)));
-    return v < 0 ? -r : r;
-}
-static double n_acosh(double v)
-{
-    if (v < 1.0) return HUGE_VAL - HUGE_VAL;
-    if (v > 1e8) return log(v) + 0.69314718055994530942;
-    return n_log1p((v - 1.0) + sqrt((v - 1.0) * (v + 1.0)));
-}
-static double n_atanh(double v)
-{
-    if (v > 1.0 || v < -1.0) return HUGE_VAL - HUGE_VAL;
-    if (v == 1.0) return HUGE_VAL;
-    if (v == -1.0) return -HUGE_VAL;
-    return 0.5 * n_log1p(2.0 * v / (1.0 - v));
-}
 static double n_cbrt(double v)
 {
     double a, r;
@@ -438,8 +392,12 @@ static void qr_eigs(double *a, long n, double *wr, double *wi)
                     else wr[hi - 1] = det / wr[hi];
                 }
                 wi[hi - 1] = wi[hi] = 0.0;
+                /* LAPACK order inside a block (dlanv2): the first root is on the side of the
+                   larger diagonal entry */
+                if (p < s) { double t = wr[hi]; wr[hi] = wr[hi - 1]; wr[hi - 1] = t; }
             } else {
-                wr[hi - 1] = wr[hi] = m;
+                /* LAPACK dlanv2 standardisation: equal diagonal keeps both entries */
+                if (p == s) { wr[hi - 1] = p; wr[hi] = s; } else wr[hi - 1] = wr[hi] = m;
                 wi[hi - 1] = sqrt(-disc); wi[hi] = -wi[hi - 1];
             }
             hi -= 2; iter = 0;
@@ -485,30 +443,93 @@ static void qr_eigs(double *a, long n, double *wr, double *wi)
     }
     free(cs);
 }
+/* complex helpers for the general eigenproblem */
+static Nd *eig_cvals(const double *wr, const double *wi, long n)
+{
+    Nd *w = nd_new1(ND_COMPLEX, n);
+    long i;
+    for (i = 0; i < n; i++) { w->dv[2 * i] = wr[i]; w->dv[2 * i + 1] = wi[i]; }
+    return w;
+}
+/* solve (A - z I) x = b in complex arithmetic, in place on b (2n doubles) */
+static void cx_solve_shift(const double *a, long n, double zr, double zi, double *b)
+{
+    double *m = (double *)xmalloc(sizeof(double) * (size_t)(2 * n * n + 1));
+    long i, j, k;
+    for (i = 0; i < n * n; i++) { m[2 * i] = a[i]; m[2 * i + 1] = 0.0; }
+    for (i = 0; i < n; i++) { m[2 * (i * n + i)] -= zr; m[2 * (i * n + i) + 1] -= zi; }
+    for (k = 0; k < n; k++) {
+        long pv = k;
+        double mx = -1.0, pr, pi_, d;
+        for (i = k; i < n; i++) {
+            double h = n_hypot(m[2 * (i * n + k)], m[2 * (i * n + k) + 1]);
+            if (h > mx) { mx = h; pv = i; }
+        }
+        if (pv != k) {
+            for (j = 0; j < n; j++) {
+                double t0 = m[2 * (k * n + j)], t1 = m[2 * (k * n + j) + 1];
+                m[2 * (k * n + j)] = m[2 * (pv * n + j)];
+                m[2 * (k * n + j) + 1] = m[2 * (pv * n + j) + 1];
+                m[2 * (pv * n + j)] = t0; m[2 * (pv * n + j) + 1] = t1;
+            }
+            { double t0 = b[2 * k], t1 = b[2 * k + 1];
+                b[2 * k] = b[2 * pv]; b[2 * k + 1] = b[2 * pv + 1];
+                b[2 * pv] = t0; b[2 * pv + 1] = t1; }
+        }
+        pr = m[2 * (k * n + k)]; pi_ = m[2 * (k * n + k) + 1];
+        if (pr == 0.0 && pi_ == 0.0) { pr = 1e-300; m[2 * (k * n + k)] = pr; }
+        d = pr * pr + pi_ * pi_;
+        for (i = k + 1; i < n; i++) {
+            double ar = m[2 * (i * n + k)], ai = m[2 * (i * n + k) + 1];
+            double fr = (ar * pr + ai * pi_) / d, fi = (ai * pr - ar * pi_) / d;
+            if (fr == 0.0 && fi == 0.0) continue;
+            for (j = k; j < n; j++) {
+                double xr = m[2 * (k * n + j)], xi = m[2 * (k * n + j) + 1];
+                m[2 * (i * n + j)] -= fr * xr - fi * xi;
+                m[2 * (i * n + j) + 1] -= fr * xi + fi * xr;
+            }
+            b[2 * i] -= fr * b[2 * k] - fi * b[2 * k + 1];
+            b[2 * i + 1] -= fr * b[2 * k + 1] + fi * b[2 * k];
+        }
+    }
+    for (k = n - 1; k >= 0; k--) {
+        double sr = b[2 * k], si = b[2 * k + 1], pr = m[2 * (k * n + k)],
+            pi_ = m[2 * (k * n + k) + 1], d;
+        for (j = k + 1; j < n; j++) {
+            sr -= m[2 * (k * n + j)] * b[2 * j] - m[2 * (k * n + j) + 1] * b[2 * j + 1];
+            si -= m[2 * (k * n + j)] * b[2 * j + 1] + m[2 * (k * n + j) + 1] * b[2 * j];
+        }
+        d = pr * pr + pi_ * pi_;
+        b[2 * k] = (sr * pr + si * pi_) / d;
+        b[2 * k + 1] = (si * pr - sr * pi_) / d;
+    }
+    free(m);
+}
+static int eig_has_complex(const double *wi, long n)
+{
+    long i;
+    for (i = 0; i < n; i++) if (wi[i] != 0.0) return 1;
+    return 0;
+}
+/* Nd float n x n -> eigenvalues (float or complex Nd) */
+static Nd *eigvals_nd(Nd *a, long n)
+{
+    Nd *w = vec_new(n), *r;
+    double *wi = (double *)xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+    if (n > 0) qr_eigs(a->dv, n, w->dv, wi);
+    r = eig_has_complex(wi, n) ? eig_cvals(w->dv, wi, n) : w;
+    free(wi);
+    return r;
+}
 BI(la_eigvals)
 {
-    long n, i;
-    Nd *a, *w;
-    double *wi;
+    long n;
+    Nd *a;
     need(x, 1, 1, "eigvals");
     a = la_sq(A(0), &n);
-    w = vec_new(n);
-    wi = (double *)xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
-    if (n > 0) qr_eigs(a->dv, n, w->dv, wi);
-    for (i = 0; i < n; i++)
-        if (wi[i] != 0.0) {
-            free(wi);
-            throw_new(cls_NotImplementedError, "eigvals: complex eigenvalues are not supported");
-        }
-    free(wi);
-    /* ascending order is not guaranteed by LAPACK; keep QR deflation order reversed
-       so that a triangular matrix returns its diagonal in order */
-    for (i = 0; i < n / 2; i++) { double t = w->dv[i];
-        w->dv[i] = w->dv[n - 1 - i];
-        w->dv[n - 1 - i] = t;
-    }
-    return ndv(w);
+    return ndv(eigvals_nd(a, n));
 }
+static int wr_eq(double a, double b) { return a == b; }
 /* eig: eigenvalues by QR, eigenvectors by solving (A - w I) v = 0 with inverse iteration */
 BI(la_eig)
 {
@@ -523,16 +544,64 @@ BI(la_eig)
     v = mat_new(n, n);
     wi = (double *)xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
     if (n > 0) qr_eigs(a->dv, n, w->dv, wi);
-    for (i = 0; i < n; i++)
-        if (wi[i] != 0.0) {
-            free(wi);
-            throw_new(cls_NotImplementedError, "eig: complex eigenvalues are not supported");
+    if (eig_has_complex(wi, n)) {
+        Nd *cw = eig_cvals(w->dv, wi, n), *cv = nd_new(ND_COMPLEX, 2, v->shape);
+        double *bb = (double *)xmalloc(sizeof(double) * (size_t)(2 * n + 2));
+        double scale = 0.0;
+        for (i = 0; i < n * n; i++) if (fabs(a0->dv[i]) > scale) scale = fabs(a0->dv[i]);
+        if (scale == 0.0) scale = 1.0;
+        for (j = 0; j < n; j++) {
+            double nrm, mx = -1.0, cr = 1.0, ci = 0.0;
+            long mi = 0;
+            if (j > 0 && wi[j] < 0.0 && wi[j - 1] > 0.0 && wr_eq(w->dv[j], w->dv[j - 1])) {
+                for (i = 0; i < n; i++) {
+                    cv->dv[2 * (i * n + j)] = cv->dv[2 * (i * n + j - 1)];
+                    cv->dv[2 * (i * n + j) + 1] = -cv->dv[2 * (i * n + j - 1) + 1];
+                }
+                continue;
+            }
+            for (i = 0; i < n; i++) {
+                bb[2 * i] = 1.0 / sqrt((double)n) + 0.01 * (double)i;
+                bb[2 * i + 1] = 0.0;
+            }
+            for (it = 0; it < 4; it++) {
+                cx_solve_shift(a0->dv, n, w->dv[j] + scale * 1e-14, wi[j], bb);
+                nrm = 0.0;
+                for (i = 0; i < 2 * n; i++) nrm += bb[i] * bb[i];
+                nrm = sqrt(nrm);
+                if (nrm == 0.0 || nrm != nrm) break;
+                for (i = 0; i < 2 * n; i++) bb[i] /= nrm;
+            }
+            for (i = 0; i < n; i++) {
+                double h = n_hypot(bb[2 * i], bb[2 * i + 1]);
+                if (h > mx * (1.0 + 1e-12)) { mx = h; mi = i; }
+            }
+            if (mx > 0.0) {
+                cr = bb[2 * mi] / mx; ci = -bb[2 * mi + 1] / mx;   /* conj of the phase */
+            }
+            for (i = 0; i < n; i++) {
+                double re = bb[2 * i] * cr - bb[2 * i + 1] * ci;
+                double im = bb[2 * i] * ci + bb[2 * i + 1] * cr;
+                if (wi[j] == 0.0 || i == mi) im = 0.0;
+                /* inverse iteration leaves rounding noise around exact zeros */
+                if (fabs(re) < 1e-15) re = 0.0;
+                if (fabs(im) < 1e-15) im = 0.0;
+                cv->dv[2 * (i * n + j)] = re; cv->dv[2 * (i * n + j) + 1] = im;
+            }
+            if (wi[j] == 0.0) {
+                double sg = 0.0;
+                for (i = 0; i < n; i++)
+                    if (fabs(cv->dv[2 * (i * n + j)]) > fabs(sg) * (1.0 + 1e-12))
+                        sg = cv->dv[2 * (i * n + j)];
+                if (sg < 0)
+                    for (i = 0; i < n; i++) cv->dv[2 * (i * n + j)] = -cv->dv[2 * (i * n + j)];
+            }
         }
-    free(wi);
-    for (i = 0; i < n / 2; i++) { double t = w->dv[i];
-        w->dv[i] = w->dv[n - 1 - i];
-        w->dv[n - 1 - i] = t;
+        free(bb); free(wi);
+        tv[0] = ndv(cw); tv[1] = ndv(cv);
+        return mktuple_from(tv, 2);
     }
+    free(wi);
     lu = (double *)xmalloc(sizeof(double) * (size_t)(n * n + n + 1));
     b = lu + n * n;
     piv = (long *)xmalloc(sizeof(long) * (size_t)(n > 0 ? n : 1));

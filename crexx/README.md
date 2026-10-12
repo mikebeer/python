@@ -8,7 +8,7 @@ and passes the tests in `../tests` (stage 1 and the language / import / linalg s
     ./py                      read the program from stdin
 
 Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
-`py.crexx` to bytecode (about two minutes); later runs start in about 2 s with a stock VM, 0.4 s with the patched one (see `STARTUP.md`, `CREXX_VM`).
+`py.crexx` to bytecode (about 3.5 minutes); later runs start in about 2 s with a stock VM, 0.4 s with the patched one (see `STARTUP.md`, `CREXX_VM`).
 
 ## Layout
 
@@ -18,7 +18,8 @@ Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
   g_call, g_item, g_eval (tree evaluator), g_gen (generators), h_builtins, h_meth, h_mod,
   h_imp (modules and imports), h_ns (globals/locals/vars/dir/eval/exec, type() with 3 arguments), i_fmt,
   j_np and k_np2 (the built-in `numpy` subset: native ndarray objects of kind `K_ARRAY`, broadcasting,
-  reductions, indexing, numpy style array printing).
+  reductions, indexing, numpy style array printing), l_bytes (bytes / bytearray, encodings), l_cplx (complex,
+  bridge to `pylib/numpy/_cplx.py`), l_sub (subclasses of built-in types, `__new__`), l_sock (`_sock` primitive).
 - `src/consts.txt`, `classes.txt`, `builtins.txt`: tables that `build.py` turns into symbolic constants.
 - `build.py`: `python3 build.py` regenerates `py.crexx`.
 - `py`: launcher.
@@ -39,6 +40,43 @@ with step 1) returns views; everything else copies. Float arrays print like nump
 exponent form, line wrapping at 75 columns, `...` summary above 1000 elements) and float sums use
 numpy's pairwise summation so results agree to the last digit.
 
+## bytes, complex, subclassing, sockets
+
+- `bytes` / `bytearray` (kind `K_BYTES`, one character per byte in `ob_s`, `ob_y = 1` for bytearray): literals (`b"..."`,
+  `rb`, adjacent literals), indexing gives ints, slicing, `+ * in < == hash`, `repr`, iteration, `bytes(n)`, `bytes([..])`,
+  `bytes(str, enc)`, `str.encode` / `bytes.decode` (utf-8, ascii, latin-1; `strict replace ignore backslashreplace`),
+  `hex fromhex find index count split rsplit join replace strip startswith endswith partition ...`, mutation for
+  bytearray (`append extend insert pop remove`, item and slice assignment), `int.from_bytes` / `to_bytes`.
+  `pylib/struct.py` (pure Python, also fine on the C interpreter) implements `pack unpack calcsize pack_into
+  unpack_from iter_unpack Struct` for `x c b B ? h H i I l L q Q n N f d s p` with `@ = < > !`.
+- `complex` (kind `K_COMPLEX`, parts in `ob_f` / `ob_g`): `1j` literals, `complex()` incl. strings, all arithmetic
+  (CPython's division / power algorithms), `abs pow sum == hash format repr str`, `.real .imag .conjugate()`,
+  `ZeroDivisionError: complex division by zero`. `pylib/cmath.py` (pure Python, follows CPython's cmathmodule.c,
+  works on both interpreters; the C interpreter's native `cmath` wins there).
+- numpy `complex128`: an array with complex elements (`np.array([1+2j, ..])`, `dtype=complex`, `astype(complex)`,
+  array op complex scalar, complex function arguments) is a `_CArr` instance defined in `pylib/numpy/_cplx.py`
+  (two float64 ndarrays `re`/`im`); the evaluator hands such calls to it (`cx_call1`, `cx_dispatch` in `l_cplx.crexx`).
+  Supports arithmetic with broadcasting, `.real .imag .conj() .T`, `np.abs angle sqrt exp log sin cos ... sum mean
+  prod dot`, indexing / assignment / iteration / `tolist`, numpy style printing (`[1.+2.j 3.-1.j]`, exponent form,
+  wrapping). `np.roots`, `np.linalg.eigvals` / `eig` return complex results when needed (2x2 blocks ordered like
+  LAPACK's `dlanv2`). Not supported: complex `cumsum`/`sort`/`linspace` and most other helpers (TypeError).
+- Subclassing built-in types: `class X(list | dict | set | frozenset | tuple | str | int | float | bytes | bytearray |
+  Exception | object)`. An instance is a native object (`K_LIST`, ...) whose `ob_c` holds the class id; instance
+  attributes live in a `K_INST` holder (stem `nat_at`). Operators, `len`, `in`, iteration, `x[i]`, `repr`, `str`,
+  `hash`, `format`, comparison, `__missing__` and `print` look for an override first (`nsov` / `ovr`); calling the built-in
+  implementation explicitly (`dict.__setitem__(self, k, v)`, `super().append(v)`, `list.append(self, v)`) skips the
+  override once (`nat_skip`). `type.__new__` protocol: calling a class runs `__new__` then `__init__` when the result is an
+  instance; `object.__new__(cls)`, `super().__new__(cls, ...)`, `tuple.__new__(cls, it)`, `int.__new__`, `float.__new__`,
+  `str.__new__`, `frozenset.__new__` (`frozenset` is the same class as `set`). Unbound built-in methods are values
+  (`push = list.append`).
+- `socket` (`crexx/pylib/socket.py`) and `select` (`crexx/pylib/select.py`): blocking IPv4 TCP over the `rxsocket`
+  library through the internal builtin `_sock(op, handle, a, b)` (`l_sock.crexx`): `socket bind listen accept connect
+  connect_ex send sendall recv settimeout setblocking setsockopt getsockname getpeername shutdown close makefile`,
+  `create_connection create_server socketpair gethostname gethostbyname inet_aton inet_ntoa htons ntohs htonl`,
+  constants, `socket.error = OSError`, `socket.timeout = TimeoutError`, `ConnectionRefusedError` and friends,
+  `OSError(errno, msg)` with `.errno`, `.strerror` and `[Errno N] msg`. No UDP / IPv6 / DNS; `select.select` polls the
+  pending byte count (listening sockets always count as readable).
+
 ## Modules and libraries
 
 `import` of Python files works as in CPython: packages with `__init__.py`, `import a.b`, `from a.b import c as d`,
@@ -50,6 +88,7 @@ string abc typing warnings`) win; a pylib file with the same name only supplies 
 (`hybrid_get`), e.g. `pylib/numpy/linalg.py`, `pylib/math.py` (erf, gamma, ...). The list `shadow` in `boot`
 (`a_head.crexx`) names native attributes that the pylib file replaces when it defines them
 (`functools.wraps`, `lru_cache`, `cache`).
+The launcher also puts `crexx/pylib` (CREXX-only modules: `socket`, `select`) first on the path.
 
 Language features added for the libraries: multiple inheritance (C3 linearisation, `super()` along the MRO),
 `__getattr__ __setattr__ __delattr__`, `object.__setattr__`, reflected / in-place / unary operators, rich comparison
@@ -64,15 +103,15 @@ results of any type, `__abs__ __round__ __format__ __call__ __enter__ __exit__`,
 
 ## Known gaps
 
-- numpy: no structured/complex/string/object dtypes; `reshape`, `T`, strided slices and fancy indexing return
+- numpy: no structured/string/object dtypes (complex128 lives in `pylib/numpy/_cplx.py`, see above); `reshape`, `T`, strided slices and fancy indexing return
   copies; integer arrays wrap at 64 bits. `numpy.linalg`, `numpy.random` and many helper functions are pure
   Python in `../pylib/numpy/`.
-- Subclassing built-in types (`class X(dict)`, `tuple`, `list`) and `__new__` are not supported; metaclasses are ignored.
+- Metaclasses are ignored.
 - `str` holds codepoints (the C interpreter uses byte strings); tracebacks always report line 1.
 - `globals()` / `locals()` are snapshots; `exec` inside a function does not write back to its locals.
 - Sets keep insertion order; `random` does not reproduce CPython's sequence; `time.time` is approximate.
 - Float literals near the end of the range and denormals print with fewer digits.
-- Recursion limit is about 900 frames; a stock VM pays about 2 s per run linking the 2.7 MB bytecode (see `STARTUP.md`).
+- Recursion limit is about 900 frames; a stock VM pays about 2 s per run linking the 3.1 MB bytecode (see `STARTUP.md`).
 
 ## CREXX pitfalls found
 

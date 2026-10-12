@@ -1374,8 +1374,13 @@ meth_arr: procedure = .int
     when nid = M_FLATTEN | nid = M_RAVEL then return np_flat(o)
     when nid = M_ASTYPE then do
       if na < 1 then return nargs_err("astype", na, 1, 1)
+      npcx_d = 0
       dt = np_dtype_of(ast[base + 1])
       if dt = 0 then return 0
+      if npcx_d = 1 then do
+        npcx_d = 0
+        return cx_call1("_from_real", np_cast(o, 2))
+      end
       return np_cast(o, dt)
     end
     when nid = M_SUM then return np_red_call(o, 1, base, na, nk, 1)
@@ -1466,6 +1471,11 @@ bcall_np: procedure = .int
   atl = .float
   l = .int
   isf = .int
+  if bid \= BI_NUMPY_ARRAY & bid \= BI_NUMPY_ASARRAY then do
+    do i = 1 to na
+      if is_cx(ast[base + i]) = 1 then return cx_dispatch(bid, base, na, nk)
+    end
+  end
   select
     when bid = BI_NUMPY_ARRAY | bid = BI_NUMPY_ASARRAY then do
       if na < 1 then return nargs_err("array", na, 1, 2)
@@ -1474,14 +1484,20 @@ bcall_np: procedure = .int
       else if kind_of(v) = K_ARRAY then r = np_cast(v, ob_c[v % 2])
       else r = np_from_obj(v)
       if r = 0 then return 0
+      npcx_d = 0
       dt = np_dt_arg(base, na, nk, 2, -1)
       if dt = 0 then return 0
       if dt > 0 then r = np_cast(r, dt)
+      if npcx_d = 1 then do
+        npcx_d = 0
+        return cx_call1("_from_real", r)
+      end
       return r
     end
     when bid = BI_NUMPY_ZEROS | bid = BI_NUMPY_ONES | bid = BI_NUMPY_EMPTY then do
       if na < 1 then return nargs_err("zeros", na, 1, 2)
       if np_dims(base, 1, 1) = 0 then return 0
+      npcx_d = 0
       dt = np_dt_arg(base, na, nk, 2, 2)
       if dt = 0 then return 0
       fi = 0
@@ -1490,7 +1506,12 @@ bcall_np: procedure = .int
         fi = 1
         z = 1.0
       end
-      return np_make(dt, fi, z)
+      r = np_make(dt, fi, z)
+      if npcx_d = 1 & r \= 0 then do
+        npcx_d = 0
+        return cx_call1("_from_real", r)
+      end
+      return r
     end
     when bid = BI_NUMPY_FULL then do
       if na < 2 then return nargs_err("full", na, 2, 3)

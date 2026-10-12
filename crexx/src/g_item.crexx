@@ -85,6 +85,7 @@ getslice: procedure = .int
     ob_y[t % 2] = st
     return np_getitem(o, t)
   end
+  if k = K_BYTES then return bytes_slice(o, lo, hi, st)
   if k = K_STR then do
     s = ob_s[o % 2]
     r = slice_calc(length(s), lo, hi, st)
@@ -132,6 +133,7 @@ idx_int: procedure = .int
   arg x = .int
   if x // 2 \= 0 then return (x - 1) % 2
   if ob_k[x % 2] = K_BOOL then return ival(x)
+  if ob_k[x % 2] = K_BIG then return ival(x)
   return 0
 
 getitem: procedure = .int
@@ -145,9 +147,21 @@ getitem: procedure = .int
   s = .string
   a = .int
   st = .int
+  ix = unsub(ix)
   if o // 2 \= 0 then return raise_exc(C_TYPEERROR, "'int' object is not subscriptable")
   k = ob_k[o % 2]
   if k = K_ARRAY then return np_getitem(o, ix)
+  if k = K_BYTES then do
+    if ix // 2 = 0 then do
+      if ob_k[ix % 2] = K_SLICE then return bytes_slice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    end
+    if ob_c[o % 2] = 0 then return bytes_geti(o, ix)
+  end
+  if ob_c[o % 2] > 0 then do
+    m = nsov(o, M___GETITEM__)
+    if m > 0 then return call2(m, o, ix)
+    if k = K_BYTES then return bytes_geti(o, ix)
+  end
   if k = K_LIST | k = K_TUPLE then do
     if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL then do
       if ob_k[ix % 2] = K_SLICE then return getslice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
@@ -174,6 +188,10 @@ getitem: procedure = .int
       if t = 0 then return 0
       call dict_put ob_x[o % 2], hashkey(ix), ix, t
       return t
+    end
+    if ob_c[o % 2] > 0 then do
+      m = nsov(o, M___MISSING__)
+      if m > 0 then return call2(m, o, ix)
     end
     return raise_key(ix)
   end
@@ -225,6 +243,7 @@ setitem: procedure = .void
   newl = .int
   j = .int
   cnt = .int
+  ix = unsub(ix)
   if o // 2 \= 0 then do
     r = raise_exc(C_TYPEERROR, "'int' object does not support item assignment")
     return
@@ -232,6 +251,17 @@ setitem: procedure = .void
   k = ob_k[o % 2]
   if k = K_ARRAY then do
     call np_setitem o, ix, v
+    return
+  end
+  if ob_c[o % 2] > 0 then do
+    m = nsov(o, M___SETITEM__)
+    if m > 0 then do
+      r = call3(m, o, ix, v)
+      return
+    end
+  end
+  if k = K_BYTES then do
+    call bytes_seti o, ix, v
     return
   end
   if k = K_LIST then do
@@ -319,7 +349,21 @@ delitem: procedure = .void
   e = .int
   j = .int
   newl = .int
+  ix = unsub(ix)
   k = kind_of(o)
+  if o // 2 = 0 then do
+    if ob_c[o % 2] > 0 then do
+      m = nsov(o, M___DELITEM__)
+      if m > 0 then do
+        r = call2(m, o, ix)
+        return
+      end
+    end
+  end
+  if k = K_BYTES then do
+    call bytes_deli o, ix
+    return
+  end
   if k = K_LIST then do
     if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then do
       r = slice_calc(ob_n[o % 2], ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
@@ -526,8 +570,13 @@ iter_new: procedure = .int
   it = .int
   if x // 2 \= 0 then return raise_exc(C_TYPEERROR, "'int' object is not iterable")
   k = ob_k[x % 2]
+  if ob_c[x % 2] > 0 then do
+    m = nsov(x, M___ITER__)
+    if m > 0 then return iter_wrap(call1(m, x))
+  end
   select
     when k = K_LIST | k = K_TUPLE then return mkiter(IT_SEQ, x, 0)
+    when k = K_BYTES then return mkiter(IT_BYTES, x, 0)
     when k = K_STR then return mkiter(IT_STR, x, 0)
     when k = K_RANGE then do
       it = mkiter(IT_RANGE, ob_n[x % 2], ob_x[x % 2])
@@ -623,6 +672,14 @@ iter_next: procedure = .int
       if i >= length(s) then return 0
       ob_y[ix] = i + 1
       return mkchr(substr(s, i + 1, 1))
+    end
+    when sub = IT_BYTES then do
+      src = ob_x[ix]
+      i = ob_y[ix]
+      s = ob_s[src % 2]
+      if i >= length(s) then return 0
+      ob_y[ix] = i + 1
+      return mkint(c2d(substr(s, i + 1, 1)))
     end
     when sub = IT_DKEYS | sub = IT_DITEMS | sub = IT_DVALS then do
       e = de_live_from(ob_y[ix])
@@ -776,6 +833,13 @@ iter_list: procedure = .int
   n = .int
   e = .int
   k = kind_of(x)
+  if x // 2 = 0 then do
+    if ob_c[x % 2] > 0 then do
+      if nsub(x) > 0 then do
+        if cls_find(nsub(x), M___ITER__) > 0 then k = 0
+      end
+    end
+  end
   if k = K_LIST | k = K_TUPLE then do
     n = ob_n[x % 2]
     l = mklist(n)

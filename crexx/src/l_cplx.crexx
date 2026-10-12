@@ -1,0 +1,544 @@
+/* ---------------------------------------------------------------------
+   complex numbers (kind K_COMPLEX: ob_f = real part, ob_g = imaginary part)
+   Results of the c_xxx helpers are left in cr_r / cr_i.
+   --------------------------------------------------------------------- */
+mkcplx: procedure = .int
+  arg re = .float, im = .float
+  nob = nob + 1
+  ob_k[nob] = K_COMPLEX
+  ob_f[nob] = re
+  ob_g[nob] = im
+  return nob * 2
+
+/* real and imaginary part of a number into cx_re / cx_im (first) or cx_re2 / cx_im2 (second) */
+cplx_get: procedure = .void
+  arg x = .int
+  if kind_of(x) = K_COMPLEX then do
+    cx_re = ob_f[x % 2]
+    cx_im = ob_g[x % 2]
+  end
+  else do
+    cx_re = tofloat(x)
+    cx_im = 0.0
+  end
+  return
+
+cplx_get2: procedure = .void
+  arg x = .int
+  if kind_of(x) = K_COMPLEX then do
+    cx_re2 = ob_f[x % 2]
+    cx_im2 = ob_g[x % 2]
+  end
+  else do
+    cx_re2 = tofloat(x)
+    cx_im2 = 0.0
+  end
+  return
+
+c_mul: procedure = .void
+  arg ar = .float, ai = .float, br = .float, bi = .float
+  cr_r = ar * br - ai * bi
+  cr_i = ar * bi + ai * br
+  return
+
+/* a / b; 0 on division by zero */
+c_quot: procedure = .int
+  arg ar = .float, ai = .float, br = .float, bi = .float
+  abr = .float
+  abi = .float
+  ratio = .float
+  denom = .float
+  abr = rxfloat..fabs(br)
+  abi = rxfloat..fabs(bi)
+  if abr >= abi then do
+    if abr = 0.0 then return 0
+    ratio = bi / br
+    denom = br + bi * ratio
+    cr_r = (ar + ai * ratio) / denom
+    cr_i = (ai - ar * ratio) / denom
+    return 1
+  end
+  if abi >= abr then do
+    ratio = br / bi
+    denom = br * ratio + bi
+    cr_r = (ar * ratio + ai) / denom
+    cr_i = (ai * ratio - ar) / denom
+    return 1
+  end
+  cr_r = f_nan()
+  cr_i = f_nan()
+  return 1
+
+/* x ** n for 0 < n <= 100 by binary exponentiation (as CPython) */
+c_powu: procedure = .void
+  arg ar = .float, ai = .float, n = .int
+  rr = .float
+  ri = .float
+  pr = .float
+  pi = .float
+  mask = .int
+  rr = 1.0
+  ri = 0.0
+  pr = ar
+  pi = ai
+  mask = 1
+  do while n >= mask
+    if ((n % mask) // 2) = 1 then do
+      call c_mul rr, ri, pr, pi
+      rr = cr_r
+      ri = cr_i
+    end
+    mask = mask * 2
+    call c_mul pr, pi, pr, pi
+    pr = cr_r
+    pi = cr_i
+  end
+  cr_r = rr
+  cr_i = ri
+  return
+
+/* a ** b; 0 when 0 is raised to a negative or complex power */
+c_pow: procedure = .int
+  arg ar = .float, ai = .float, br = .float, bi = .float
+  vabs = .float
+  ln = .float
+  at = .float
+  phase = .float
+  n = .int
+  if bi = 0.0 & br = rxfloat..floor(br) & rxfloat..fabs(br) <= 100.0 then do
+    n = rxfloat..trunc(br) as .int
+    if n > 0 then do
+      call c_powu ar, ai, n
+      return 1
+    end
+    if n = 0 then do
+      call c_powu ar, ai, 0
+      return c_quot(1.0, 0.0, cr_r + 0.0, cr_i + 0.0)
+    end
+    call c_powu ar, ai, 0 - n
+    return c_quot(1.0, 0.0, cr_r + 0.0, cr_i + 0.0)
+  end
+  if br = 0.0 & bi = 0.0 then do
+    cr_r = 1.0
+    cr_i = 0.0
+    return 1
+  end
+  if ar = 0.0 & ai = 0.0 then do
+    cr_r = 0.0
+    cr_i = 0.0
+    if bi \= 0.0 | br < 0.0 then return 0
+    return 1
+  end
+  vabs = rxfloat..hypot(ar, ai)
+  ln = rxfloat..pow(vabs, br)
+  at = rxfloat..atan2(ai, ar)
+  phase = at * br
+  if bi \= 0.0 then do
+    ln = ln / rxfloat..exp(at * bi)
+    phase = phase + bi * rxfloat..log(vabs)
+  end
+  cr_r = ln * rxfloat..cos(phase)
+  cr_i = ln * rxfloat..sin(phase)
+  return 1
+
+cplx_arith: procedure = .int
+  arg op = .int, x = .int, y = .int
+  ar = .float
+  ai = .float
+  br = .float
+  bi = .float
+  call cplx_get x
+  call cplx_get2 y
+  ar = cx_re
+  ai = cx_im
+  br = cx_re2
+  bi = cx_im2
+  select
+    when op = O_ADD then return mkcplx(ar + br, ai + bi)
+    when op = O_SUB then return mkcplx(ar - br, ai - bi)
+    when op = O_MUL then do
+      call c_mul ar, ai, br, bi
+      return mkcplx(cr_r, cr_i)
+    end
+    when op = O_DIV then do
+      if c_quot(ar, ai, br, bi) = 0 then return raise_exc(C_ZERODIVISIONERROR, "complex division by zero")
+      return mkcplx(cr_r, cr_i)
+    end
+    when op = O_POW then do
+      if c_pow(ar, ai, br, bi) = 0 then return raise_exc(C_ZERODIVISIONERROR, "0.0 to a negative or complex power")
+      return mkcplx(cr_r, cr_i)
+    end
+    otherwise return err_binop(op_sym(op), x, y)
+  end
+  return 0
+
+cplx_unary: procedure = .int
+  arg op = .int, x = .int
+  if op = 1 then return mkcplx(fneg(ob_f[x % 2]), fneg(ob_g[x % 2]))
+  if op = 2 then return x
+  return raise_exc(C_TYPEERROR, "bad operand type for unary ~: 'complex'")
+
+cplx_abs: procedure = .int
+  arg x = .int
+  return mkfloat(rxfloat..hypot(ob_f[x % 2], ob_g[x % 2]))
+
+/* equality of x and y where at least one is complex */
+cplx_eq: procedure = .int
+  arg x = .int, y = .int
+  if kind_of(x) \= K_COMPLEX & numkind(x) = 0 then return 0
+  if kind_of(y) \= K_COMPLEX & numkind(y) = 0 then return 0
+  call cplx_get x
+  call cplx_get2 y
+  if cx_re = cx_re2 & cx_im = cx_im2 then return 1
+  return 0
+
+/* repr of a float part without a trailing .0 */
+cplx_part: procedure = .string
+  arg f = .float
+  s = .string
+  s = float_repr(f)
+  if right(s, 2) == ".0" then s = left(s, length(s) - 2)
+  return s
+
+cplx_repr: procedure = .string
+  arg re = .float, im = .float
+  sg2 = .string
+  it = .string
+  if re = 0.0 & fl_negzero(re) = 0 then return cplx_part(im) || "j"
+  if im < 0.0 | fl_negzero(im) = 1 then do
+    sg2 = "-"
+    it = cplx_part(fneg(im))
+  end
+  else do
+    sg2 = "+"
+    it = cplx_part(im)
+  end
+  return "(" || cplx_part(re) || sg2 || it || "j)"
+
+/* format(z, spec) */
+format_complex: procedure = .string
+  arg v = .int, spec = .string
+  fill = .string
+  align = .string
+  sgn = .string
+  alt = .string
+  width = .int
+  prec = .int
+  ty = .string
+  i = .int
+  n = .int
+  c = .string
+  re = .float
+  im = .float
+  rs = .string
+  ims = .string
+  s2 = .string
+  parens = .int
+  skipre = .int
+  sp = .string
+  fill = ""
+  align = ""
+  sgn = ""
+  alt = ""
+  width = 0
+  prec = -1
+  ty = ""
+  i = 1
+  n = length(spec)
+  if n >= 2 & pos(substr(spec, 2, 1), "<>^=") > 0 then do
+    fill = substr(spec, 1, 1)
+    align = substr(spec, 2, 1)
+    i = 3
+  end
+  else if n >= 1 & pos(substr(spec, 1, 1), "<>^=") > 0 then do
+    align = substr(spec, 1, 1)
+    i = 2
+  end
+  c = substr(spec, i, 1)
+  if c == "+" | c == "-" | c == " " then do
+    sgn = c
+    i = i + 1
+  end
+  if substr(spec, i, 1) == "#" then do
+    alt = "#"
+    i = i + 1
+  end
+  if substr(spec, i, 1) == "0" then i = i + 1
+  do while i <= n & isdigit(substr(spec, i, 1)) = 1
+    width = width * 10 + (substr(spec, i, 1) as .int)
+    i = i + 1
+  end
+  if substr(spec, i, 1) == "." then do
+    i = i + 1
+    prec = 0
+    do while i <= n & isdigit(substr(spec, i, 1)) = 1
+      prec = prec * 10 + (substr(spec, i, 1) as .int)
+      i = i + 1
+    end
+  end
+  if i <= n then ty = substr(spec, i, 1)
+  if i < n then do
+    call raise_exc C_VALUEERROR, "Invalid format specifier"
+    return ""
+  end
+  if align == "=" then do
+    call raise_exc C_VALUEERROR, "'=' alignment flag is not allowed in complex format specifier"
+    return ""
+  end
+  if ty \== "" & pos(ty, "eEfFgGn") = 0 then do
+    call raise_exc C_VALUEERROR, "Unknown format code '" || ty || "' for object of type 'complex'"
+    return ""
+  end
+  re = ob_f[v % 2]
+  im = ob_g[v % 2]
+  parens = 0
+  skipre = 0
+  if ty == "" then do
+    if re = 0.0 & fl_negzero(re) = 0 then skipre = 1
+    else parens = 1
+  end
+  if ty == "" & prec < 0 then do
+    /* like repr, without the trailing .0 */
+    if skipre = 0 then do
+      if sgn == "+" & re >= 0.0 then rs = "+" || cplx_part(re)
+      else if sgn == " " & re >= 0.0 then rs = " " || cplx_part(re)
+      else rs = cplx_part(re)
+    end
+    else rs = ""
+    if im < 0.0 | fl_negzero(im) = 1 then ims = "-" || cplx_part(fneg(im))
+    else if skipre = 0 | sgn == "+" then ims = "+" || cplx_part(im)
+    else if sgn == " " then ims = " " || cplx_part(im)
+    else ims = cplx_part(im)
+  end
+  else do
+    sp = "." || prec
+    if prec < 0 then sp = ""
+    if ty == "" then s2 = "g"
+    else s2 = ty
+    if skipre = 0 then rs = format_value(mkfloat(re), sgn || alt || sp || s2)
+    else rs = ""
+    if unw > 0 then return ""
+    if skipre = 0 then ims = format_value(mkfloat(im), "+" || alt || sp || s2)
+    else ims = format_value(mkfloat(im), sgn || alt || sp || s2)
+    if unw > 0 then return ""
+  end
+  s2 = rs || ims || "j"
+  if parens = 1 then s2 = "(" || s2 || ")"
+  if align == "" then align = ">"
+  return fmt_pad("", s2, fill, align, width)
+
+/* complex("1+2j") */
+cplx_parse: procedure = .int
+  arg s0 = .string
+  s = .string
+  n = .int
+  i = .int
+  c = .string
+  p = .int
+  rs = .string
+  ims = .string
+  re = .float
+  im = .float
+  v = .int
+  hasj = .int
+  s = strip(s0)
+  if left(s, 1) == "(" & right(s, 1) == ")" then s = strip(substr(s, 2, length(s) - 2))
+  n = length(s)
+  if n = 0 then return raise_exc(C_VALUEERROR, "complex() arg is a malformed string")
+  re = 0.0
+  im = 0.0
+  hasj = 0
+  if lower(right(s, 1)) == "j" then hasj = 1
+  if hasj = 0 then do
+    v = parse_float_str(s)
+    if v = 0 then do
+      unw = 0
+      return raise_exc(C_VALUEERROR, "complex() arg is a malformed string")
+    end
+    return mkcplx(ob_f[v % 2], 0.0)
+  end
+  s = left(s, n - 1)
+  n = n - 1
+  /* split at the last + or - that is not at the start and does not follow an exponent letter */
+  p = 0
+  do i = n to 2 by -1
+    c = substr(s, i, 1)
+    if c == "+" | c == "-" then do
+      if lower(substr(s, i - 1, 1)) \== "e" then do
+        p = i
+        leave
+      end
+    end
+  end
+  if p = 0 then do
+    rs = ""
+    ims = s
+  end
+  else do
+    rs = left(s, p - 1)
+    ims = substr(s, p)
+  end
+  if ims == "" | ims == "+" then ims = "1"
+  else if ims == "-" then ims = "-1"
+  if rs \== "" then do
+    v = parse_float_str(rs)
+    if v = 0 then do
+      unw = 0
+      return raise_exc(C_VALUEERROR, "complex() arg is a malformed string")
+    end
+    re = ob_f[v % 2]
+  end
+  v = parse_float_str(ims)
+  if v = 0 then do
+    unw = 0
+    return raise_exc(C_VALUEERROR, "complex() arg is a malformed string")
+  end
+  im = ob_f[v % 2]
+  return mkcplx(re, im)
+
+/* complex(...) */
+ctor_complex: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  a = .int
+  b = .int
+  ar = .float
+  ai = .float
+  br = .float
+  bi = .float
+  m = .int
+  a = 0
+  b = 0
+  if na >= 1 then a = ast[base + 1]
+  if na >= 2 then b = ast[base + 2]
+  if kwarg(base, na, nk, "real") \= 0 then a = kwarg(base, na, nk, "real")
+  if kwarg(base, na, nk, "imag") \= 0 then b = kwarg(base, na, nk, "imag")
+  if na > 2 then return nargs_err("complex", na, 0, 2)
+  if a = 0 & b = 0 then return mkcplx(0.0, 0.0)
+  if a \= 0 then do
+    if kind_of(a) = K_STR then do
+      if b \= 0 then return raise_exc(C_TYPEERROR, "complex() can't take second arg if first is a string")
+      return cplx_parse(ob_s[a % 2])
+    end
+    if kind_of(a) \= K_COMPLEX & numkind(a) = 0 then do
+      m = ovr(a, nameid("__complex__"))
+      if m > 0 then return call1(m, a)
+      return raise_exc(C_TYPEERROR, "complex() first argument must be a string or a number, not '" || type_name(a) || "'")
+    end
+  end
+  if b \= 0 then do
+    if kind_of(b) = K_STR then return raise_exc(C_TYPEERROR, "complex() second arg can't be a string")
+    if kind_of(b) \= K_COMPLEX & numkind(b) = 0 then return raise_exc(C_TYPEERROR, "complex() second argument must be a number, not '" || type_name(b) || "'")
+  end
+  if b = 0 then do
+    if kind_of(a) = K_COMPLEX then return a
+    return mkcplx(tofloat(a), 0.0)
+  end
+  if kind_of(b) \= K_COMPLEX then do
+    if a = 0 then return mkcplx(0.0, tofloat(b))
+    if kind_of(a) \= K_COMPLEX then return mkcplx(tofloat(a), tofloat(b))
+  end
+  ar = 0.0
+  ai = 0.0
+  if a \= 0 then do
+    call cplx_get a
+    ar = cx_re
+    ai = cx_im
+  end
+  call cplx_get b
+  br = cx_re
+  bi = cx_im
+  /* a + b*1j */
+  return mkcplx(ar - bi, ai + br)
+
+meth_complex: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  if nid = M_CONJUGATE then return mkcplx(ob_f[o % 2], fneg(ob_g[o % 2]))
+  return meth_common(o, nid, base, na, nk)
+
+/* ---- elementary functions on a complex number (re, im) -> cr_r, cr_i (as CPython's cmath / C99) ---- */
+c_sqrt: procedure = .void
+  arg re = .float, im = .float
+  ar = .float
+  ai = .float
+  s = .float
+  d = .float
+  if re = 0.0 & im = 0.0 then do
+    cr_r = 0.0
+    cr_i = im
+    return
+  end
+  ar = rxfloat..fabs(re) / 8.0
+  ai = rxfloat..fabs(im)
+  s = 2.0 * rxfloat..sqrt(ar + rxfloat..hypot(ar, ai / 8.0))
+  d = ai / (2.0 * s)
+  if re >= 0.0 then do
+    cr_r = s
+    cr_i = d
+    if im < 0.0 | fl_negzero(im) = 1 then cr_i = fneg(d)
+  end
+  else do
+    cr_r = d
+    cr_i = s
+    if im < 0.0 | fl_negzero(im) = 1 then cr_i = fneg(s)
+  end
+  return
+
+c_exp: procedure = .void
+  arg re = .float, im = .float
+  l = .float
+  if im = 0.0 then do
+    cr_r = rxfloat..exp(re)
+    cr_i = im
+    return
+  end
+  l = rxfloat..exp(re)
+  cr_r = l * rxfloat..cos(im)
+  cr_i = l * rxfloat..sin(im)
+  return
+
+c_log: procedure = .void
+  arg re = .float, im = .float
+  cr_r = rxfloat..log(rxfloat..hypot(re, im))
+  cr_i = rxfloat..atan2(im, re)
+  return
+
+/* ---- bridge to pylib numpy/_cplx.py (complex128 arrays are implemented there) ---- */
+is_cx: procedure = .int
+  arg v = .int
+  k = .int
+  if v // 2 \= 0 then return 0
+  k = ob_k[v % 2]
+  if k = K_COMPLEX then return 1
+  if k = K_INST then do
+    if cl_name[ob_c[v % 2]] == "_CArr" then return 1
+  end
+  return 0
+
+cx_func: procedure = .int
+  arg fname = .string
+  m = .int
+  m = import_mod("numpy._cplx")
+  if m = 0 then return 0
+  return getattr_obj(m, nameid(fname), 0)
+
+cx_call1: procedure = .int
+  arg fname = .string, a = .int
+  f = .int
+  f = cx_func(fname)
+  if f = 0 then return 0
+  return call1(f, a)
+
+cx_dispatch: procedure = .int
+  arg bid = .int, base = .int, na = .int, nk = .int
+  f = .int
+  t = .int
+  d = .int
+  j = .int
+  f = cx_func("_dispatch")
+  if f = 0 then return 0
+  t = tup_from_ast(base + 1, base + na)
+  d = dict_new(K_DICT)
+  do j = 1 to nk
+    call dict_put d, "s" || asn[base + na + j], mkstr(asn[base + na + j]), ast[base + na + j]
+  end
+  return call3(f, mkstr(bi_name[bid]), t, d)

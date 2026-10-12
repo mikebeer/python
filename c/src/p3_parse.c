@@ -93,7 +93,7 @@ static int atkw(int kw)
 {
     return TOK.type == TK_KW && TOK.kw == kw;
 }
-static int accept(int type)
+static int p_accept(int type)
 {
     if (TOK.type == type) { pp++; return 1; }
     return 0;
@@ -204,13 +204,13 @@ static void parse_params(Params *p, int closer, int annot)
             star = 1;
             if (at(TK_NAME)) {
                 p->vararg = TOK.s; pp++;
-                if (annot && accept(':')) parse_test();
+                if (annot && p_accept(':')) parse_test();
             }
         } else if (at(TK_POW)) {
             pp++;
             if (!at(TK_NAME)) perr("expected name");
             p->varkw = TOK.s; pp++;
-            if (annot && accept(':')) parse_test();
+            if (annot && p_accept(':')) parse_test();
         } else if (at('/')) {
             pp++;
         } else {
@@ -218,8 +218,8 @@ static void parse_params(Params *p, int closer, int annot)
             Node *def = NULL;
             if (!at(TK_NAME)) perr("expected parameter name");
             nm = TOK.s; pp++;
-            if (annot && accept(':')) parse_test();
-            if (accept('=')) def = parse_test();
+            if (annot && p_accept(':')) parse_test();
+            if (p_accept('=')) def = parse_test();
             if (!star) {
                 p->names = (Str **)xrealloc(p->names, sizeof(Str *) * (size_t)(p->n + 1));
                 p->names[p->n++] = nm;
@@ -234,7 +234,7 @@ static void parse_params(Params *p, int closer, int annot)
                 p->kwdefs[p->nkw++] = def;
             }
         }
-        if (!accept(',')) break;
+        if (!p_accept(',')) break;
     }
 }
 
@@ -289,7 +289,7 @@ static Node *parse_funcdef(void)
     expect('(', "(");
     parse_params(&p, ')', 1);
     expect(')', ")");
-    if (accept(TK_ARROW)) parse_test();
+    if (p_accept(TK_ARROW)) parse_test();
     expect(':', ":");
     n->name = name;
     n->var = scope_var(cur_scope, name);
@@ -314,11 +314,11 @@ static Node *parse_classdef(void)
     n->name = TOK.s; pp++;
     n->var = scope_var(cur_scope, n->name);
     n->var->defined = 1;
-    if (accept('(')) {
+    if (p_accept('(')) {
         while (!at(')')) {
             if (at(TK_NAME) && toks[pp + 1].type == '=') { pp += 2; parse_test(); }
             else node_add(n, parse_test());
-            if (!accept(',')) break;
+            if (!p_accept(',')) break;
         }
         expect(')', ")");
     }
@@ -588,7 +588,7 @@ static Node *parse_slice_item(void)
     }
     expect(':', ":");
     if (!at(':') && !at(']') && !at(',')) b = parse_test();
-    if (accept(':')) {
+    if (p_accept(':')) {
         if (!at(']') && !at(',')) c = parse_test();
     }
     {
@@ -619,7 +619,7 @@ static Node *parse_call_args(Node *call)
             arg = parse_test();
         }
         node_add(call, arg);
-        if (!accept(',')) break;
+        if (!p_accept(',')) break;
     }
     expect(')', ")");
     return call;
@@ -651,7 +651,7 @@ static Node *parse_primary(void)
             if (at(',')) {
                 Node *t = mk(N_TUPLE);
                 node_add(t, idx);
-                while (accept(',')) {
+                while (p_accept(',')) {
                     if (at(']')) break;
                     node_add(t, parse_slice_item());
                 }
@@ -685,7 +685,7 @@ static Node *parse_testlist(int allow_star)
     if (at(',')) {
         Node *t = mk(N_TUPLE);
         node_add(t, first);
-        while (accept(',')) {
+        while (p_accept(',')) {
             if (at(TK_NEWLINE) || at('=') || at(')') || at(']') || at(':') || at(TK_AUG) ||
                 at(TK_EOF) || at(';') || atkw(KW_IN)) break;
             node_add(t, allow_star ? parse_star_or_test() : parse_test());
@@ -709,7 +709,7 @@ static Node *parse_targets(void)
     if (at(',')) {
         t = mk(N_TUPLE);
         node_add(t, first);
-        while (accept(',')) {
+        while (p_accept(',')) {
             Node *x;
             if (atkw(KW_IN) || at('=')) break;
             if (at('*')) { x = mk(N_STAR); pp++; x->a = parse_bor(); }
@@ -848,6 +848,16 @@ static Node *parse_atom(void)
     }
     if (t == TK_NUM) { n = mk_const(TOK.val, line); pp++; return n; }
     if (t == TK_FLOAT) { n = mk_const(mkfloat(TOK.fval), line); pp++; return n; }
+    if (t == TK_IMAG) {
+        int sp = gc_perm;
+        Value cv;
+        gc_perm = 1;
+        cv = mkcomplex(0.0, TOK.fval);
+        gc_perm = sp;
+        n = mk_const(cv, line);
+        pp++;
+        return n;
+    }
     if (t == TK_STR || t == TK_FSTR) {
         int anyf = 0, i = pp;
         while (toks[i].type == TK_STR || toks[i].type == TK_FSTR) {
@@ -901,7 +911,7 @@ static Node *parse_atom(void)
             if (at(',')) {
                 n = node_new(N_TUPLE, line);
                 node_add(n, e);
-                while (accept(',')) {
+                while (p_accept(',')) {
                     if (at(')')) break;
                     node_add(n, parse_star_or_test());
                 }
@@ -920,7 +930,7 @@ static Node *parse_atom(void)
         n = node_new(N_LIST, line);
         while (!at(']')) {
             node_add(n, parse_star_or_test());
-            if (!accept(',')) break;
+            if (!p_accept(',')) break;
         }
         expect(']', "]");
         return n;
@@ -963,7 +973,7 @@ static Node *parse_atom(void)
                 } else {
                     n = node_new(N_SET, line);
                     node_add(n, first);
-                    while (accept(',')) {
+                    while (p_accept(',')) {
                         if (at('}')) break;
                         node_add(n, parse_star_or_test());
                     }
@@ -971,7 +981,7 @@ static Node *parse_atom(void)
                     return n;
                 }
             }
-            while (accept(',')) {
+            while (p_accept(',')) {
                 if (at('}')) break;
                 if (at(TK_POW)) {
                     Node *ds = node_new(N_DSTAR, line);
@@ -1122,7 +1132,7 @@ static Node *new_block(int line)
 
 static void end_simple(void)
 {
-    if (accept(';')) {
+    if (p_accept(';')) {
         if (at(TK_NEWLINE)) pp++;
         return;
     }
@@ -1170,7 +1180,7 @@ static Node *parse_import(void)
             }
             it->b->var->defined = 1;
             node_add(n, it);
-        } while (accept(','));
+        } while (p_accept(','));
         return n;
     } else {
         Node *n = node_new(S_FROM, line);
@@ -1193,7 +1203,7 @@ static Node *parse_import(void)
         buf_free(&b);
         expect_kw(KW_IMPORT, "import");
         if (at('*')) { pp++; n->op = 1; return n; }
-        paren = accept('(');
+        paren = p_accept('(');
         for (;;) {
             Node *it = mk(N_NAME);
             if (!at(TK_NAME)) perr("expected name");
@@ -1204,7 +1214,7 @@ static Node *parse_import(void)
             } else it->b = mk_name(it->name, line);
             it->b->var->defined = 1;
             node_add(n, it);
-            if (!accept(',')) break;
+            if (!p_accept(',')) break;
             if (paren && at(')')) break;
         }
         if (paren) expect(')', ")");
@@ -1256,7 +1266,7 @@ static Node *parse_simple(void)
             n = node_new(S_ASSERT, line);
             pp++;
             n->a = parse_test();
-            if (accept(',')) n->b = parse_test();
+            if (p_accept(',')) n->b = parse_test();
             return n;
         case KW_DEL:
             n = node_new(S_DEL, line);
@@ -1265,7 +1275,7 @@ static Node *parse_simple(void)
                 Node *t = parse_bor();
                 to_target(t, line);
                 node_add(n, t);
-            } while (accept(',') && !at(TK_NEWLINE));
+            } while (p_accept(',') && !at(TK_NEWLINE));
             return n;
         case KW_GLOBAL: case KW_NONLOCAL: {
             int isg = TOK.kw == KW_GLOBAL;
@@ -1276,7 +1286,7 @@ static Node *parse_simple(void)
                 v = scope_var(cur_scope, TOK.s);
                 if (isg) v->isglobal = 1; else v->isnonlocal = 1;
                 pp++;
-            } while (accept(','));
+            } while (p_accept(','));
             return node_new(S_NOP, line);
         }
         case KW_IMPORT: case KW_FROM:
@@ -1292,7 +1302,7 @@ static Node *parse_simple(void)
         if (at('=')) {
             Node *as = node_new(S_ASSIGN, line);
             Node *val = e;
-            while (accept('=')) {
+            while (p_accept('=')) {
                 to_target(val, line);
                 node_add(as, val);
                 if (atkw(KW_YIELD)) {
@@ -1322,7 +1332,7 @@ static Node *parse_simple(void)
             /* annotation: x: int [= v] */
             pp++;
             parse_test();
-            if (accept('=')) {
+            if (p_accept('=')) {
                 Node *as = node_new(S_ASSIGN, line);
                 to_target(e, line);
                 node_add(as, e);
@@ -1340,14 +1350,14 @@ static Node *parse_simple(void)
 static Node *parse_suite(void)
 {
     Node *b = new_block(TOK.line);
-    if (accept(TK_NEWLINE)) {
-        if (!accept(TK_INDENT)) perr("expected an indented block");
+    if (p_accept(TK_NEWLINE)) {
+        if (!p_accept(TK_INDENT)) perr("expected an indented block");
         while (!at(TK_DEDENT) && !at(TK_EOF)) node_add(b, parse_stmt());
-        accept(TK_DEDENT);
+        p_accept(TK_DEDENT);
     } else {
         for (;;) {
             node_add(b, parse_simple());
-            if (accept(';')) {
+            if (p_accept(';')) {
                 if (at(TK_NEWLINE)) { pp++; break; }
                 continue;
             }
@@ -1458,7 +1468,7 @@ static Node *parse_stmt(void)
                     last->c = bl;
                 } else first = w;
                 last = w;
-            } while (accept(','));
+            } while (p_accept(','));
             expect(':', ":");
             last->c = parse_block();
             return first;
@@ -1478,7 +1488,7 @@ static Node *parse_stmt(void)
             pp++;
             if (nd >= 16) perr("too many decorators");
             decs[nd++] = parse_test();
-            if (!accept(TK_NEWLINE)) perr("expected newline after decorator");
+            if (!p_accept(TK_NEWLINE)) perr("expected newline after decorator");
         }
         if (atkw(KW_DEF)) d = parse_funcdef();
         else if (atkw(KW_CLASS)) d = parse_classdef();

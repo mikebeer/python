@@ -374,12 +374,17 @@ lex_string: procedure = .void
     if isr = 1 then call addtok T_STR, body, 3
     else call addtok T_STR, body, 1
   end
+  else if isb = 1 then do
+    if isr = 1 then call addtok T_STR, body, 4
+    else call addtok T_STR, unescape(body), 4
+  end
   else if isr = 1 then call addtok T_STR, body, 0
   else call addtok T_STR, unescape(body), 0
   lnum = lnum + n
   return
 
 lex_number: procedure = .void
+  isj = .int
   q = .int
   p = .int
   c = .string
@@ -472,8 +477,13 @@ lex_number: procedure = .void
       q = v
     end
   end
+  isj = 0
+  if substr(tx, q, 1) == "j" | substr(tx, q, 1) == "J" then do
+    isj = 1
+    q = q + 1
+  end
   tp = q
-  if isf = 1 then do
+  if isf = 1 | isj = 1 then do
     if dg == "" then dg = "0"
     if fr == "" then fr = "0"
     s = dg || "." || fr
@@ -481,7 +491,7 @@ lex_number: procedure = .void
     ntk = ntk + 1
     tk_t[ntk] = T_FLT
     tk_s[ntk] = s
-    tk_i[ntk] = 0
+    tk_i[ntk] = isj
     tk_l[ntk] = lnum
     tk_f[ntk] = parse_flt(s)
     return

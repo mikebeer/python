@@ -494,32 +494,34 @@ class deque:
         return "deque(%r, maxlen=%d)" % (list(self), self.maxlen)
 
 
-class _NamedTupleBase:
+class _NamedTupleBase(tuple):
     _fields = ()
     _defaults = ()
 
-    def __init__(self, *args, **kw):
-        f = self._fields
+    def __new__(cls, *args, **kw):
+        f = cls._fields
         n = len(f)
         if len(args) > n:
-            raise TypeError("%s() takes %d positional arguments but %d were given" % (type(self).__name__, n, len(args)))
+            raise TypeError("%s() takes %d positional arguments but %d were given" % (cls.__name__, n, len(args)))
         vals = list(args)
         if len(vals) < n:
-            nd = len(self._defaults)
+            nd = len(cls._defaults)
             for i in range(len(vals), n):
                 name = f[i]
                 if name in kw:
                     vals.append(kw.pop(name))
                 elif i >= n - nd:
-                    vals.append(self._defaults[i - (n - nd)])
+                    vals.append(cls._defaults[i - (n - nd)])
                 else:
-                    raise TypeError("%s() missing 1 required positional argument: '%s'" % (type(self).__name__, name))
+                    raise TypeError("%s() missing 1 required positional argument: '%s'" % (cls.__name__, name))
         if kw:
             for name in kw:
-                raise TypeError("%s() got an unexpected keyword argument '%s'" % (type(self).__name__, name))
+                raise TypeError("%s() got an unexpected keyword argument '%s'" % (cls.__name__, name))
+        self = tuple.__new__(cls, vals)
         for i in range(n):
             setattr(self, f[i], vals[i])
         self._t = tuple(vals)
+        return self
 
     @classmethod
     def _make(cls, iterable):

@@ -105,7 +105,10 @@ docall: procedure = .int
       call ast_insert base, na + nk, ob_y[f % 2]
       return docall(ob_x[f % 2], base, na + 1, nk)
     end
-    when k = K_BMETHB then return bmeth(ob_y[f % 2], ob_x[f % 2], base, na, nk)
+    when k = K_BMETHB then do
+      if ob_c[f % 2] = 1 then return bmeth_unbound(ob_x[ob_y[f % 2] % 2], ob_x[f % 2], base, na, nk)
+      return bmeth(ob_y[f % 2], ob_x[f % 2], base, na, nk)
+    end
     when k = K_CLASS then return instantiate(ob_x[f % 2], base, na, nk)
     when k = K_INST then do
       m = cls_find(ob_c[f % 2], M___CALL__)
@@ -284,9 +287,16 @@ instantiate: procedure = .int
   fl = .int
   fl = cl_flags[c]
   if fl // 2 = 1 & (fl // 4) < 2 then return bcall_type(c, base, na, nk)
+  init = cls_find(c, M___NEW__)
+  if init > 0 then return inst_with_new(c, init, base, na, nk)
+  if cl_bt[c] > 0 then return inst_native(c, base, na, nk)
   inst = inst_new(c)
   if (fl // 4) >= 2 then do
     call inst_set inst, M_ARGS, tup_from_ast(base + 1, base + na)
+    if na >= 2 & cls_issub(c, C_OSERROR) = 1 then do
+      call inst_set inst, nameid("errno"), ast[base + 1]
+      call inst_set inst, nameid("strerror"), ast[base + 2]
+    end
   end
   init = cls_find(c, M___INIT__)
   if init > 0 then do
@@ -330,6 +340,9 @@ bind_attr: procedure = .int
   end
   if k = K_STATIC then return ob_x[v % 2]
   if k = K_CLSM then return mkbmeth(ob_x[v % 2], cl_obj[c])
+  if k = K_BMETHB & o > 0 then do
+    if ob_c[v % 2] = 1 then return mkbmethb(o, ob_x[v % 2])
+  end
   return v
 
 getattr_obj: procedure = .int
@@ -342,6 +355,18 @@ getattr_obj: procedure = .int
   slot = .int
   m = .int
   k = kind_of(o)
+  if k \= K_INST then do
+    if o // 2 = 0 then do
+      if ob_c[o % 2] > 0 then do
+        c = nsub(o)
+        if c > 0 then do
+          v = nat_getattr(o, c, nid)
+          if v \= 0 then return v
+          if unw > 0 then return 0
+        end
+      end
+    end
+  end
   if k = K_INST then do
     ix = o % 2
     c = ob_c[ix]
@@ -397,6 +422,14 @@ getattr_obj: procedure = .int
     if nid = M___MODULE__ then return mkstr(modname_of(cl_mod[c]))
     if nid = M___DOC__ then return NONE_OOP
     if nid = M___CLASS__ then return cl_obj[C_TYPE]
+    ix = c
+    if cl_flags[c] // 2 \= 1 then ix = cl_bt[c]
+    if ix = C_OBJECT then ix = 0
+    if ix > 0 & pos(" " || nid_name[nid] || " ", bm_names) > 0 then do
+      v = mkbmethb(cl_obj[ix], nid)
+      ob_c[v % 2] = 1
+      return v
+    end
     return no_attr(o, nid)
   end
   if k = K_MODULE then do
@@ -407,9 +440,13 @@ getattr_obj: procedure = .int
   end
   if k = K_SUPER then do
     v = super_find(o, nid)
+    if v = bi_oop[BI__OBJ_INIT] then do
+      if nsub(ob_x[o % 2]) > 0 then return mkbmethb(ob_x[o % 2], nid)
+    end
     if v = 0 then do
       c = ob_x[o % 2]
       if kind_of(c) \= K_CLASS then return mkbmethb(c, nid)
+      if nid = M___NEW__ then return mkbmethb(cl_obj[super_base(o)], nid)
       return raise_exc(C_ATTRIBUTEERROR, "'super' object has no attribute '" || nid_name[nid] || "'")
     end
     return bind_attr(v, ob_x[o % 2], sup_c)
@@ -447,6 +484,10 @@ getattr_obj: procedure = .int
   if k = K_FLOAT then do
     if nid = M_REAL then return o
     if nid = M_IMAG then return mkfloat(0.0)
+  end
+  if k = K_COMPLEX then do
+    if nid = M_REAL then return mkfloat(ob_f[o % 2])
+    if nid = M_IMAG then return mkfloat(ob_g[o % 2])
   end
   if k = K_RANGE then do
     if nid = M_START then return mkint(ob_n[o % 2])
@@ -583,7 +624,29 @@ getattr_call: procedure = .int
     end
     return getattr_obj(o, nid, 0)
   end
-  if k = K_STR | k = K_LIST | k = K_DICT | k = K_TUPLE | k = K_SET | k = K_FLOAT | k = K_INT | k = K_BIG | k = K_BOOL | k = K_GEN | k = K_FILE | k = K_RANGE | k = K_ARRAY then do
+  if k \= K_INST then do
+    if o // 2 = 0 then do
+      if ob_c[o % 2] > 0 then do
+        c = nsub(o)
+        if c > 0 then do
+          v = nat_holder(o)
+          if v > 0 then do
+            v = inst_get(v, nid)
+            if v \= 0 then return v
+          end
+          v = cls_find(c, nid)
+          if v > 0 then do
+            if kind_of(v) = K_FUNC then do
+              ev_self = o
+              return v
+            end
+            return bind_attr(v, o, c)
+          end
+        end
+      end
+    end
+  end
+  if k = K_STR | k = K_LIST | k = K_DICT | k = K_TUPLE | k = K_SET | k = K_FLOAT | k = K_INT | k = K_BIG | k = K_BOOL | k = K_GEN | k = K_FILE | k = K_RANGE | k = K_ARRAY | k = K_BYTES | k = K_COMPLEX then do
     if nid = M___CLASS__ | nid = M___NAME__ then return getattr_obj(o, nid, 0)
     if (k = K_INT | k = K_BIG | k = K_BOOL | k = K_FLOAT) & (nid = M_REAL | nid = M_IMAG) then return getattr_obj(o, nid, 0)
     ev_bm = 1
@@ -592,9 +655,13 @@ getattr_call: procedure = .int
   end
   if k = K_SUPER then do
     v = super_find(o, nid)
+    if v = bi_oop[BI__OBJ_INIT] then do
+      if nsub(ob_x[o % 2]) > 0 then return mkbmethb(ob_x[o % 2], nid)
+    end
     if v = 0 then do
       c = ob_x[o % 2]
       if kind_of(c) \= K_CLASS then return mkbmethb(c, nid)
+      if nid = M___NEW__ then return mkbmethb(cl_obj[super_base(o)], nid)
       return raise_exc(C_ATTRIBUTEERROR, "'super' object has no attribute '" || nid_name[nid] || "'")
     end
     ev_self = ob_x[o % 2]
@@ -625,6 +692,10 @@ setattr_raw: procedure = .void
   arg o = .int, nid = .int, v = .int
   p = .int
   r = .int
+  if nsub(o) > 0 then do
+    call nat_setattr o, nsub(o), nid, v, 1
+    return
+  end
   if kind_of(o) \= K_INST then do
     call setattr_obj o, nid, v
     return
@@ -650,6 +721,12 @@ setattr_obj: procedure = .void
   p = .int
   r = .int
   k = kind_of(o)
+  if k \= K_INST then do
+    if nsub(o) > 0 then do
+      call nat_setattr o, nsub(o), nid, v, 0
+      return
+    end
+  end
   if k = K_INST then do
     c = ob_c[o % 2]
     p = cls_find(c, nid)

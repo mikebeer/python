@@ -252,6 +252,11 @@ def _fv(x, na_rep, float_format):
     return str(x)
 
 
+def _dtstrs(v, dt):
+    from .fmt import dt_strings, td_strings
+    return dt_strings(v) if dt.startswith('datetime') else td_strings(v)
+
+
 def to_csv(df, path_or_buf=None, sep=',', na_rep='', float_format=None, columns=None, header=True, index=True,
            index_label=None, mode='w', encoding=None, lineterminator=None, quotechar='"', **kw):
     if lineterminator is None:
@@ -283,7 +288,9 @@ def to_csv(df, path_or_buf=None, sep=',', na_rep='', float_format=None, columns=
     for j in range(len(df._vals)):
         dt = df._dts[j]
         v = df._vals[j]
-        if dt == 'str' or dt == 'object':
+        if dt.startswith('datetime') or dt.startswith('timedelta'):
+            fcols.append([_q(s if s != 'NaT' else na_rep, sep, quotechar) for s in _dtstrs(v, dt)])
+        elif dt == 'str' or dt == 'object':
             fcols.append([_q(_fv(x, na_rep, float_format), sep, quotechar) for x in v])
         elif dt == 'int64':
             fcols.append([str(x) for x in v])
@@ -292,6 +299,8 @@ def to_csv(df, path_or_buf=None, sep=',', na_rep='', float_format=None, columns=
     if index:
         if ix.nlevels > 1:
             icols = [[_q(_fv(t[k], na_rep, float_format), sep, quotechar) for t in ix._v] for k in range(ix.nlevels)]
+        elif ix._dt.startswith('datetime') or ix._dt.startswith('timedelta'):
+            icols = [[_q(s if s != 'NaT' else na_rep, sep, quotechar) for s in _dtstrs(ix._v, ix._dt)]]
         else:
             icols = [[_q(_fv(x, na_rep, float_format), sep, quotechar) for x in ix._v]]
         fcols = icols + fcols

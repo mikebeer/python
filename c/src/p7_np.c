@@ -22,7 +22,7 @@ static void np_init2(Module *m);
 static void la_init(Module *np);
 static void rnd_init(Module *np);
 
-typedef struct NdTmp { Nd nd; long i; double d; } NdTmp;
+typedef struct NdTmp { Nd nd; long i; double d; double c[2]; } NdTmp;
 
 /* ---- construction ----------------------------------------------------- */
 static Nd *nd_new(int dt, int nd, const long *shape)
@@ -36,6 +36,7 @@ static Nd *nd_new(int dt, int nd, const long *shape)
     a->size = n;
     a->iv = NULL; a->dv = NULL;
     if (dt == ND_FLOAT) a->dv = (double *)xmalloc(sizeof(double) * (size_t)n);
+    else if (dt == ND_COMPLEX) a->dv = (double *)xmalloc(2 * sizeof(double) * (size_t)n);
     else a->iv = (long *)xmalloc(sizeof(long) * (size_t)n);
     GC_ACCOUNT(8L * n);
     return a;
@@ -56,11 +57,13 @@ static Value nd_mkint(long v)
 static Value nd_elem(const Nd *a, long i)
 {
     if (a->dt == ND_FLOAT) return mkfloat(a->dv[i]);
+    if (a->dt == ND_COMPLEX) return mkcomplex(a->dv[2 * i], a->dv[2 * i + 1]);
     if (a->dt == ND_BOOL) return tobool(a->iv[i] != 0);
     return nd_mkint(a->iv[i]);
 }
 static double nd_d(const Nd *a, long i)
 {
+    if (a->dt == ND_COMPLEX) return a->dv[2 * i];
     return a->dt == ND_FLOAT ? a->dv[i] : (double)a->iv[i];
 }
 static Value nd_ret(Nd *r)
@@ -71,6 +74,23 @@ static Value nd_ret(Nd *r)
 static void nd_cp(Nd *d, long doff, const Nd *s, long soff, long cnt)
 {
     long i;
+    if (d->dt == ND_COMPLEX) {
+        if (s->dt == ND_COMPLEX)
+            memmove(d->dv + 2 * doff, s->dv + 2 * soff, 2 * sizeof(double) * (size_t)cnt);
+        else for (i = 0; i < cnt; i++) {
+            d->dv[2 * (doff + i)] = nd_d(s, soff + i);
+            d->dv[2 * (doff + i) + 1] = 0.0;
+        }
+        return;
+    }
+    if (s->dt == ND_COMPLEX) {
+        if (d->dt == ND_FLOAT) for (i = 0; i < cnt; i++) d->dv[doff + i] = s->dv[2 * (soff + i)];
+        else if (d->dt == ND_BOOL)
+            for (i = 0; i < cnt; i++)
+                d->iv[doff + i] = s->dv[2 * (soff + i)] != 0 || s->dv[2 * (soff + i) + 1] != 0;
+        else for (i = 0; i < cnt; i++) d->iv[doff + i] = (long)s->dv[2 * (soff + i)];
+        return;
+    }
     if (d->dt == ND_FLOAT) {
         if (s->dt == ND_FLOAT) memmove(d->dv + doff, s->dv + soff, sizeof(double) * (size_t)cnt);
         else for (i = 0; i < cnt; i++) d->dv[doff + i] = (double)s->iv[soff + i];
@@ -91,6 +111,8 @@ static Nd *nd_astype(const Nd *a, int dt)
 static Nd *nd_to_float(Nd *a)
 {
     if (a->dt == ND_FLOAT) return a;
+    if (a->dt == ND_COMPLEX)
+        throw_new(cls_TypeError, "complex dtype is not supported by this function");
     return nd_astype(a, ND_FLOAT);
 }
 static Nd *nd_reshaped(const Nd *a, int nd, const long *shape)
@@ -119,6 +141,7 @@ static int py_dt(Value v)
     case T_BOOL: return ND_BOOL;
     case T_INT: case T_BIG: return ND_INT;
     case T_FLOAT: return ND_FLOAT;
+    case T_COMPLEX: return ND_COMPLEX;
     default: return -1;
     }
 }
@@ -163,7 +186,11 @@ static void nd_fill(Nd *r, Value v, long *pos)
             nd_fill(r, v.t == T_ND ? nd_item(v, i) : AS_LIST(v)->a[i], pos);
         return;
     }
-    if (r->dt == ND_FLOAT) r->dv[*pos] = to_dbl(v);
+    if (r->dt == ND_COMPLEX) {
+        Cx z;
+        to_cx(v, &z);
+        r->dv[2 * *pos] = z.r; r->dv[2 * *pos + 1] = z.i;
+    } else if (r->dt == ND_FLOAT) r->dv[*pos] = to_dbl(v);
     else if (r->dt == ND_BOOL) r->iv[*pos] = v.t == T_FLOAT ? v.u.d != 0 : (v.u.i != 0);
     else r->iv[*pos] = v.t == T_FLOAT ? (long)v.u.d : (v.t == T_BIG ? 0 : v.u.i);
     (*pos)++;
@@ -174,8 +201,12 @@ static int parse_dtype(Value v)
         if (AS_CLASS(v) == cls_float) return ND_FLOAT;
         if (AS_CLASS(v) == cls_int) return ND_INT;
         if (AS_CLASS(v) == cls_bool) return ND_BOOL;
+        if (AS_CLASS(v) == cls_complex) return ND_COMPLEX;
     } else if (v.t == T_STR) {
         const char *s = AS_STR(v)->s;
+        if (!strcmp(s, "complex128") || !strcmp(s, "complex") || !strcmp(s, "c16") ||
+            !strcmp(s, "complex64") || !strcmp(s, "c8") || !strcmp(s, "D") ||
+            !strcmp(s, "complex_")) return ND_COMPLEX;
         if (!strcmp(s, "float64") || !strcmp(s, "float") || !strcmp(s, "f8") ||
             !strcmp(s, "float32") || !strcmp(s, "d") || !strcmp(s, "f4")) return ND_FLOAT;
         if (!strcmp(s, "int64") || !strcmp(s, "int") || !strcmp(s, "i8") ||
@@ -188,7 +219,8 @@ static int parse_dtype(Value v)
 }
 static const char *dt_name(int dt)
 {
-    return dt == ND_FLOAT ? "float64" : (dt == ND_INT ? "int64" : "bool");
+    return dt == ND_FLOAT ? "float64" : (dt == ND_INT ? "int64" :
+           (dt == ND_COMPLEX ? "complex128" : "bool"));
 }
 /* build an array from a python scalar / nested sequence / array (always a fresh copy) */
 static Nd *nd_from_value(Value v, int force)
@@ -211,19 +243,35 @@ static Nd *nd_from_value(Value v, int force)
     nd_fill(r, v, &pos);
     return r;
 }
-static Nd *nd_coerce(Value v, NdTmp *t)
+static Nd *nd_coerce_c(Value v, NdTmp *t)
 {
     if (v.t == T_ND) return AS_ND(v);
     if (v.t == T_LIST || v.t == T_TUPLE) return nd_from_value(v, -1);
     if (py_dt(v) < 0) throw_new(cls_TypeError, "unsupported operand type '%.40s'", type_name(v));
     memset(&t->nd, 0, sizeof(Nd));
     t->nd.nd = 0; t->nd.size = 1;
-    if (v.t == T_FLOAT || v.t == T_BIG) {
+    if (v.t == T_COMPLEX) {
+        t->nd.dt = ND_COMPLEX; t->c[0] = AS_CPLX(v)->re; t->c[1] = AS_CPLX(v)->im;
+        t->nd.dv = t->c;
+    } else if (v.t == T_FLOAT || v.t == T_BIG) {
         t->nd.dt = ND_FLOAT; t->d = to_dbl(v); t->nd.dv = &t->d;
     } else {
         t->nd.dt = v.t == T_BOOL ? ND_BOOL : ND_INT; t->i = v.u.i; t->nd.iv = &t->i;
     }
     return &t->nd;
+}
+/* real-only variant: functions that do not handle complex arrays reject them */
+static Nd *nd_coerce(Value v, NdTmp *t)
+{
+    Nd *a = nd_coerce_c(v, t);
+    if (a->dt == ND_COMPLEX)
+        throw_new(cls_TypeError, "complex dtype is not supported by this function");
+    return a;
+}
+static Nd *nd_arg0c(Args *x, NdTmp *t)
+{
+    if (x->n < 1) throw_new(cls_TypeError, "missing array argument");
+    return nd_coerce_c(A(0), t);
 }
 static Nd *nd_arg0(Args *x, NdTmp *t)
 {
@@ -337,6 +385,74 @@ static double nd_rint(double x)
         } \
     } while (0)
 
+static Nd *nd_expand(const Nd *a, int rnd, const long *rs, int dt);
+/* complex ordering is lexicographic (real part first) */
+static int cx_cmp3(double ar, double ai, double br, double bi)
+{
+    if (ar < br) return -1;
+    if (ar > br) return 1;
+    return ai < bi ? -1 : (ai > bi ? 1 : 0);
+}
+static Cx nd_cpow(Cx a, Cx b)
+{
+    int err = 0;
+    Cx r;
+    if (b.r == 0.0 && b.i == 0.0) return cx_mk(1.0, 0.0);
+    if (a.r == 0.0 && a.i == 0.0) {
+        if (b.r > 0.0 && b.i == 0.0) return cx_mk(0.0, 0.0);
+        return cx_mk(d_nan(), d_nan());
+    }
+    r = cx_pow(a, b, &err);
+    return r;
+}
+static Value nd_binary_c(int op, Nd *a, Nd *b)
+{
+    long rs[ND_MAXD], i;
+    int rnd = nd_bshape(a, b, rs);
+    int cmp = op >= OP_CMP;
+    Nd *ea, *eb, *r;
+    ea = nd_expand(a, rnd, rs, ND_COMPLEX);
+    eb = nd_expand(b, rnd, rs, ND_COMPLEX);
+    r = nd_new(cmp ? ND_BOOL : ND_COMPLEX, rnd, rs);
+    for (i = 0; i < r->size; i++) {
+        Cx x = cx_mk(ea->dv[2 * i], ea->dv[2 * i + 1]), y = cx_mk(eb->dv[2 * i], eb->dv[2 * i + 1]),
+            z;
+        int err = 0;
+        if (cmp) {
+            int c = op - OP_CMP, k;
+            if (c == C_EQ) r->iv[i] = x.r == y.r && x.i == y.i;
+            else if (c == C_NE) r->iv[i] = x.r != y.r || x.i != y.i;
+            else {
+                k = (x.r != x.r || y.r != y.r || x.i != x.i || y.i != y.i) ? 2 :
+                    cx_cmp3(x.r, x.i, y.r, y.i);
+                if (k == 2) r->iv[i] = 0;
+                else r->iv[i] = c == C_LT ? k < 0 :
+                    (c == C_LE ? k <= 0 : (c == C_GT ? k > 0 : k >= 0));
+            }
+            continue;
+        }
+        switch (op) {
+        case B_ADD: z = cx_add(x, y); break;
+        case B_SUB: z = cx_sub(x, y); break;
+        case B_MUL: z = cx_mul(x, y); break;
+        case B_DIV:
+            z = cx_quot(x, y, &err);
+            if (err) z = cx_mk(x.r / 0.0, x.i / 0.0);
+            break;
+        case B_POW: z = nd_cpow(x, y); break;
+        case OP_MAX: z = cx_cmp3(x.r, x.i, y.r, y.i) >= 0 ? x : y; break;
+        case OP_MIN: z = cx_cmp3(x.r, x.i, y.r, y.i) <= 0 ? x : y; break;
+        default:
+            throw_new(cls_TypeError, "ufunc '%s' not supported for the input types, and the inputs "
+                      "could not be safely coerced to any supported types according to the casting "
+                      "rule ''safe''", op == B_FDIV ? "floor_divide" : (op == B_MOD ? "remainder" :
+                      "bitwise"));
+            return NONE_V;
+        }
+        r->dv[2 * i] = z.r; r->dv[2 * i + 1] = z.i;
+    }
+    return nd_ret(r);
+}
 static Value nd_binary(int op, Nd *a, Nd *b)
 {
     long rs[ND_MAXD], sa[ND_MAXD], sb[ND_MAXD], idx[ND_MAXD];
@@ -344,6 +460,7 @@ static Value nd_binary(int op, Nd *a, Nd *b)
     int rnd, kd, rdt, k, cmp = op >= OP_CMP, boolres = 0;
     Nd *r;
     void *rptr, *aptr, *bptr;
+    if (a->dt == ND_COMPLEX || b->dt == ND_COMPLEX) return nd_binary_c(op, a, b);
     rnd = nd_bshape(a, b, rs);
     kd = a->dt > b->dt ? a->dt : b->dt;
     if (cmp) { rdt = ND_BOOL; if (kd == ND_BOOL) kd = ND_INT; }
@@ -449,8 +566,8 @@ static Value nd_binop(int op, Value a, Value b)
     if (a.t != T_ND && a.t != T_LIST && a.t != T_TUPLE && py_dt(a) < 0)
         throw_new(cls_TypeError, "unsupported operand type(s) for %s: '%.40s' and '%.40s'",
                   op_str(op), type_name(a), type_name(b));
-    x = nd_coerce(a, &ta);
-    y = nd_coerce(b, &tb);
+    x = nd_coerce_c(a, &ta);
+    y = nd_coerce_c(b, &tb);
     if (op == B_MATMUL) return nd_matmul(x, y, 0);
     return nd_binary(op, x, y);
 }
@@ -458,8 +575,8 @@ static Value nd_compare(int op, Value a, Value b)
 {
     NdTmp ta, tb;
     Nd *x, *y;
-    x = nd_coerce(a, &ta);
-    y = nd_coerce(b, &tb);
+    x = nd_coerce_c(a, &ta);
+    y = nd_coerce_c(b, &tb);
     return nd_binary(OP_CMP + op, x, y);
 }
 
@@ -486,10 +603,67 @@ static double nd_f1(int fn, double x)
     default: return x;
     }
 }
+static Value nd_ufunc1_c(int fn, Nd *a)
+{
+    long i;
+    Nd *r;
+    if (fn == F_ISNAN || fn == F_ISINF || fn == F_ISFINITE) {
+        r = nd_new(ND_BOOL, a->nd, a->shape);
+        for (i = 0; i < a->size; i++) {
+            double re = a->dv[2 * i], im = a->dv[2 * i + 1];
+            if (fn == F_ISNAN) r->iv[i] = re != re || im != im;
+            else if (fn == F_ISINF) r->iv[i] = d_isinf(re) || d_isinf(im);
+            else r->iv[i] = d_isfinite(re) && d_isfinite(im);
+        }
+        return nd_ret(r);
+    }
+    if (fn == F_ABS) {
+        r = nd_new(ND_FLOAT, a->nd, a->shape);
+        for (i = 0; i < a->size; i++) r->dv[i] = n_hypot(a->dv[2 * i], a->dv[2 * i + 1]);
+        return nd_ret(r);
+    }
+    if (fn == F_FLOOR || fn == F_CEIL)
+        throw_new(cls_TypeError, "ufunc '%s' not supported for the input types, and the inputs "
+                  "could not be safely coerced to any supported types according to the casting "
+                  "rule ''safe''", fn == F_FLOOR ? "floor" : "ceil");
+    r = nd_new(ND_COMPLEX, a->nd, a->shape);
+    for (i = 0; i < a->size; i++) {
+        Cx z = cx_mk(a->dv[2 * i], a->dv[2 * i + 1]), w;
+        int err = 0;
+        switch (fn) {
+        case F_SQRT: w = cx_sqrt(z); break;
+        case F_EXP: w = cx_exp(z, &err); break;
+        case F_SIN: w = cx_sin(z); break;
+        case F_COS: w = cx_cos(z); break;
+        case F_TAN: w = cx_tan(z); break;
+        case F_LOG: w = cx_log(z, &err); if (err) w = cx_mk(-HUGE_VAL, 0.0); break;
+        case F_LOG10: w = cx_log10(z, &err); if (err) w = cx_mk(-HUGE_VAL, 0.0); break;
+        case F_LOG2: w = cx_log(z, &err); if (err) w = cx_mk(-HUGE_VAL, 0.0);
+            else w = cx_mk(w.r / CX_LN2, w.i / CX_LN2);
+            break;
+        case F_TANH: w = cx_tanh(z); break;
+        case F_SINH: w = cx_sinh(z); break;
+        case F_COSH: w = cx_cosh(z); break;
+        case F_ASIN: w = cx_asin(z); break;
+        case F_ACOS: w = cx_acos(z); break;
+        case F_ATAN: w = cx_atan(z, &err); break;
+        case F_NEG: w = cx_neg(z); break;
+        case F_SQUARE: w = cx_mul(z, z); break;
+        case F_SIGN: {
+            double h = n_hypot(z.r, z.i);
+            w = h == 0.0 ? cx_mk(0.0, 0.0) : cx_mk(z.r / h, z.i / h);
+            break; }
+        default: w = z; break;
+        }
+        r->dv[2 * i] = w.r; r->dv[2 * i + 1] = w.i;
+    }
+    return nd_ret(r);
+}
 static Value nd_ufunc1(int fn, Nd *a)
 {
     long i;
     Nd *r;
+    if (a->dt == ND_COMPLEX) return nd_ufunc1_c(fn, a);
     if (fn == F_ISNAN || fn == F_ISINF || fn == F_ISFINITE) {
         r = nd_new(ND_BOOL, a->nd, a->shape);
         for (i = 0; i < a->size; i++) {
@@ -530,7 +704,7 @@ static Value nd_unop(int op, Value av)
     Nd *r;
     if (op == '-') return nd_ufunc1(F_NEG, a);
     if (op == '+') return av;
-    if (a->dt == ND_FLOAT)
+    if (a->dt == ND_FLOAT || a->dt == ND_COMPLEX)
         throw_new(cls_TypeError, "ufunc 'invert' not supported for the input types");
     r = nd_new(a->dt, a->nd, a->shape);
     for (i = 0; i < a->size; i++) r->iv[i] = a->dt == ND_BOOL ? !a->iv[i] : ~a->iv[i];
@@ -562,6 +736,32 @@ static double pw_sum(const double *a, long n)
         return pw_sum(a, n2) + pw_sum(a + n2, n - n2);
     }
 }
+/* numpy's pairwise summation for complex data; n counts doubles (2 per element) */
+static void pw_sum_c(const double *a, long n, double *rr, double *ri)
+{
+    long i;
+    if (n < 8) {
+        *rr = 0.0; *ri = 0.0;
+        for (i = 0; i < n; i += 2) { *rr += a[i]; *ri += a[i + 1]; }
+    } else if (n <= 128) {
+        double r[8];
+        for (i = 0; i < 8; i++) r[i] = a[i];
+        for (i = 8; i < n - (n % 8); i += 8) {
+            r[0] += a[i + 0]; r[1] += a[i + 1]; r[2] += a[i + 2]; r[3] += a[i + 3];
+            r[4] += a[i + 4]; r[5] += a[i + 5]; r[6] += a[i + 6]; r[7] += a[i + 7];
+        }
+        *rr = (r[0] + r[2]) + (r[4] + r[6]);
+        *ri = (r[1] + r[3]) + (r[5] + r[7]);
+        for (; i < n; i += 2) { *rr += a[i]; *ri += a[i + 1]; }
+    } else {
+        double rr2, ri2;
+        long n2 = n / 2;
+        n2 -= n2 % 8;
+        pw_sum_c(a, n2, rr, ri);
+        pw_sum_c(a + n2, n - n2, &rr2, &ri2);
+        *rr += rr2; *ri += ri2;
+    }
+}
 static int axis_norm(long ax, int nd)
 {
     if (ax < -nd || ax >= nd)
@@ -576,12 +776,107 @@ static int get_axis(Args *x, int pos, Nd *a, int *axis)
     *axis = axis_norm(need_long(v, "axis"), a->nd);
     return 1;
 }
+static Value nd_reduce_c(int kind, Nd *a, int has_axis, int axis, long ddof)
+{
+    long outer = 1, n, inner = 1, o, i, t, rs[ND_MAXD];
+    int rnd = 0, k, rdt;
+    Nd *r;
+    if (!has_axis) n = a->size;
+    else {
+        for (k = 0; k < axis; k++) outer *= a->shape[k];
+        n = a->shape[axis];
+        for (k = axis + 1; k < a->nd; k++) inner *= a->shape[k];
+        for (k = 0; k < a->nd; k++) if (k != axis) rs[rnd++] = a->shape[k];
+    }
+    switch (kind) {
+    case R_SUM: case R_PROD: case R_MEAN: case R_MIN: case R_MAX: rdt = ND_COMPLEX; break;
+    case R_ARGMIN: case R_ARGMAX: rdt = ND_INT; break;
+    case R_ANY: case R_ALL: rdt = ND_BOOL; break;
+    default: rdt = ND_FLOAT; break;
+    }
+    if ((kind == R_MIN || kind == R_MAX || kind == R_ARGMIN || kind == R_ARGMAX) && n == 0)
+        throw_new(cls_ValueError, "zero-size array to reduction operation which has no identity");
+    r = nd_new(rdt, rnd, rs);
+    for (o = 0; o < outer; o++)
+        for (i = 0; i < inner; i++) {
+            long base = o * n * inner + i, ri = o * inner + i;
+            const double *p = a->dv;
+            switch (kind) {
+            case R_SUM: case R_MEAN: {
+                double sr = 0.0, si = 0.0;
+                if (inner == 1) pw_sum_c(p + 2 * base, 2 * n, &sr, &si);
+                else for (t = 0; t < n; t++) {
+                    sr += p[2 * (base + t * inner)]; si += p[2 * (base + t * inner) + 1];
+                }
+                if (kind == R_MEAN) { sr /= (double)n; si /= (double)n; }
+                r->dv[2 * ri] = sr; r->dv[2 * ri + 1] = si;
+                break; }
+            case R_PROD: {
+                Cx acc = cx_mk(1.0, 0.0);
+                for (t = 0; t < n; t++)
+                    acc = cx_mul(acc, cx_mk(p[2 * (base + t * inner)],
+                        p[2 * (base + t * inner) + 1]));
+                r->dv[2 * ri] = acc.r; r->dv[2 * ri + 1] = acc.i;
+                break; }
+            case R_MIN: case R_MAX: case R_ARGMIN: case R_ARGMAX: {
+                long bi = 0;
+                for (t = 1; t < n; t++) {
+                    int c = cx_cmp3(p[2 * (base + t * inner)], p[2 * (base + t * inner) + 1],
+                                    p[2 * (base + bi * inner)], p[2 * (base + bi * inner) + 1]);
+                    if (kind == R_MIN || kind == R_ARGMIN ? c < 0 : c > 0) bi = t;
+                }
+                if (kind == R_ARGMIN || kind == R_ARGMAX) r->iv[ri] = bi;
+                else {
+                    r->dv[2 * ri] = p[2 * (base + bi * inner)];
+                    r->dv[2 * ri + 1] = p[2 * (base + bi * inner) + 1];
+                }
+                break; }
+            case R_ANY:
+                r->iv[ri] = 0;
+                for (t = 0; t < n; t++)
+                    if (p[2 * (base + t * inner)] != 0 || p[2 * (base + t * inner) + 1] != 0) {
+                        r->iv[ri] = 1;
+                        break;
+                    }
+                break;
+            case R_ALL:
+                r->iv[ri] = 1;
+                for (t = 0; t < n; t++)
+                    if (p[2 * (base + t * inner)] == 0 && p[2 * (base + t * inner) + 1] == 0) {
+                        r->iv[ri] = 0;
+                        break;
+                    }
+                break;
+            default: {          /* R_STD, R_VAR */
+                double mr = 0.0, mi = 0.0, acc, *tmp;
+                tmp = (double *)xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+                if (inner == 1) pw_sum_c(p + 2 * base, 2 * n, &mr, &mi);
+                else for (t = 0; t < n; t++) {
+                    mr += p[2 * (base + t * inner)]; mi += p[2 * (base + t * inner) + 1];
+                }
+                mr /= (double)n; mi /= (double)n;
+                for (t = 0; t < n; t++) {
+                    double dr = p[2 * (base + t * inner)] - mr,
+                        di = p[2 * (base + t * inner) + 1] - mi;
+                    tmp[t] = dr * dr + di * di;
+                }
+                if (inner == 1) acc = pw_sum(tmp, n);
+                else { acc = 0.0; for (t = 0; t < n; t++) acc += tmp[t]; }
+                acc = acc / (double)(n - ddof > 0 ? n - ddof : 0);
+                r->dv[ri] = kind == R_STD ? sqrt(acc) : acc;
+                free(tmp);
+                break; }
+            }
+        }
+    return nd_ret(r);
+}
 static Value nd_reduce(int kind, Nd *a, int has_axis, int axis, long ddof)
 {
     long outer = 1, n, inner = 1, o, i, t, rs[ND_MAXD];
     int rnd = 0, k, rdt;
     Nd *r;
     double *tmp = NULL;
+    if (a->dt == ND_COMPLEX) return nd_reduce_c(kind, a, has_axis, axis, ddof);
     if (kind == R_MEAN || kind == R_STD || kind == R_VAR) a = nd_to_float(a);
     if (!has_axis) n = a->size;
     else {
@@ -717,7 +1012,7 @@ static Value nd_reduce(int kind, Nd *a, int has_axis, int axis, long ddof)
 static Value nd_cumulative(int kind, Nd *a, int has_axis, int axis)
 {
     long outer = 1, n, inner = 1, o, i, t;
-    int k, rdt = a->dt == ND_FLOAT ? ND_FLOAT : ND_INT;
+    int k, rdt = a->dt == ND_COMPLEX ? ND_COMPLEX : (a->dt == ND_FLOAT ? ND_FLOAT : ND_INT);
     Nd *r;
     if (!has_axis) { n = a->size; r = nd_new1(rdt, n); }
     else {
@@ -729,7 +1024,15 @@ static Value nd_cumulative(int kind, Nd *a, int has_axis, int axis)
     for (o = 0; o < outer; o++)
         for (i = 0; i < inner; i++) {
             long base = o * n * inner + i;
-            if (rdt == ND_FLOAT) {
+            if (rdt == ND_COMPLEX) {
+                Cx acc = cx_mk(kind == R_CUMSUM ? 0.0 : 1.0, 0.0);
+                for (t = 0; t < n; t++) {
+                    long e = base + t * inner;
+                    Cx v = cx_mk(a->dv[2 * e], a->dv[2 * e + 1]);
+                    acc = kind == R_CUMSUM ? cx_add(acc, v) : cx_mul(acc, v);
+                    r->dv[2 * e] = acc.r; r->dv[2 * e + 1] = acc.i;
+                }
+            } else if (rdt == ND_FLOAT) {
                 double acc = kind == R_CUMSUM ? 0.0 : 1.0;
                 for (t = 0; t < n; t++) {
                     if (kind == R_CUMSUM) acc += a->dv[base + t * inner];
@@ -755,7 +1058,7 @@ static long ddof_arg(Args *x)
 }
 #define NDRED(fname, kind) \
     BI(fname) { \
-        NdTmp t_; Nd *a_ = nd_arg0(x, &t_); int ax_ = 0, has_ = get_axis(x, 1, a_, &ax_); \
+        NdTmp t_; Nd *a_ = nd_arg0c(x, &t_); int ax_ = 0, has_ = get_axis(x, 1, a_, &ax_); \
         return nd_reduce(kind, a_, has_, ax_, ddof_arg(x)); }
 NDRED(np_sum, R_SUM)
 NDRED(np_prod, R_PROD)
@@ -770,7 +1073,7 @@ NDRED(np_std, R_STD)
 NDRED(np_var, R_VAR)
 #define NDCUM(fname, kind) \
     BI(fname) { \
-        NdTmp t_; Nd *a_ = nd_arg0(x, &t_); int ax_ = 0, has_ = get_axis(x, 1, a_, &ax_); \
+        NdTmp t_; Nd *a_ = nd_arg0c(x, &t_); int ax_ = 0, has_ = get_axis(x, 1, a_, &ax_); \
         if (a_ == &t_.nd) a_ = nd_astype(a_, a_->dt); \
         return nd_cumulative(kind, a_, has_, ax_); }
 NDCUM(np_cumsum, R_CUMSUM)
@@ -906,7 +1209,9 @@ static Value nd_subscr(Value o, Value idx)
     while (pos < n) {
         off = sel.base;
         for (k = 0; k < sel.rnd; k++) off += sel.off[k][ix[k]];
-        if (a->dt == ND_FLOAT) r->dv[pos] = a->dv[off]; else r->iv[pos] = a->iv[off];
+        if (a->dt == ND_COMPLEX) {
+            r->dv[2 * pos] = a->dv[2 * off]; r->dv[2 * pos + 1] = a->dv[2 * off + 1];
+        } else if (a->dt == ND_FLOAT) r->dv[pos] = a->dv[off]; else r->iv[pos] = a->iv[off];
         pos++;
         for (k = sel.rnd - 1; k >= 0; k--) {
             if (++ix[k] < sel.rshape[k]) break;
@@ -924,7 +1229,7 @@ static void nd_setitem(Value o, Value idx, Value v)
     long ix[ND_MAXD], sst[ND_MAXD], n, pos = 0, off, so;
     int k, extra;
     if (a->nd == 0) throw_new(cls_IndexError, "too many indices for array: array is 0-dimensional");
-    s = nd_coerce(v, &tv);
+    s = nd_coerce_c(v, &tv);
     if (idx.t == T_INT && a->nd == 1 && s->nd == 0) {
         long i = sel_index(idx.u.i, a->shape[0], 0);
         nd_cp(a, i, s, 0, 1);
@@ -986,7 +1291,10 @@ static long nd_len(Value o)
 static int nd_truthy(Value o)
 {
     Nd *a = AS_ND(o);
-    if (a->size == 1) return a->dt == ND_FLOAT ? a->dv[0] != 0 : a->iv[0] != 0;
+    if (a->size == 1) {
+        if (a->dt == ND_COMPLEX) return a->dv[0] != 0 || a->dv[1] != 0;
+        return a->dt == ND_FLOAT ? a->dv[0] != 0 : a->iv[0] != 0;
+    }
     if (a->size == 0) return 0;
     throw_new(cls_ValueError, "The truth value of an array with more than one element is "
               "ambiguous. Use a.any() or a.all()");
@@ -994,7 +1302,7 @@ static int nd_truthy(Value o)
 }
 
 /* ---- printing (numpy's array2string layout) --------------------------- */
-#define NDW 64
+#define NDW 128
 typedef struct NdR {
     Nd *a;
     char *strs;          /* formatted elements, NDW bytes each, in display order */
@@ -1048,6 +1356,101 @@ static int fl_sci_digits(double d)
     }
     return 8;
 }
+/* format n doubles like numpy's FloatingFormat (sign '-' or, with plus, '+') into out (NDW each) */
+static void fmt_floats(const double *vv, long n, int plus, char *out)
+{
+    double mx = 0, mn = 0;
+    long i;
+    char *sp = out;
+    int have = 0, expf = 0, padl = 0, padr = 0, prec = 0, expw = 2, nonfin = 0, neginf = plus;
+    for (i = 0; i < n; i++) {
+        double d = vv[i], ad = fabs(d);
+        if (d != d || ad - ad != 0 || d == 0) continue;
+        if (!have) { mx = mn = ad; have = 1; }
+        else { if (ad > mx) mx = ad; if (ad < mn) mn = ad; }
+    }
+    if (have && (mx >= 1e8 || mn < 1e-4 || mx / mn > 1000.0)) expf = 1;
+    for (i = 0; i < n; i++) {
+        double d = vv[i];
+        if (d != d || d - d != 0) { nonfin = 1; if (d < 0) neginf = 1; }
+    }
+    if (!expf) {
+        for (i = 0; i < n; i++) {
+            double d = vv[i];
+            char ip[400], fr[400];
+            int il;
+            if (d != d || d - d != 0) continue;
+            fl_fixed(d, ip, fr);
+            il = (int)strlen(ip);
+            if (plus && ip[0] != '-') il++;
+            if (il > padl) padl = il;
+            if ((int)strlen(fr) > padr) padr = (int)strlen(fr);
+        }
+        if (nonfin) {
+            int offs = padr + 1;
+            if (3 - offs > padl) padl = 3 - offs;
+            if (3 + neginf - offs > padl) padl = 3 + neginf - offs;
+        }
+        for (i = 0; i < n; i++, sp += NDW) {
+            double d = vv[i];
+            char ip[400], fr[400], sg[420];
+            if (d != d) sprintf(sp, "%*s", padl + padr + 1, plus ? "+nan" : "nan");
+            else if (d - d != 0)
+                sprintf(sp, "%*s", padl + padr + 1, d > 0 ? (plus ? "+inf" : "inf") : "-inf");
+            else {
+                fl_fixed(d, ip, fr);
+                if (plus && ip[0] != '-') { sg[0] = '+'; strcpy(sg + 1, ip); }
+                else strcpy(sg, ip);
+                sprintf(sp, "%*s.%s%*s", padl, sg, fr, padr - (int)strlen(fr), "");
+            }
+        }
+    } else {
+        for (i = 0; i < n; i++) {
+            double d = vv[i];
+            char t[64];
+            int p, e;
+            if (d != d || d - d != 0) continue;
+            p = fl_sci_digits(d);
+            if (p > prec) prec = p;
+            sprintf(t, "%.0e", d);
+            e = atoi(strchr(t, 'e') + 1);
+            if (e < 0) e = -e;
+            if (e >= 100 && expw < 3) expw = 3;
+            if (t[0] == '-' || plus) { if (padl < 2) padl = 2; }
+            else if (padl < 1) padl = 1;
+        }
+        if (nonfin) {
+            int offs = expw + 2 + prec + 1;
+            if (3 - offs > padl) padl = 3 - offs;
+            if (3 + neginf - offs > padl) padl = 3 + neginf - offs;
+        }
+        for (i = 0; i < n; i++, sp += NDW) {
+            double d = vv[i];
+            char t[64], m[70];
+            char *ep;
+            int e, w;
+            if (d != d) {
+                sprintf(sp, "%*s", padl + prec + 2 + expw + 2 - 1, plus ? "+nan" : "nan");
+                continue;
+            }
+            if (d - d != 0) {
+                sprintf(sp, "%*s", padl + prec + 2 + expw + 2 - 1,
+                        d > 0 ? (plus ? "+inf" : "inf") : "-inf");
+                continue;
+            }
+            sprintf(t, "%.*e", prec, d);
+            ep = strchr(t, 'e');
+            e = atoi(ep + 1);
+            *ep = 0;
+            if (plus && t[0] != '-') { m[0] = '+'; strcpy(m + 1, t); }
+            else strcpy(m, t);
+            if (prec == 0) strcat(m, ".");
+            w = padl - (int)(strchr(m, '.') - m);
+            sprintf(sp, "%*s%se%c%0*d", w > 0 ? w : 0, "", m, e < 0 ? '-' : '+', expw,
+                    e < 0 ? -e : e);
+        }
+    }
+}
 static void nd_format_elems(NdR *r)
 {
     Nd *a = r->a;
@@ -1070,85 +1473,26 @@ static void nd_format_elems(NdR *r)
             sprintf(t, "%ld", a->iv[r->ids[i]]);
             sprintf(sp, "%*s", w, t);
         }
+    } else if (a->dt == ND_COMPLEX) {
+        double *vv = (double *)xmalloc(sizeof(double) * (size_t)(r->nids + 1));
+        char *ri = (char *)xmalloc((size_t)NDW * (size_t)(r->nids + 1));
+        char *ii = (char *)xmalloc((size_t)NDW * (size_t)(r->nids + 1));
+        for (i = 0; i < r->nids; i++) vv[i] = a->dv[2 * r->ids[i]];
+        fmt_floats(vv, r->nids, 0, ri);
+        for (i = 0; i < r->nids; i++) vv[i] = a->dv[2 * r->ids[i] + 1];
+        fmt_floats(vv, r->nids, 1, ii);
+        for (i = 0; i < r->nids; i++, sp += NDW) {
+            char *is = ii + NDW * i;
+            long sl = (long)strlen(is);
+            while (sl > 0 && is[sl - 1] == ' ') sl--;
+            sprintf(sp, "%s%.*sj%s", ri + NDW * i, (int)sl, is, is + sl);
+        }
+        free(vv); free(ri); free(ii);
     } else {
-        double mx = 0, mn = 0;
-        int have = 0, expf = 0, padl = 0, padr = 0, prec = 0, expw = 2, nonfin = 0, neginf = 0;
-        for (i = 0; i < r->nids; i++) {
-            double d = a->dv[r->ids[i]], ad = fabs(d);
-            if (d != d || ad - ad != 0 || d == 0) continue;
-            if (!have) { mx = mn = ad; have = 1; }
-            else { if (ad > mx) mx = ad; if (ad < mn) mn = ad; }
-        }
-        if (have && (mx >= 1e8 || mn < 1e-4 || mx / mn > 1000.0)) expf = 1;
-        for (i = 0; i < r->nids; i++) {
-            double d = a->dv[r->ids[i]];
-            if (d != d || d - d != 0) { nonfin = 1; if (d < 0) neginf = 1; }
-        }
-        if (!expf) {
-            for (i = 0; i < r->nids; i++) {
-                double d = a->dv[r->ids[i]];
-                char ip[400], fr[400];
-                if (d != d || d - d != 0) continue;
-                fl_fixed(d, ip, fr);
-                if ((int)strlen(ip) > padl) padl = (int)strlen(ip);
-                if ((int)strlen(fr) > padr) padr = (int)strlen(fr);
-            }
-            if (nonfin) {
-                int offs = padr + 1;
-                if (3 - offs > padl) padl = 3 - offs;
-                if (3 + neginf - offs > padl) padl = 3 + neginf - offs;
-            }
-            for (i = 0; i < r->nids; i++, sp += NDW) {
-                double d = a->dv[r->ids[i]];
-                char ip[400], fr[400];
-                if (d != d) sprintf(sp, "%*s", padl + padr + 1, "nan");
-                else if (d - d != 0) sprintf(sp, "%*s", padl + padr + 1, d > 0 ? "inf" : "-inf");
-                else {
-                    fl_fixed(d, ip, fr);
-                    sprintf(sp, "%*s.%s%*s", padl, ip, fr, padr - (int)strlen(fr), "");
-                }
-            }
-        } else {
-            for (i = 0; i < r->nids; i++) {
-                double d = a->dv[r->ids[i]];
-                char t[64];
-                int p, e;
-                if (d != d || d - d != 0) continue;
-                p = fl_sci_digits(d);
-                if (p > prec) prec = p;
-                sprintf(t, "%.0e", d);
-                e = atoi(strchr(t, 'e') + 1);
-                if (e < 0) e = -e;
-                if (e >= 100 && expw < 3) expw = 3;
-                if (t[0] == '-') { if (padl < 2) padl = 2; }
-                else if (padl < 1) padl = 1;
-            }
-            if (nonfin) {
-                int offs = expw + 2 + prec + 1;
-                if (3 - offs > padl) padl = 3 - offs;
-                if (3 + neginf - offs > padl) padl = 3 + neginf - offs;
-            }
-            for (i = 0; i < r->nids; i++, sp += NDW) {
-                double d = a->dv[r->ids[i]];
-                char t[64], m[64];
-                char *ep;
-                int e, w;
-                if (d != d) { sprintf(sp, "%*s", padl + prec + 2 + expw + 2 - 1, "nan"); continue; }
-                if (d - d != 0) {
-                    sprintf(sp, "%*s", padl + prec + 2 + expw + 2 - 1, d > 0 ? "inf" : "-inf");
-                    continue;
-                }
-                sprintf(t, "%.*e", prec, d);
-                ep = strchr(t, 'e');
-                e = atoi(ep + 1);
-                *ep = 0;
-                strcpy(m, t);
-                if (prec == 0) strcat(m, ".");
-                w = padl - (int)(strchr(m, '.') - m);
-                sprintf(sp, "%*s%se%c%0*d", w > 0 ? w : 0, "", m, e < 0 ? '-' : '+', expw,
-                        e < 0 ? -e : e);
-            }
-        }
+        double *vv = (double *)xmalloc(sizeof(double) * (size_t)(r->nids + 1));
+        for (i = 0; i < r->nids; i++) vv[i] = a->dv[r->ids[i]];
+        fmt_floats(vv, r->nids, 0, sp);
+        free(vv);
     }
 }
 static void nd_extend(Buf *s, Buf *line, const char *word, int elemw, int hang)
@@ -1301,7 +1645,14 @@ static int dtype_kw(Args *x, int dflt)
 static void nd_fillv(Nd *r, Value v)
 {
     long i;
-    if (r->dt == ND_FLOAT) { double d = to_dbl(v); for (i = 0; i < r->size; i++) r->dv[i] = d; }
+    if (r->dt == ND_COMPLEX) {
+        Cx z;
+        to_cx(v, &z);
+        for (i = 0; i < r->size; i++) { r->dv[2 * i] = z.r; r->dv[2 * i + 1] = z.i; }
+    } else if (r->dt == ND_FLOAT) {
+        double d = to_dbl(v);
+        for (i = 0; i < r->size; i++) r->dv[i] = d;
+    }
     else {
         long n = v.t == T_FLOAT ? (long)v.u.d : v.u.i;
         if (r->dt == ND_BOOL) n = v.t == T_FLOAT ? v.u.d != 0 : n != 0;
@@ -1339,7 +1690,7 @@ BI(np_full)
 static Value like_fill(Args *x, Value fill)
 {
     NdTmp t;
-    Nd *a = nd_arg0(x, &t), *r;
+    Nd *a = nd_arg0c(x, &t), *r;
     r = nd_new(dtype_kw(x, a->dt), a->nd, a->shape);
     nd_fillv(r, fill);
     return ndv(r);
@@ -1365,7 +1716,8 @@ BI(np_eye)
     nd_fillv(r, mkint(0));
     for (i = 0; i < n; i++)
         if (i + kk >= 0 && i + kk < m) {
-            if (r->dt == ND_FLOAT) r->dv[i * m + i + kk] = 1.0; else r->iv[i * m + i + kk] = 1;
+            if (r->dt == ND_COMPLEX) r->dv[2 * (i * m + i + kk)] = 1.0;
+            else if (r->dt == ND_FLOAT) r->dv[i * m + i + kk] = 1.0; else r->iv[i * m + i + kk] = 1;
         }
     return ndv(r);
 }
@@ -1448,13 +1800,13 @@ BI(np_asarray)
 BI(nd_copy)
 {
     NdTmp t;
-    Nd *a = nd_arg0(x, &t);
+    Nd *a = nd_arg0c(x, &t);
     return ndv(nd_astype(a, a->dt));
 }
 BI(nd_astype_m)
 {
     NdTmp t;
-    Nd *a = nd_arg0(x, &t);
+    Nd *a = nd_arg0c(x, &t);
     Value d = x->n > 1 ? A(1) : kwget(x, "dtype");
     if (d.t == T_UNSET) throw_new(cls_TypeError, "astype() missing required argument 'dtype'");
     return ndv(nd_astype(a, parse_dtype(d)));
@@ -1479,13 +1831,13 @@ static Value nd_tolist_rec(Nd *a, int axis, long off)
 BI(nd_tolist)
 {
     NdTmp t;
-    Nd *a = nd_arg0(x, &t);
+    Nd *a = nd_arg0c(x, &t);
     return nd_tolist_rec(a, 0, 0);
 }
 BI(nd_item_m)
 {
     NdTmp t;
-    Nd *a = nd_arg0(x, &t);
+    Nd *a = nd_arg0c(x, &t);
     if (a->size != 1)
         throw_new(cls_ValueError, "can only convert an array of size 1 to a Python scalar");
     return nd_elem(a, 0);
@@ -1493,7 +1845,7 @@ BI(nd_item_m)
 BI(nd_reshape)
 {
     NdTmp t;
-    Nd *a = nd_arg0(x, &t);
+    Nd *a = nd_arg0c(x, &t);
     long shape[ND_MAXD], known = 1;
     int nd, k, unk = -1;
     if (x->n == 2 && (A(1).t == T_TUPLE || A(1).t == T_LIST)) {
@@ -1527,7 +1879,7 @@ BI(nd_reshape)
 BI(nd_flatten)
 {
     NdTmp t;
-    Nd *a = nd_arg0(x, &t);
+    Nd *a = nd_arg0c(x, &t);
     long n = a->size;
     return ndv(nd_reshaped(a, 1, &n));
 }
@@ -1553,7 +1905,7 @@ static Nd *nd_transposed(Nd *a)
 BI(nd_transpose)
 {
     NdTmp t;
-    Nd *a = nd_arg0(x, &t);
+    Nd *a = nd_arg0c(x, &t);
     return ndv(nd_transposed(a));
 }
 static Nd *nd_expand(const Nd *a, int rnd, const long *rs, int dt)
@@ -1872,6 +2224,21 @@ static Value nd_matmul(Nd *a, Nd *b, int isdot)
     else { n = b->shape[1]; if (b->shape[0] != kk) goto mismatch; }
     if (a->nd == 2) rs[rnd++] = m;
     if (b->nd == 2) rs[rnd++] = n;
+    if (a->dt == ND_COMPLEX || b->dt == ND_COMPLEX) {
+        a = nd_astype(a, ND_COMPLEX); b = nd_astype(b, ND_COMPLEX);
+        r = nd_new(ND_COMPLEX, rnd, rs);
+        for (i = 0; i < 2 * m * n; i++) r->dv[i] = 0.0;
+        for (i = 0; i < m; i++)
+            for (k = 0; k < kk; k++) {
+                double ar = a->dv[2 * (i * kk + k)], ai = a->dv[2 * (i * kk + k) + 1];
+                for (j = 0; j < n; j++) {
+                    double br = b->dv[2 * (k * n + j)], bi = b->dv[2 * (k * n + j) + 1];
+                    r->dv[2 * (i * n + j)] += ar * br - ai * bi;
+                    r->dv[2 * (i * n + j) + 1] += ar * bi + ai * br;
+                }
+            }
+        return nd_ret(r);
+    }
     fl = a->dt == ND_FLOAT || b->dt == ND_FLOAT;
     if (fl) { a = nd_to_float(a); b = nd_to_float(b); }
     r = nd_new(fl ? ND_FLOAT : ND_INT, rnd, rs);
@@ -1911,13 +2278,13 @@ BI(np_dot)
 {
     NdTmp ta, tb;
     if (x->n != 2) throw_new(cls_TypeError, "dot() takes exactly 2 arguments");
-    return nd_matmul(nd_coerce(A(0), &ta), nd_coerce(A(1), &tb), 1);
+    return nd_matmul(nd_coerce_c(A(0), &ta), nd_coerce_c(A(1), &tb), 1);
 }
 BI(np_matmul)
 {
     NdTmp ta, tb;
     if (x->n != 2) throw_new(cls_TypeError, "matmul() takes exactly 2 arguments");
-    return nd_matmul(nd_coerce(A(0), &ta), nd_coerce(A(1), &tb), 0);
+    return nd_matmul(nd_coerce_c(A(0), &ta), nd_coerce_c(A(1), &tb), 0);
 }
 BI(np_diag)
 {
@@ -1963,10 +2330,15 @@ static double round_dec(double v, long dec)
 BI(np_round)
 {
     NdTmp t;
-    Nd *a = nd_arg0(x, &t), *r;
+    Nd *a = nd_arg0c(x, &t), *r;
     Value dv = x->n > 1 ? A(1) : kwget(x, "decimals");
     long dec = 0, i;
     if (dv.t != T_UNSET && dv.t != T_NONE) dec = need_long(dv, "decimals");
+    if (a->dt == ND_COMPLEX) {
+        r = nd_new(ND_COMPLEX, a->nd, a->shape);
+        for (i = 0; i < 2 * a->size; i++) r->dv[i] = round_dec(a->dv[i], dec);
+        return nd_ret(r);
+    }
     if (a->dt != ND_FLOAT) {
         if (dec >= 0) return nd_ret(nd_astype(a, a->dt));
         r = nd_astype(a, ND_FLOAT);
@@ -2050,7 +2422,7 @@ BI(np_count_nonzero)
     return mkint(c);
 }
 #define NDF1(fname, fn) \
-    BI(fname) { NdTmp t_; Nd *a_ = nd_arg0(x, &t_); return nd_ufunc1(fn, a_); }
+    BI(fname) { NdTmp t_; Nd *a_ = nd_arg0c(x, &t_); return nd_ufunc1(fn, a_); }
 NDF1(np_sqrt, F_SQRT)
 NDF1(np_exp, F_EXP)
 NDF1(np_sin, F_SIN)
@@ -2078,7 +2450,7 @@ NDF1(np_negative, F_NEG)
     BI(fname) { \
         NdTmp ta_, tb_; \
         if (x->n != 2) throw_new(cls_TypeError, "function takes exactly 2 arguments"); \
-        return nd_binary(op, nd_coerce(A(0), &ta_), nd_coerce(A(1), &tb_)); }
+        return nd_binary(op, nd_coerce_c(A(0), &ta_), nd_coerce_c(A(1), &tb_)); }
 NDB2(np_add, B_ADD)
 NDB2(np_subtract, B_SUB)
 NDB2(np_multiply, B_MUL)
@@ -2088,6 +2460,94 @@ NDB2(np_mod, B_MOD)
 NDB2(np_power, B_POW)
 NDB2(np_maximum, OP_MAX)
 NDB2(np_minimum, OP_MIN)
+
+/* ---- complex helpers: real/imag/conj/angle ------------------------------ */
+static Nd *nd_part(Nd *a, int which)
+{
+    Nd *r;
+    long i;
+    if (a->dt != ND_COMPLEX) {
+        if (which == 0) return a;
+        r = nd_new(a->dt, a->nd, a->shape);
+        for (i = 0; i < a->size; i++) {
+            if (r->dt == ND_FLOAT) r->dv[i] = 0.0; else r->iv[i] = 0;
+        }
+        return r;
+    }
+    r = nd_new(ND_FLOAT, a->nd, a->shape);
+    for (i = 0; i < a->size; i++) r->dv[i] = a->dv[2 * i + which];
+    return r;
+}
+static Nd *nd_conj(Nd *a)
+{
+    Nd *r;
+    long i;
+    if (a->dt != ND_COMPLEX) return nd_astype(a, a->dt);
+    r = nd_new(ND_COMPLEX, a->nd, a->shape);
+    for (i = 0; i < a->size; i++) {
+        r->dv[2 * i] = a->dv[2 * i];
+        r->dv[2 * i + 1] = -a->dv[2 * i + 1];
+    }
+    return r;
+}
+BI(np_conj)
+{
+    NdTmp t;
+    Nd *a = nd_arg0c(x, &t);
+    if (x->n > 0 && A(0).t == T_COMPLEX) { Cplx *c = AS_CPLX(A(0)); return mkcomplex(c->re,
+        -c->im); }
+    return nd_ret(nd_conj(a));
+}
+BI(np_real)
+{
+    NdTmp t;
+    Nd *a = nd_arg0c(x, &t);
+    return nd_ret(nd_part(a, 0));
+}
+BI(np_imag)
+{
+    NdTmp t;
+    Nd *a = nd_arg0c(x, &t);
+    return nd_ret(nd_part(a, 1));
+}
+BI(np_angle)
+{
+    NdTmp t;
+    Nd *a = nd_arg0c(x, &t), *r;
+    Value dg = x->n > 1 ? A(1) : kwget(x, "deg");
+    long i;
+    double k = (dg.t != T_UNSET && py_truthy(dg)) ? 180.0 / 3.14159265358979323846 : 1.0;
+    r = nd_new(ND_FLOAT, a->nd, a->shape);
+    for (i = 0; i < a->size; i++) {
+        double re = a->dt == ND_COMPLEX ? a->dv[2 * i] : nd_d(a, i);
+        double im = a->dt == ND_COMPLEX ? a->dv[2 * i + 1] : 0.0;
+        r->dv[i] = atan2(im, re) * k;
+    }
+    return nd_ret(r);
+}
+BI(np_iscomplexobj)
+{
+    NdTmp t;
+    if (x->n > 0 && A(0).t == T_COMPLEX) return mkbool(1);
+    return mkbool(nd_arg0c(x, &t)->dt == ND_COMPLEX);
+}
+BI(np_iscomplex)
+{
+    NdTmp t;
+    Nd *a = nd_arg0c(x, &t), *r;
+    long i;
+    r = nd_new(ND_BOOL, a->nd, a->shape);
+    for (i = 0; i < a->size; i++) r->iv[i] = a->dt == ND_COMPLEX && a->dv[2 * i + 1] != 0.0;
+    return nd_ret(r);
+}
+BI(np_isreal)
+{
+    Value v = np_iscomplex(x);
+    Nd *a = AS_ND(v);
+    long i;
+    for (i = 0; i < a->size; i++) a->iv[i] = !a->iv[i];
+    return v;
+}
 
 /* ---- attributes -------------------------------------------------------- */
 static int nd_getattr(Value o, Str *nm, Value *out)
@@ -2104,10 +2564,17 @@ static int nd_getattr(Value o, Str *nm, Value *out)
     if (!strcmp(s, "ndim")) { *out = mkint(a->nd); return 1; }
     if (!strcmp(s, "size")) { *out = mkint(a->size); return 1; }
     if (!strcmp(s, "dtype")) { *out = mkcstr(dt_name(a->dt)); return 1; }
-    if (!strcmp(s, "itemsize")) { *out = mkint(a->dt == ND_BOOL ? 1 : 8); return 1; }
-    if (!strcmp(s, "nbytes")) { *out = mkint(a->size * (a->dt == ND_BOOL ? 1 : 8)); return 1; }
+    if (!strcmp(s, "itemsize")) {
+        *out = mkint(a->dt == ND_BOOL ? 1 : a->dt == ND_COMPLEX ? 16 : 8);
+        return 1;
+    }
+    if (!strcmp(s, "nbytes")) {
+        *out = mkint(a->size * (a->dt == ND_BOOL ? 1 : a->dt == ND_COMPLEX ? 16 : 8));
+        return 1;
+    }
     if (!strcmp(s, "T")) { *out = ndv(nd_transposed(a)); return 1; }
-    if (!strcmp(s, "real")) { *out = o; return 1; }
+    if (!strcmp(s, "real")) { *out = ndv(nd_part(a, 0)); return 1; }
+    if (!strcmp(s, "imag")) { *out = ndv(nd_part(a, 1)); return 1; }
     if (!strcmp(s, "flat")) { long n = a->size; *out = ndv(nd_reshaped(a, 1, &n)); return 1; }
     return 0;
 }
@@ -2144,6 +2611,7 @@ static void np_init(void)
     def_bi(cls_ndarray, "var", np_var); def_bi(cls_ndarray, "round", np_round);
     def_bi(cls_ndarray, "dot", np_dot); def_bi(cls_ndarray, "any", np_any);
     def_bi(cls_ndarray, "all", np_all); def_bi(cls_ndarray, "clip", np_clip);
+    def_bi(cls_ndarray, "conj", np_conj); def_bi(cls_ndarray, "conjugate", np_conj);
     def_bi(cls_ndarray, "nonzero", np_nonzero); def_bi(cls_ndarray, "trace", np_trace);
     m = new_module("numpy");
     mod_def(m, "array", np_array); mod_def(m, "asarray", np_asarray);
@@ -2180,6 +2648,13 @@ static void np_init(void)
     mod_def(m, "clip", np_clip); mod_def(m, "any", np_any); mod_def(m, "all", np_all);
     mod_def(m, "allclose", np_allclose); mod_def(m, "array_equal", np_array_equal);
     mod_def(m, "std", np_std); mod_def(m, "var", np_var);
+    mod_def(m, "conj", np_conj); mod_def(m, "conjugate", np_conj);
+    mod_def(m, "real", np_real); mod_def(m, "imag", np_imag); mod_def(m, "angle", np_angle);
+    mod_def(m, "iscomplex", np_iscomplex); mod_def(m, "isreal", np_isreal);
+    mod_def(m, "iscomplexobj", np_iscomplexobj);
+    mod_val(m, "complex128", mkobj(cls_complex, T_CLASS)); mod_val(m, "complex_", mkobj(cls_complex,
+        T_CLASS));
+    mod_val(m, "complex64", mkobj(cls_complex, T_CLASS));
     mod_def(m, "round", np_round); mod_def(m, "around", np_round);
     mod_def(m, "sum", np_sum); mod_def(m, "mean", np_mean); mod_def(m, "prod", np_prod);
     mod_def(m, "min", np_min); mod_def(m, "max", np_max); mod_def(m, "amin", np_min);

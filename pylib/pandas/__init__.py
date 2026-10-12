@@ -149,143 +149,43 @@ def qcut(x, q, labels=None, **kw):
     return r
 
 
-# ---- datetime support (needs the datetime module) -------------------------------------------
-
-def to_datetime(arg, format=None, errors='raise', dayfirst=False, utc=None, unit=None, origin=None, **kw):
-    import datetime
-    scalar = not _is_listlike(arg)
-    vals = [arg] if scalar else list(_lst(arg))
-    out = []
-    for x in vals:
-        if x is None or x != x:
-            out.append(nan)
-        elif isinstance(x, datetime.datetime):
-            out.append(x)
-        elif isinstance(x, datetime.date):
-            out.append(datetime.datetime(x.year, x.month, x.day))
-        elif isinstance(x, str):
-            try:
-                out.append(_parse_dt(x, format))
-            except Exception:
-                if errors == 'coerce':
-                    out.append(nan)
-                else:
-                    raise ValueError('time data "%s" doesn\'t match format' % x)
-        else:
-            out.append(datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=x))
-    if scalar:
-        return out[0]
-    if isinstance(arg, Series):
-        return Series(out, arg._idx, name=arg.name, _dt='datetime64[us]')
-    return Index(out)
+# ---- datetime support ------------------------------------------------------------------------
+from .tslib import (Timestamp, Timedelta, to_offset, DateOffset, Day, Hour, Minute, Second, Milli, Micro, Nano, Week,
+                    MonthEnd, MonthBegin, YearEnd, YearBegin, QuarterEnd, QuarterBegin, BusinessDay, BaseOffset)
+from .dtindex import (DatetimeIndex, TimedeltaIndex, to_datetime, to_timedelta, date_range, bdate_range,
+                      timedelta_range, infer_freq)
 
 
-def _parse_dt(s, fmt):
-    import datetime
-    s = s.strip()
-    if fmt is not None:
-        return datetime.datetime.strptime(s, fmt)
-    t = s.replace('T', ' ')
-    date, _, tm = t.partition(' ')
-    sep = '-' if '-' in date else ('/' if '/' in date else None)
-    if sep is None:
-        if len(date) == 8 and date.isdigit():
-            y, m, d = int(date[:4]), int(date[4:6]), int(date[6:])
-        else:
-            raise ValueError(s)
-    else:
-        parts = date.split(sep)
-        if len(parts[0]) == 4:
-            y, m, d = int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 1
-        else:
-            m, d, y = int(parts[0]), int(parts[1]), int(parts[2])
-    hh = mm = ss = 0
-    if tm:
-        tp = tm.split(':')
-        hh = int(tp[0])
-        mm = int(tp[1]) if len(tp) > 1 else 0
-        ss = int(float(tp[2])) if len(tp) > 2 else 0
-    return datetime.datetime(y, m, d, hh, mm, ss)
+class _Offsets:
+    pass
 
 
-def date_range(start=None, end=None, periods=None, freq='D', name=None, **kw):
-    import datetime
-    s = to_datetime(start) if isinstance(start, str) else start
-    e = to_datetime(end) if isinstance(end, str) else end
-    step = datetime.timedelta(days=1)
-    f = freq if freq is not None else 'D'
-    mult = 1
-    unit = f
-    k = 0
-    while k < len(f) and f[k].isdigit():
-        k += 1
-    if k > 0:
-        mult = int(f[:k])
-        unit = f[k:]
-    out = []
-    if unit in ('D', 'h', 'H', 'min', 'T', 's', 'S', 'W'):
-        secs = {'D': 86400, 'h': 3600, 'H': 3600, 'min': 60, 'T': 60, 's': 1, 'S': 1, 'W': 604800}[unit] * mult
-        step = datetime.timedelta(seconds=secs)
-        cur = s
-        if periods is not None:
-            for i in range(periods):
-                out.append(s + step * i)
-        else:
-            while cur <= e:
-                out.append(cur)
-                cur = cur + step
-    elif unit in ('MS', 'M', 'ME', 'YS', 'Y', 'YE', 'A', 'AS'):
-        cur = s
-        i = 0
-        while True:
-            if periods is not None and i >= periods:
-                break
-            if periods is None and cur > e:
-                break
-            out.append(cur)
-            i += 1
-            months = mult if unit in ('MS', 'M', 'ME') else 12 * mult
-            if unit in ('M', 'ME'):
-                # month end
-                y = s.year + (s.month - 1 + months * i) // 12
-                m = (s.month - 1 + months * i) % 12 + 1
-                ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
-                cur = datetime.datetime(ny, nm, 1) - datetime.timedelta(days=1)
-                if i == 1 and out[0] == s and s.day != 1 and False:
-                    pass
-            else:
-                y = s.year + (s.month - 1 + months * i) // 12
-                m = (s.month - 1 + months * i) % 12 + 1
-                cur = datetime.datetime(y, m, 1)
-        if unit in ('M', 'ME') and out:
-            # first element is the month end on or after start
-            first = out[0]
-            y, m = s.year, s.month
-            ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
-            me = datetime.datetime(ny, nm, 1) - datetime.timedelta(days=1)
-            out = []
-            i = 0
-            while True:
-                if periods is not None and i >= periods:
-                    break
-                yy = y + (m - 1 + mult * i) // 12
-                mm = (m - 1 + mult * i) % 12 + 1
-                ny, nm = (yy + 1, 1) if mm == 12 else (yy, mm + 1)
-                d = datetime.datetime(ny, nm, 1) - datetime.timedelta(days=1)
-                if periods is None and d > e:
-                    break
-                out.append(d)
-                i += 1
-    else:
-        raise ValueError('unsupported freq ' + f)
-    ix = Index(out, name=name)
-    ix._dt = 'datetime64[us]'
-    return ix
+offsets = _Offsets()
+for _n, _c in (('DateOffset', DateOffset), ('Day', Day), ('Hour', Hour), ('Minute', Minute), ('Second', Second),
+               ('Milli', Milli), ('Micro', Micro), ('Nano', Nano), ('Week', Week), ('MonthEnd', MonthEnd),
+               ('MonthBegin', MonthBegin), ('YearEnd', YearEnd), ('YearBegin', YearBegin),
+               ('QuarterEnd', QuarterEnd), ('QuarterBegin', QuarterBegin), ('BusinessDay', BusinessDay),
+               ('BDay', BusinessDay), ('BaseOffset', BaseOffset)):
+    setattr(offsets, _n, _c)
 
 
-class Timestamp:
-    def __new_(cls):
-        pass
+class _Tseries:
+    pass
+
+
+tseries = _Tseries()
+tseries.offsets = offsets
+tseries.frequencies = _Tseries()
+tseries.frequencies.to_offset = to_offset
+
+
+class Grouper:
+    def __init__(self, key=None, level=None, freq=None, sort=False, closed=None, label=None, **kw):
+        self.key = key
+        self.level = level
+        self.freq = freq
+        self.closed = closed
+        self.label = label
 
 
 # ---- options ----------------------------------------------------------------------------------

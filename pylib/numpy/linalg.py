@@ -236,16 +236,65 @@ def eigvalsh(a, UPLO='L'):
     return eigh(a, UPLO)[0]
 
 
+def _sgn(x):
+    return -1.0 if math.copysign(1.0, x) < 0 else 1.0
+
+
+def _eig2(a, b, c, d):
+    """eigenvalues of [[a, b], [c, d]] as LAPACK dlanv2 orders them (floats or complex)"""
+    eps = 2.220446049250313e-16
+    if c == 0.0:
+        return (a, d)
+    if b == 0.0:
+        return (d, a)
+    if (a - d) == 0.0 and _sgn(b) != _sgn(c):
+        w = math.sqrt(abs(b)) * math.sqrt(abs(c))
+        return (complex(a, w), complex(d, -w))
+    temp = a - d
+    p = 0.5 * temp
+    bcmax = max(abs(b), abs(c))
+    bcmis = min(abs(b), abs(c)) * _sgn(b) * _sgn(c)
+    scale = max(abs(p), bcmax)
+    z = p / scale * p + bcmax / scale * bcmis
+    if z >= 4.0 * eps:
+        z = p + math.copysign(math.sqrt(scale) * math.sqrt(z), p)
+        return (d + z, d - bcmax / z * bcmis)
+    sigma = b + c
+    tau = math.hypot(sigma, temp)
+    cs = math.sqrt(0.5 * (1.0 + abs(sigma) / tau))
+    sn = -(p / (tau * cs)) * _sgn(sigma)
+    aa = a * cs + b * sn
+    bb = -a * sn + b * cs
+    cc = c * cs + d * sn
+    dd = -c * sn + d * cs
+    a2 = aa * cs + cc * sn
+    b2 = bb * cs + dd * sn
+    c2 = -aa * sn + cc * cs
+    d2 = -bb * sn + dd * cs
+    temp = 0.5 * (a2 + d2)
+    if c2 != 0.0:
+        if b2 != 0.0:
+            if _sgn(b2) == _sgn(c2):
+                sab = math.sqrt(abs(b2))
+                sac = math.sqrt(abs(c2))
+                pp = math.copysign(sab * sac, c2)
+                return (temp + pp, temp - pp)
+            w = math.sqrt(abs(b2)) * math.sqrt(abs(c2))
+            return (complex(temp, w), complex(temp, -w))
+        return (temp, temp)
+    return (temp, temp)
+
+
 def _qr_eigs(m):
-    """eigenvalues of a general real matrix by shifted QR iteration (real parts for complex pairs)"""
+    """eigenvalues of a general real matrix by shifted QR iteration (floats, complex for conjugate pairs)"""
     n = len(m)
     a = [row[:] for row in m]
-    eigs = []
+    ev = [0.0] * n
     hi = n
     it = 0
     while hi > 0:
         if hi == 1:
-            eigs.append(a[0][0])
+            ev[0] = a[0][0]
             break
         # look for a negligible sub-diagonal element
         l = hi - 1
@@ -254,26 +303,15 @@ def _qr_eigs(m):
                 break
             l -= 1
         if l == hi - 1:
-            eigs.append(a[hi - 1][hi - 1])
+            ev[hi - 1] = a[hi - 1][hi - 1]
             hi -= 1
             a = [row[:hi] for row in a[:hi]]
             it = 0
             continue
         if l == hi - 2:
-            p = a[hi - 2][hi - 2]
-            q = a[hi - 2][hi - 1]
-            r = a[hi - 1][hi - 2]
-            s = a[hi - 1][hi - 1]
-            tr = p + s
-            dt = p * s - q * r
-            disc = tr * tr / 4.0 - dt
-            if disc >= 0:
-                sq = math.sqrt(disc)
-                eigs.append(tr / 2.0 + sq)
-                eigs.append(tr / 2.0 - sq)
-            else:
-                eigs.append(tr / 2.0)
-                eigs.append(tr / 2.0)
+            e1, e2 = _eig2(a[hi - 2][hi - 2], a[hi - 2][hi - 1], a[hi - 1][hi - 2], a[hi - 1][hi - 1])
+            ev[hi - 2] = e1
+            ev[hi - 1] = e2
             hi -= 2
             a = [row[:hi] for row in a[:hi]]
             it = 0
@@ -281,7 +319,7 @@ def _qr_eigs(m):
         it += 1
         if it > 500:
             for i in _range(hi):
-                eigs.append(a[i][i])
+                ev[i] = a[i][i]
             break
         mu = a[hi - 1][hi - 1]
         if it % 11 == 10:
@@ -292,7 +330,58 @@ def _qr_eigs(m):
         a = _matmul(r, q)
         for i in _range(hi):
             a[i][i] += mu
-    return eigs
+    return ev
+
+
+def _any_complex(w):
+    for v in w:
+        if isinstance(v, complex):
+            return True
+    return False
+
+
+def _csolve(m, lam, x):
+    """solve (m - lam I) y = x for complex y (Gaussian elimination, partial pivoting)"""
+    n = len(m)
+    a = [[complex(m[i][j]) - (lam if i == j else 0.0) for j in _range(n)] + [x[i]] for i in _range(n)]
+    for k in _range(n):
+        piv = k
+        for i in _range(k + 1, n):
+            if abs(a[i][k]) > abs(a[piv][k]):
+                piv = i
+        a[k], a[piv] = a[piv], a[k]
+        if abs(a[k][k]) < 1e-300:
+            a[k][k] = complex(1e-300)
+        for i in _range(k + 1, n):
+            f = a[i][k] / a[k][k]
+            if f != 0:
+                for j in _range(k, n + 1):
+                    a[i][j] = a[i][j] - f * a[k][j]
+    y = [complex(0)] * n
+    for i in _range(n - 1, -1, -1):
+        s = a[i][n]
+        for j in _range(i + 1, n):
+            s = s - a[i][j] * y[j]
+        y[i] = s / a[i][i]
+    return y
+
+
+def _cvec(m, lam):
+    n = len(m)
+    lam2 = lam + complex(1e-10 * (1.0 + abs(lam)), 0.0)
+    x = [complex(1.0)] * n
+    for _ in _range(4):
+        x = _csolve(m, lam2, x)
+        nr = math.sqrt(sum(abs(v) * abs(v) for v in x))
+        x = [v / nr for v in x]
+    big = 0
+    for i in _range(n):
+        if abs(x[i]) > abs(x[big]):
+            big = i
+    ph = x[big] / abs(x[big])
+    x = [v / ph for v in x]
+    x = [complex(v.real, 0.0) if i == big else v for i, v in enumerate(x)]
+    return x
 
 
 def eigvals(a):
@@ -305,7 +394,12 @@ def eigvals(a):
                 sym = False
     if sym:
         return eigh(a)[0]
-    return np.array(sorted(_qr_eigs(m)))
+    w = _qr_eigs(m)
+    if _any_complex(w):
+        return np.array(w)
+    if n == 2:
+        return np.array(w)
+    return np.array(sorted(w))
 
 
 def eig(a):
@@ -318,7 +412,13 @@ def eig(a):
                 sym = False
     if sym:
         return eigh(a)
-    w = sorted(_qr_eigs(m))
+    w = _qr_eigs(m)
+    if _any_complex(w):
+        ccols = []
+        for lam in w:
+            ccols.append(_cvec(m, complex(lam)))
+        return np.array(w), np.array(_transpose(ccols))
+    w = sorted(w)
     cols = []
     for lam in w:
         shifted = [row[:] for row in m]

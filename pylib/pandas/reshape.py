@@ -351,6 +351,21 @@ def pivot_table(df, values=None, index=None, columns=None, aggfunc='mean', fill_
                 dropna=True, margins_name='All'):
     idxn = _aslist(index) or []
     coln = _aslist(columns) or []
+    if any(isinstance(k, Series) for k in idxn + coln):
+        df = df.copy()
+        def _fix(L):
+            out = []
+            for k in L:
+                if isinstance(k, Series):
+                    df[k.name] = k
+                    out.append(k.name)
+                else:
+                    out.append(k)
+            return out
+        idxn = _fix(idxn)
+        coln = _fix(coln)
+        index = idxn
+        columns = coln
     keys = idxn + coln
     if values is None:
         vals = [c for j, c in enumerate(df._cols._v) if c not in keys and (df._dts[j] in _NUMDT or aggfunc in ('count', 'nunique', 'size', 'first', 'last', 'min', 'max'))]

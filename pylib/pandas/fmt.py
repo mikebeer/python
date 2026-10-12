@@ -88,7 +88,7 @@ def _objstr(x):
 
 def fmt_cells(vals, dt):
     """cell strings (sign / leading slot included), not yet padded to a common width"""
-    if dt == 'int64':
+    if dt == 'int64' or dt == 'int32':
         return [('-%d' % -x) if x < 0 else (' %d' % x) for x in vals]
     if dt == 'float64':
         return fmt_floats(vals)
@@ -103,9 +103,9 @@ def fmt_cells(vals, dt):
                 res.append(' ' + x)
         return _trunc(res)
     if dt.startswith('datetime'):
-        return [' ' + s for s in dt_strings(vals)]
+        return dt_strings(vals)
     if dt.startswith('timedelta'):
-        return [' ' + s for s in td_strings(vals)]
+        return td_strings(vals)
     return _trunc([' ' + _objstr(x) for x in vals])
 
 
@@ -121,47 +121,43 @@ def _trunc(cells):
 def dt_strings(vals):
     full = False
     micro = False
+    milli = False
     for x in vals:
         if x == x:
             if x.hour or x.minute or x.second or x.microsecond:
                 full = True
-            if x.microsecond:
+            if x.microsecond % 1000:
                 micro = True
+            elif x.microsecond:
+                milli = True
     out = []
     for x in vals:
         if x != x:
             out.append('NaT')
-        elif micro:
-            out.append(str(x) if x.microsecond else str(x) + '.000000')
-        elif full:
-            out.append(str(x)[:19])
+        elif not full:
+            out.append('%04d-%02d-%02d' % (x.year, x.month, x.day))
         else:
-            out.append(str(x)[:10])
+            t = '%04d-%02d-%02d %02d:%02d:%02d' % (x.year, x.month, x.day, x.hour, x.minute, x.second)
+            if micro:
+                t += '.%06d' % x.microsecond
+            elif milli:
+                t += '.%03d' % (x.microsecond // 1000)
+            out.append(t)
     return out
 
 
 def td_strings(vals):
-    full = False
-    micro = False
+    even = True
     for x in vals:
-        if x == x:
-            if x.seconds or x.microseconds:
-                full = True
-            if x.microseconds:
-                micro = True
+        if x == x and x._us % 86400000000:
+            even = False
+            break
     out = []
     for x in vals:
         if x != x:
             out.append('NaT')
-            continue
-        d = x.days
-        s = x.seconds
-        t = '%d days' % d
-        if full:
-            t += ' %02d:%02d:%02d' % (s // 3600, (s // 60) % 60, s % 60)
-            if micro:
-                t += '.%06d' % x.microseconds
-        out.append(t)
+        else:
+            out.append(x._repr_base(None if even else 'long'))
     return out
 
 
@@ -172,7 +168,7 @@ def format_labels(v, dt):
         return td_strings(v)
     if dt == 'float64':
         return [s[1:] if s.startswith(' ') else s for s in fmt_floats(v)]
-    if dt == 'int64' or dt == 'bool':
+    if dt == 'int64' or dt == 'bool' or dt == 'int32':
         return [str(x) for x in v]
     out = []
     for x in v:
@@ -214,8 +210,11 @@ def series_repr(s):
     n = len(s._v)
     nm = s.name
     foot = ''
+    fq = getattr(s._idx, 'freqstr', None) if s._idx.nlevels == 1 and s._idx._dt[:1] in ('d', 't') else None
+    if fq is not None and n > 0:
+        foot = 'Freq: %s, ' % fq
     if nm is not None:
-        foot = 'Name: %s, ' % _namestr(nm)
+        foot += 'Name: %s, ' % _namestr(nm)
     if n == 0:
         return 'Series([], %sdtype: %s)' % (foot, s._dt)
     trunc = n > MAX_ROWS
@@ -303,6 +302,8 @@ def _col_header_cells(columns, j, numeric):
     """header lines for column j"""
     if columns.nlevels == 1:
         lab = columns._v[j]
+        if columns._dt[:1] in ('d', 't') and (columns._dt.startswith('datetime') or columns._dt.startswith('timedelta')):
+            return [(' ' if numeric else '') + format_labels(columns._v, columns._dt)[j]]
         return [(' ' if numeric else '') + _lab(lab)]
     t = columns._v[j]
     return [_lab(x) for x in t]
@@ -361,7 +362,7 @@ def frame_repr(df):
         dt = df._dts[j]
         vals = sv if pos is None else [sv[i] for i in pos]
         cells = fmt_cells(vals, dt)
-        numeric = dt == 'int64' or dt == 'float64' or dt == 'bool'
+        numeric = dt == 'int64' or dt == 'float64' or dt == 'bool' or dt == 'int32'
         hdr = _col_header_cells(cols, j, numeric)
         if cols.nlevels > 1:
             hdr = _sparse_hdr(cols, j, hdr, numeric)

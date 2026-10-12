@@ -3,6 +3,7 @@
    ========================================================================= */
 static void re_init(void);
 static void json_init(void);
+static void sock_init(void);
 static Module *new_module(const char *name)
 {
     Module *m = (Module *)gc_alloc(sizeof(Module), T_MODULE);
@@ -706,7 +707,7 @@ static struct { const char *name; Class **var; Class **base; } exc_table[] = {
     { "ModuleNotFoundError", &cls_ModuleNotFoundError, &cls_ImportError },
     { "FloatingPointError", &cls_dummy_exc[0], &cls_ArithmeticError },
     { "UnicodeError", &cls_dummy_exc[1], &cls_ValueError },
-    { "UnicodeDecodeError", &cls_dummy_exc[2], &cls_dummy_exc[1] },
+    { "UnicodeDecodeError", &cls_UnicodeDecodeError, &cls_dummy_exc[1] },
     { "UnicodeEncodeError", &cls_dummy_exc[3], &cls_dummy_exc[1] },
     { "MemoryError", &cls_dummy_exc[4], &cls_Exception },
     { "ReferenceError", &cls_dummy_exc[5], &cls_Exception },
@@ -717,8 +718,14 @@ static struct { const char *name; Class **var; Class **base; } exc_table[] = {
     { "FileExistsError", &cls_dummy_exc[10], &cls_OSError },
     { "IsADirectoryError", &cls_dummy_exc[11], &cls_OSError },
     { "NotADirectoryError", &cls_dummy_exc[12], &cls_OSError },
-    { "TimeoutError", &cls_dummy_exc[13], &cls_OSError },
-    { "ConnectionError", &cls_dummy_exc[14], &cls_OSError },
+    { "TimeoutError", &cls_TimeoutError, &cls_OSError },
+    { "ConnectionError", &cls_ConnectionError, &cls_OSError },
+    { "ConnectionRefusedError", &cls_ConnectionRefusedError, &cls_ConnectionError },
+    { "ConnectionResetError", &cls_ConnectionResetError, &cls_ConnectionError },
+    { "ConnectionAbortedError", &cls_ConnectionAbortedError, &cls_ConnectionError },
+    { "BrokenPipeError", &cls_BrokenPipeError, &cls_ConnectionError },
+    { "BlockingIOError", &cls_BlockingIOError, &cls_OSError },
+    { "InterruptedError", &cls_InterruptedError, &cls_OSError },
     { "IndentationError", &cls_dummy_exc[15], &cls_SyntaxError },
     { "TabError", &cls_dummy_exc[16], &cls_dummy_exc[15] },
     { "Warning", &cls_dummy_exc[17], &cls_Exception },
@@ -804,6 +811,7 @@ static void init_runtime(int argc, char **argv)
     cls_smeth = mk_type("staticmethod", cls_object, bi_staticmethod);
     cls_cmeth = mk_type("classmethod", cls_object, bi_classmethod);
     cls_super = mk_type("super", cls_object, bi_super);
+    complex_init();
     { long si = global_index(intern_c("set")); set_global(intern_c("frozenset"), G[si]); }
     cls_object->ctor = bi_object;
     for (i = 0; exc_table[i].name; i++) {
@@ -908,6 +916,7 @@ static void init_runtime(int argc, char **argv)
         def_bi(cls_dict, "__init__", d_update);
         def_bi(cls_list, "__init__", list_init);
         def_bi(cls_set, "__init__", set_init);
+        amap_set(&cls_set->ns, S_repr, mkbuiltin("__repr__", nat_set_repr));
     }
     /* list, tuple */
     def_bi(cls_list, "append", l_append); def_bi(cls_list, "extend", l_extend);
@@ -934,10 +943,10 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_set, "issuperset", st_issuperset); def_bi(cls_set, "isdisjoint", st_isdisjoint);
     def_bi(cls_set, "copy", st_copy); def_bi(cls_set, "clear", st_clear);
     {
-        Class *nk[2];
+        Class *nk[3];
         int k;
-        nk[0] = cls_int; nk[1] = cls_float;
-        for (k = 0; k < 2; k++) {
+        nk[0] = cls_int; nk[1] = cls_float; nk[2] = cls_complex;
+        for (k = 0; k < 3; k++) {
             def_bi(nk[k], "__add__", num_add); def_bi(nk[k], "__radd__", num_radd);
             def_bi(nk[k], "__sub__", num_sub); def_bi(nk[k], "__rsub__", num_rsub);
             def_bi(nk[k], "__mul__", num_mul); def_bi(nk[k], "__rmul__", num_rmul);
@@ -951,6 +960,8 @@ static void init_runtime(int argc, char **argv)
             def_bi(nk[k], "__eq__", nat_eq); def_bi(nk[k], "__ne__", nat_ne);
             def_bi(nk[k], "__lt__", nat_lt); def_bi(nk[k], "__le__", nat_le);
             def_bi(nk[k], "__gt__", nat_gt); def_bi(nk[k], "__ge__", nat_ge);
+            def_bi(nk[k], "__repr__", nat_repr);
+            def_bi(nk[k], "__hash__", nat_hash); def_bi(nk[k], "__format__", nat_format);
         }
         def_bi(cls_int, "__and__", num_and); def_bi(cls_int, "__rand__", num_rand);
         def_bi(cls_int, "__or__", num_or); def_bi(cls_int, "__ror__", num_ror);
@@ -959,6 +970,7 @@ static void init_runtime(int argc, char **argv)
         def_bi(cls_int, "__rshift__", num_rshift); def_bi(cls_int, "__rrshift__", num_rrshift);
         def_bi(cls_int, "__invert__", num_invert);
     }
+    complex_methods();
     /* numbers */
     def_bi(cls_int, "bit_length", i_bit_length);
     def_bi(cls_float, "is_integer", f_is_integer);
@@ -974,21 +986,26 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_file, "close", fl_close); def_bi(cls_file, "__enter__", fl_enter);
     def_bi(cls_file, "__exit__", fl_exit);
 
-    /* bytes */
-    cls_bytes = mk_type("bytes", cls_object, bi_bytes);
-    def_bi(cls_bytes, "decode", b_decode); def_bi(cls_bytes, "hex", b_hex);
-    def_bi(cls_bytes, "fromhex", b_fromhex);
-    def_bi(cls_bytes, "upper", b_upper); def_bi(cls_bytes, "lower", b_lower);
-    def_bi(cls_bytes, "strip", b_strip); def_bi(cls_bytes, "lstrip", b_lstrip);
-    def_bi(cls_bytes, "rstrip", b_rstrip); def_bi(cls_bytes, "split", b_split);
-    def_bi(cls_bytes, "join", b_join); def_bi(cls_bytes, "replace", b_replace);
-    def_bi(cls_bytes, "find", b_find); def_bi(cls_bytes, "count", b_count);
-    def_bi(cls_bytes, "startswith", b_startswith); def_bi(cls_bytes, "endswith", b_endswith);
-    def_bi(cls_bytes, "rfind", b_rfind); def_bi(cls_bytes, "index", b_index);
-    def_bi(cls_bytes, "splitlines", b_splitlines); def_bi(cls_bytes, "isdigit", b_isdigit);
-    def_bi(cls_bytes, "isalpha", b_isalpha);
-    def_bi(cls_int, "to_bytes", i_to_bytes); def_bi(cls_int, "from_bytes", i_from_bytes);
-    set_global(intern_c("bytearray"), mkobj(cls_bytes, T_CLASS));
+    bytes_init();
+    set_global(intern_c("bytearray"), mkobj(cls_bytearray, T_CLASS));
+    {
+        Class *bk[2];
+        int k;
+        bk[0] = cls_bytes; bk[1] = cls_bytearray;
+        for (k = 0; k < 2; k++) {
+            def_bi(bk[k], "__len__", nat_len); def_bi(bk[k], "__iter__", nat_iter);
+            def_bi(bk[k], "__contains__", nat_contains); def_bi(bk[k], "__repr__", nat_repr);
+            def_bi(bk[k], "__eq__", nat_eq); def_bi(bk[k], "__ne__", nat_ne);
+            def_bi(bk[k], "__lt__", nat_lt); def_bi(bk[k], "__le__", nat_le);
+            def_bi(bk[k], "__gt__", nat_gt); def_bi(bk[k], "__ge__", nat_ge);
+            def_bi(bk[k], "__getitem__", nat_getitem); def_bi(bk[k], "__add__", nat_add);
+            def_bi(bk[k], "__mul__", nat_mul); def_bi(bk[k], "__rmul__", nat_mul);
+        }
+        def_bi(cls_bytes, "__hash__", nat_hash);
+        amap_set(&cls_bytearray->ns, S_repr, mkbuiltin("__repr__", nat_set_repr));
+        def_bi(cls_bytearray, "__setitem__", nat_setitem);
+        def_bi(cls_bytearray, "__delitem__", nat_delitem);
+    }
     /* misc types */
     cls_slice = mk_type("slice", cls_object, bi_slice);
     def_bi(cls_slice, "indices", sl_indices);
@@ -1051,6 +1068,9 @@ static void init_runtime(int argc, char **argv)
     }
     re_init();
     json_init();
+    struct_init();
+    cmath_init();
+    sock_init();
     m = new_module("time");
     mod_def(m, "time", t_time); mod_def(m, "perf_counter", t_clock);
     mod_def(m, "monotonic", t_clock); mod_def(m, "process_time", t_clock);

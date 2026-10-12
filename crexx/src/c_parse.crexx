@@ -751,7 +751,8 @@ p_atom: procedure = .int
     return n
   end
   if t = T_FLT then do
-    n = mkc(mkfloat(tk_f[tpp]))
+    if tk_i[tpp] = 1 then n = mkc(mkcplx(0.0, tk_f[tpp]))
+    else n = mkc(mkfloat(tk_f[tpp]))
     tpp = tpp + 1
     return n
   end
@@ -852,12 +853,20 @@ p_strings: procedure = .int
   anyf = .int
   fl = .int
   x = .int
+  bacc = .string
+  isbyt = .int
   acc = ""
   anyf = 0
   base = psp
+  bacc = ""
+  isbyt = 0
   do while tk_t[tpp] = T_STR
     fl = tk_i[tpp]
     if fl = 0 then acc = acc || tk_s[tpp]
+    else if fl = 4 then do
+      isbyt = 1
+      bacc = bacc || tk_s[tpp]
+    end
     else do
       anyf = 1
       /* flush literal accumulated so far */
@@ -872,6 +881,7 @@ p_strings: procedure = .int
     end
     tpp = tpp + 1
   end
+  if isbyt = 1 then return mkc(mkbytes(bacc))
   if anyf = 0 then return mkc(mkstr(acc))
   if acc \== "" then do
     psp = psp + 1

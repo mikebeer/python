@@ -1129,3 +1129,54 @@ def convolve(a, v, mode='full'):
         lo = (m - 1) // 2
         return np.array(full[lo:lo + max(n, m)])
     return np.array(full[m - 1:n])
+
+
+class _LazySub:
+    """np.fft: the native numpy module has no submodule path, so the sub module is exposed as an
+    attribute of this overlay and loaded on first use"""
+
+    def __init__(self, name):
+        self._name = name
+        self._mod = None
+
+    def _load(self):
+        if self._mod is None:
+            import sys
+            import numpy._overlay.fft as m
+            sys.modules['numpy.' + self._name] = m
+            self._mod = m
+        return self._mod
+
+    def __getattr__(self, attr):
+        if attr[:2] == '__':
+            raise AttributeError(attr)
+        return getattr(self._load(), attr)
+
+    def __repr__(self):
+        return "<module 'numpy.%s'>" % self._name
+
+
+fft = _LazySub('fft')
+
+
+def roots(p):
+    from numpy._cplx import roots as _roots
+    return _roots(p)
+
+
+def _cx(name):
+    def f(*a, **k):
+        import numpy._cplx as c
+        return getattr(c, name)(*a, **k)
+    return f
+
+
+angle = _cx("angle")
+conj = _cx("conj")
+conjugate = _cx("conj")
+real = _cx("real")
+imag = _cx("imag")
+iscomplex = _cx("iscomplex")
+isreal = _cx("isreal")
+iscomplexobj = _cx("iscomplexobj")
+vdot = _cx("vdot")

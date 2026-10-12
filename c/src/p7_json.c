@@ -824,6 +824,7 @@ static Value jd_value(JDec *D, long i, long *end)
 static Value json_doc_arg(Value s)
 {
     if (s.t == T_INST && AS_INST(s)->pay.t == T_STR) s = AS_INST(s)->pay;
+    if (s.t == T_BARR) return mkstr(AS_BARR(s)->s, AS_BARR(s)->n);
     if (s.t == T_BYTES) return mkstr(AS_STR(s)->s, AS_STR(s)->len);
     if (s.t != T_STR)
         throw_new(cls_TypeError, "the JSON object must be str, bytes or bytearray, not %.40s",

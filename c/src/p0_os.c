@@ -10,6 +10,10 @@
 
    POSIX calls are compiled only with -DPY_POSIX.  The interpreter uses no
    popen, system() or directory listing, so there is no adapter for them.
+   The socket adapter (host_sock_*, last section) is BSD sockets, IPv4 TCP only,
+   and exists only with -DPY_POSIX; a CMS TCP/IP port replaces that section
+   (see PORTING.md).  Without it every host_sock_* call fails and the socket
+   module reports 'sockets not available'.
    -DPY_HOST_CMS (set automatically when __CMS__ is defined) selects the
    CMS style "fn ft fm" file names for module files (see host_module_path).
    -DPY_EMBED_LIBS compiles the pure-Python library tree into the binary
@@ -32,6 +36,15 @@
 #ifdef PY_POSIX
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <netdb.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #endif
 
 #ifdef __CMS__
@@ -352,3 +365,257 @@ static unsigned long host_seed(void)
 {
     return (unsigned long)time(NULL) * 1000003UL + (unsigned long)clock();
 }
+
+/* ---- sockets (IPv4 TCP) -------------------------------------------------
+   The whole network interface of the interpreter.  Descriptors are small
+   ints, addresses are 4 bytes in network order plus a port.  Calls return
+   -1 on failure and leave the host error number in host_sock_err, which
+   host_sock_strerror / host_sock_errkind describe.  A port to another TCP/IP
+   stack (CMS TCPIP, MVS) reimplements this block; the PY_POSIX branch is the
+   reference. */
+static int host_sock_err;
+
+/* error kinds for the exception class: 0 OSError, 1 refused, 2 reset, 3 aborted,
+   4 broken pipe, 5 would block, 6 interrupted, 7 timed out, 8 in progress */
+#ifdef PY_POSIX
+static int host_sock_gai;           /* nonzero: host_sock_err came from name lookup */
+static int host_sock_ok(void) { return 1; }
+static int host_sock_errkind(int e)
+{
+    if (e == ECONNREFUSED) return 1;
+    if (e == ECONNRESET) return 2;
+    if (e == ECONNABORTED) return 3;
+    if (e == EPIPE) return 4;
+    if (e == EAGAIN || e == EWOULDBLOCK) return 5;
+    if (e == EINTR) return 6;
+    if (e == ETIMEDOUT) return 7;
+    if (e == EINPROGRESS || e == EALREADY) return 8;
+    return 0;
+}
+static const char *host_sock_strerror(int e)
+{
+    return host_sock_gai ? gai_strerror(e) : strerror(e);
+}
+static int host_sock_fail(void) { host_sock_err = errno; host_sock_gai = 0; return -1; }
+static void host_sock_fill(struct sockaddr_in *sa, const unsigned char *ip, int port)
+{
+    memset(sa, 0, sizeof(*sa));
+    sa->sin_family = AF_INET;
+    memcpy(&sa->sin_addr, ip, 4);
+    sa->sin_port = htons((unsigned short)port);
+}
+static void host_sock_unfill(const struct sockaddr_in *sa, unsigned char *ip, int *port)
+{
+    memcpy(ip, &sa->sin_addr, 4);
+    *port = (int)ntohs(sa->sin_port);
+}
+static int host_sock_open(void)
+{
+    int fd;
+    static int ign;
+    if (!ign) { signal(SIGPIPE, SIG_IGN); ign = 1; }
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    return fd < 0 ? host_sock_fail() : fd;
+}
+static int host_sock_close(int fd)
+{
+    return close(fd) < 0 ? host_sock_fail() : 0;
+}
+static int host_sock_bind(int fd, const unsigned char *ip, int port)
+{
+    struct sockaddr_in sa;
+    host_sock_fill(&sa, ip, port);
+    return bind(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa)) < 0 ? host_sock_fail() : 0;
+}
+static int host_sock_listen(int fd, int backlog)
+{
+    return listen(fd, backlog) < 0 ? host_sock_fail() : 0;
+}
+static int host_sock_accept(int fd, unsigned char *ip, int *port)
+{
+    struct sockaddr_in sa;
+    socklen_t n = (socklen_t)sizeof(sa);
+    int r = accept(fd, (struct sockaddr *)&sa, &n);
+    if (r < 0) return host_sock_fail();
+    host_sock_unfill(&sa, ip, port);
+    return r;
+}
+static int host_sock_connect(int fd, const unsigned char *ip, int port)
+{
+    struct sockaddr_in sa;
+    host_sock_fill(&sa, ip, port);
+    return connect(fd, (struct sockaddr *)&sa, (socklen_t)sizeof(sa)) < 0 ? host_sock_fail() : 0;
+}
+static long host_sock_send(int fd, const char *b, long n)
+{
+    long r;
+#ifdef MSG_NOSIGNAL
+    r = (long)send(fd, b, (size_t)n, MSG_NOSIGNAL);
+#else
+    r = (long)send(fd, b, (size_t)n, 0);
+#endif
+    return r < 0 ? (long)host_sock_fail() : r;
+}
+static long host_sock_recv(int fd, char *b, long n)
+{
+    long r = (long)recv(fd, b, (size_t)n, 0);
+    return r < 0 ? (long)host_sock_fail() : r;
+}
+static int host_sock_shutdown(int fd, int how)
+{
+    return shutdown(fd, how) < 0 ? host_sock_fail() : 0;
+}
+static int host_sock_blocking(int fd, int on)
+{
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0) return host_sock_fail();
+    fl = on ? (fl & ~O_NONBLOCK) : (fl | O_NONBLOCK);
+    return fcntl(fd, F_SETFL, fl) < 0 ? host_sock_fail() : 0;
+}
+static int host_sock_getname(int fd, int peer, unsigned char *ip, int *port)
+{
+    struct sockaddr_in sa;
+    socklen_t n = (socklen_t)sizeof(sa);
+    int r = peer ? getpeername(fd, (struct sockaddr *)&sa, &n)
+                 : getsockname(fd, (struct sockaddr *)&sa, &n);
+    if (r < 0) return host_sock_fail();
+    host_sock_unfill(&sa, ip, port);
+    return 0;
+}
+static int host_sock_setopt(int fd, int level, int opt, long val)
+{
+    int v = (int)val;
+    return setsockopt(fd, level, opt, &v, (socklen_t)sizeof(v)) < 0 ? host_sock_fail() : 0;
+}
+static int host_sock_getopt(int fd, int level, int opt, long *val)
+{
+    int v = 0;
+    socklen_t n = (socklen_t)sizeof(v);
+    if (getsockopt(fd, level, opt, &v, &n) < 0) return host_sock_fail();
+    *val = (long)v;
+    return 0;
+}
+/* the pending error of a connecting socket (0 when none) */
+static int host_sock_soerror(int fd)
+{
+    long v = 0;
+    if (host_sock_getopt(fd, SOL_SOCKET, SO_ERROR, &v) < 0) return host_sock_err;
+    return (int)v;
+}
+/* wait for readability (mode 1) or writability (mode 2) of the descriptors; timeout < 0 waits
+   forever.  ready[i] gets the mode bits that are ready.  Returns the count, or -1 */
+static int host_sock_select(int n, const int *fds, const int *modes, int *ready, double timeout)
+{
+    fd_set rs, ws;
+    struct timeval tv;
+    int i, mx = -1, r;
+    for (;;) {
+        FD_ZERO(&rs); FD_ZERO(&ws);
+        for (i = 0; i < n; i++) {
+            if (fds[i] < 0 || fds[i] >= FD_SETSIZE) { host_sock_err = EBADF; return -1; }
+            if (modes[i] & 1) FD_SET(fds[i], &rs);
+            if (modes[i] & 2) FD_SET(fds[i], &ws);
+            if (fds[i] > mx) mx = fds[i];
+        }
+        if (timeout >= 0) {
+            tv.tv_sec = (time_t)timeout;
+            tv.tv_usec = (long)((timeout - (double)tv.tv_sec) * 1000000.0);
+        }
+        r = select(mx + 1, &rs, &ws, NULL, timeout >= 0 ? &tv : NULL);
+        if (r < 0 && errno == EINTR) continue;
+        break;
+    }
+    if (r < 0) return host_sock_fail();
+    for (i = 0; i < n; i++) {
+        ready[i] = 0;
+        if ((modes[i] & 1) && FD_ISSET(fds[i], &rs)) ready[i] |= 1;
+        if ((modes[i] & 2) && FD_ISSET(fds[i], &ws)) ready[i] |= 2;
+    }
+    return r;
+}
+static int host_sock_hostname(char *buf, long cap)
+{
+    if (gethostname(buf, (size_t)cap) < 0) return host_sock_fail();
+    buf[cap - 1] = 0;
+    return 0;
+}
+/* host name or dotted quad to 4 address bytes */
+static int host_sock_resolve(const char *name, unsigned char *ip)
+{
+    struct addrinfo hints, *res = NULL;
+    int r;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    r = getaddrinfo(name, NULL, &hints, &res);
+    if (r != 0 || !res) { host_sock_err = r; host_sock_gai = 1; return -1; }
+    memcpy(ip, &((struct sockaddr_in *)res->ai_addr)->sin_addr, 4);
+    freeaddrinfo(res);
+    return 0;
+}
+/* named constants the socket module exports */
+static int host_sock_const(const char *name, long *val)
+{
+    static const struct { const char *n; long v; } tab[] = {
+        { "AF_UNSPEC", AF_UNSPEC }, { "AF_INET", AF_INET }, { "AF_INET6", AF_INET6 },
+        { "SOCK_STREAM", SOCK_STREAM }, { "SOCK_DGRAM", SOCK_DGRAM },
+        { "SOL_SOCKET", SOL_SOCKET }, { "SO_REUSEADDR", SO_REUSEADDR },
+        { "SO_KEEPALIVE", SO_KEEPALIVE }, { "SO_RCVBUF", SO_RCVBUF }, { "SO_SNDBUF", SO_SNDBUF },
+        { "SO_ERROR", SO_ERROR }, { "SO_BROADCAST", SO_BROADCAST },
+        { "IPPROTO_TCP", IPPROTO_TCP }, { "TCP_NODELAY", TCP_NODELAY },
+        { "SHUT_RD", SHUT_RD }, { "SHUT_WR", SHUT_WR }, { "SHUT_RDWR", SHUT_RDWR },
+        { "SOMAXCONN", SOMAXCONN }, { "AI_PASSIVE", AI_PASSIVE }, { NULL, 0 }
+    };
+    int i;
+    for (i = 0; tab[i].n; i++)
+        if (!strcmp(tab[i].n, name)) { *val = tab[i].v; return 1; }
+    return 0;
+}
+#else
+/* no network: every call fails */
+static int host_sock_ok(void) { return 0; }
+static int host_sock_errkind(int e) { (void)e; return 0; }
+static const char *host_sock_strerror(int e) { (void)e; return "sockets not available"; }
+static int host_sock_open(void) { return -1; }
+static int host_sock_close(int fd) { (void)fd; return -1; }
+static int host_sock_bind(int fd, const unsigned char *ip, int port)
+{ (void)fd; (void)ip; (void)port; return -1; }
+static int host_sock_listen(int fd, int backlog) { (void)fd; (void)backlog; return -1; }
+static int host_sock_accept(int fd, unsigned char *ip, int *port)
+{ (void)fd; (void)ip; (void)port; return -1; }
+static int host_sock_connect(int fd, const unsigned char *ip, int port)
+{ (void)fd; (void)ip; (void)port; return -1; }
+static long host_sock_send(int fd, const char *b, long n)
+{ (void)fd; (void)b; (void)n; return -1; }
+static long host_sock_recv(int fd, char *b, long n)
+{ (void)fd; (void)b; (void)n; return -1; }
+static int host_sock_shutdown(int fd, int how) { (void)fd; (void)how; return -1; }
+static int host_sock_blocking(int fd, int on) { (void)fd; (void)on; return -1; }
+static int host_sock_getname(int fd, int peer, unsigned char *ip, int *port)
+{ (void)fd; (void)peer; (void)ip; (void)port; return -1; }
+static int host_sock_setopt(int fd, int level, int opt, long val)
+{ (void)fd; (void)level; (void)opt; (void)val; return -1; }
+static int host_sock_getopt(int fd, int level, int opt, long *val)
+{ (void)fd; (void)level; (void)opt; (void)val; return -1; }
+static int host_sock_soerror(int fd) { (void)fd; return 0; }
+static int host_sock_select(int n, const int *fds, const int *modes, int *ready, double timeout)
+{ (void)n; (void)fds; (void)modes; (void)ready; (void)timeout; return -1; }
+static int host_sock_hostname(char *buf, long cap) { (void)buf; (void)cap; return -1; }
+static int host_sock_resolve(const char *name, unsigned char *ip)
+{ (void)name; (void)ip; return -1; }
+static int host_sock_const(const char *name, long *val)
+{
+    static const struct { const char *n; long v; } tab[] = {
+        { "AF_UNSPEC", 0 }, { "AF_INET", 2 }, { "AF_INET6", 10 },
+        { "SOCK_STREAM", 1 }, { "SOCK_DGRAM", 2 }, { "SOL_SOCKET", 1 }, { "SO_REUSEADDR", 2 },
+        { "SO_KEEPALIVE", 9 }, { "SO_RCVBUF", 8 }, { "SO_SNDBUF", 7 }, { "SO_ERROR", 4 },
+        { "SO_BROADCAST", 6 }, { "IPPROTO_TCP", 6 }, { "TCP_NODELAY", 1 },
+        { "SHUT_RD", 0 }, { "SHUT_WR", 1 }, { "SHUT_RDWR", 2 }, { "SOMAXCONN", 128 },
+        { "AI_PASSIVE", 1 }, { NULL, 0 }
+    };
+    int i;
+    for (i = 0; tab[i].n; i++)
+        if (!strcmp(tab[i].n, name)) { *val = tab[i].v; return 1; }
+    return 0;
+}
+#endif

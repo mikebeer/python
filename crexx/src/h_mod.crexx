@@ -416,9 +416,14 @@ deep_copy: procedure = .int
     end
     return o
   end
+  if k = K_BYTES then do
+    if ob_y[x % 2] = 1 then return mkbytearr(ob_s[x % 2])
+    return x
+  end
   if k = K_DICT | k = K_SET then do
     o = dict_new(k)
     ob_y[o % 2] = ob_y[x % 2]
+    ob_c[o % 2] = ob_c[x % 2]
     e = dd_head[ob_x[x % 2]]
     do while e > 0
       if de_live[e] = 1 then do

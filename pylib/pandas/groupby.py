@@ -1,7 +1,7 @@
 # pandas subset: groupby
 import math
 import numpy as np
-from .base import nan, infer, Index, RangeIndex, MultiIndex, norm_dtype, dtype_of
+from .base import nan, infer, Index, RangeIndex, MultiIndex, norm_dtype, dtype_of, mkindex
 from .core import Series, DataFrame, _lred, _lst, _is_listlike, _NUMDT, _quant
 
 _AGGS = ('sum', 'mean', 'min', 'max', 'count', 'size', 'std', 'var', 'median', 'first', 'last', 'nunique', 'prod',
@@ -75,7 +75,20 @@ class _Base:
         else:
             bl = by if isinstance(by, list) else [by]
             for b in bl:
-                if self._isdf and not isinstance(b, (Series, np.ndarray, list, Index)) and not callable(b) and not isinstance(b, dict) and b in obj.columns:
+                if type(b).__name__ == 'Grouper':
+                    from .resample import assign_labels, default_closed
+                    from .tslib import to_offset
+                    if b.key is not None:
+                        tv = list((obj[b.key] if self._isdf else obj)._v)
+                        if self._isdf:
+                            self._keycols.append(b.key)
+                    else:
+                        tv = list(obj.index._v)
+                    off = to_offset(b.freq)
+                    arrays.append(assign_labels(tv, off, b.closed if b.closed is not None else default_closed(off)))
+                    names.append(b.key)
+                    self._gfreq = off
+                elif self._isdf and not isinstance(b, (Series, np.ndarray, list, Index)) and not callable(b) and not isinstance(b, dict) and b in obj.columns:
                     j = obj._colpos(b)
                     arrays.append(obj._vals[j])
                     names.append(b)
@@ -144,7 +157,13 @@ class _Base:
     def _gindex(self, keys=None):
         keys = self._order if keys is None else keys
         if len(self._arrays) == 1:
-            return Index(list(keys), name=self._names[0])
+            r = mkindex(list(keys), name=self._names[0])
+            gf = getattr(self, '_gfreq', None)
+            if gf is not None and hasattr(r, '_freq'):
+                from .dtindex import _regular
+                if _regular(r._v, gf):
+                    r._freq = gf
+            return r
         return MultiIndex(_tuples=list(keys), names=self._names)
 
     @property
@@ -654,6 +673,7 @@ class DataFrameGroupBy(_Base):
             self._arrays = parent._arrays
             self._names = parent._names
             self._keycols = parent._keycols
+            self._gfreq = getattr(parent, '_gfreq', None)
             self._groups = parent._groups
             self._order = parent._order
         else:
@@ -672,6 +692,7 @@ class SeriesGroupBy(_Base):
             self._arrays = parent._arrays
             self._names = parent._names
             self._keycols = parent._keycols
+            self._gfreq = getattr(parent, '_gfreq', None)
             self._groups = parent._groups
             self._order = parent._order
         else:

@@ -73,7 +73,37 @@ uses only ISO C (`time`, `clock`, `fopen`, `getenv`).
 | `host_time`, `host_clock`, `host_sleep`, `host_seed` | `time.time`, `perf_counter`, `sleep`, random seeding | `gettimeofday`, `nanosleep` with `PY_POSIX`; else `time()` / `clock()` busy wait | |
 
 Not used anywhere, so no adapter exists: `popen`, `system`, directory
-listing (there is no `os.listdir`), signals, sockets, threads.
+listing (there is no `os.listdir`), threads. Signals: only `SIGPIPE` is
+ignored (with `PY_POSIX`, on the first socket).
+
+### Sockets (`host_sock_*`, last section of `p0_os.c`)
+
+The `socket` and `select` modules (`src/p7_sock.c`) are written only against
+this block; BSD sockets appear nowhere else. With `-DPY_POSIX` it is IPv4
+TCP on `socket/bind/listen/accept/connect/send/recv/select/fcntl/
+getaddrinfo`; without it every call fails and `socket.socket()` raises
+`OSError: sockets not available`. A CMS port replaces the `#ifdef PY_POSIX`
+branch with the TCP/IP stack's calls (IBM TCP/IP for VM sockets, the
+Pascal-style `TcpOpen`/`TcpSend` interface, or an EXEC to a service machine);
+it has to supply:
+
+| function | meaning |
+|---|---|
+| `host_sock_ok()` | 1 when a network exists |
+| `host_sock_open/close(fd)` | a TCP endpoint handle (a small int) |
+| `host_sock_bind/listen/accept/connect` | addresses are 4 bytes in network order and a port; `accept` returns the new handle and the peer |
+| `host_sock_send/recv(fd, buf, n)` | bytes moved, or -1 with `host_sock_err` set |
+| `host_sock_blocking(fd, on)` | switch a handle to non-blocking mode (used for timeouts) |
+| `host_sock_select(n, fds, modes, ready, timeout)` | wait for readable (1) / writable (2) handles; timeout < 0 waits forever; a stack with no select can poll in a loop with `host_sleep` |
+| `host_sock_getname/setopt/getopt/soerror/shutdown` | `getsockname`, `getpeername`, options (`SO_REUSEADDR` ...), the pending connect error |
+| `host_sock_hostname`, `host_sock_resolve(name, ip)` | local host name; name or dotted quad to 4 bytes |
+| `host_sock_errkind(e)`, `host_sock_strerror(e)` | map the host error number to the Python exception class (refused, reset, aborted, broken pipe, would block, interrupted, timed out, in progress) and its text |
+| `host_sock_const(name, &v)` | numeric values of `AF_INET`, `SOCK_STREAM`, `SOL_SOCKET`, `SO_*` ... |
+
+Error numbers are whatever the host uses; they become `OSError.errno`.
+Handles are never closed by the garbage collector. Network byte order is
+big-endian on S/370 too, so `htons` is the identity there (it is computed at
+run time from the byte order).
 
 `os`, `os.path`, `os.sep`, `os.name` and `sys.platform` as seen by Python
 programs are POSIX-flavoured emulations built on these functions.
@@ -222,7 +252,10 @@ based, not host-character based:
     CMS stack/region size accordingly or lower `MAX_DEPTH`.
 12. `setjmp`/`longjmp` are used for exceptions; `__CMS__` declares them (as
     in apl). `main` is the only external name.
-13. `time.sleep` busy-waits without `PY_POSIX`; `time.time()` has one-second
+13. `struct` and `int.to_bytes` with floats assume IEEE-754 doubles and the
+    LP64/ILP32 native sizes chosen from `LONG_MAX`; the 'f'/'d' formats on
+    S/370 hex floating point would need a conversion to IEEE bytes.
+14. `time.sleep` busy-waits without `PY_POSIX`; `time.time()` has one-second
     resolution there.
 
 ## 8. What remains for the real VM/370 port

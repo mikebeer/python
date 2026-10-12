@@ -378,6 +378,11 @@ static int gen_resume(Gen *g, Value *out)
     return 0;
 }
 
+/* list, dict and set payloads start empty and are filled by __init__; the others take the args */
+static int pay_takes_args(Class *pc)
+{
+    return pc != cls_list && pc != cls_dict && pc != cls_set;
+}
 static Value pay_ctor(Class *pc, int n, Value *a, int nk, Value *kw)
 {
     Args x;
@@ -436,7 +441,7 @@ static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
     iv = mkobj(in, T_INST);
     VPUSH(iv);
     if (c->paycls) {
-        if (c->paycls == cls_tuple || c->paycls == cls_str)
+        if (pay_takes_args(c->paycls))
             in->pay = pay_ctor(c->paycls, n, a, nk, kw);
         else
             in->pay = pay_ctor(c->paycls, 0, NULL, 0, NULL);
@@ -1247,7 +1252,9 @@ static Class *make_class(Str *name, Class **bl, int nb, Str *modname)
     vsp--;
     for (i = 0; i < c->nmro && !c->paycls; i++) {
         Class *k = c->mro[i];
-        if (k == cls_list || k == cls_dict || k == cls_set || k == cls_tuple || k == cls_str)
+        if (k == cls_list || k == cls_dict || k == cls_set || k == cls_tuple || k == cls_str ||
+            k == cls_int || k == cls_float || k == cls_bytes || k == cls_bytearray ||
+            k == cls_complex)
             c->paycls = k;
     }
     return c;

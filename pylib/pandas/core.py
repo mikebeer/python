@@ -1,11 +1,11 @@
 # pandas subset: Series and DataFrame (pure Python on top of the native numpy subset)
 import math
 import numpy as np
-from .base import (nan, NA, NaT, Dtype, dtype_of, norm_dtype, infer, Index, RangeIndex, MultiIndex,
+from .base import (nan, NA, NaT, Dtype, dtype_of, norm_dtype, infer, Index, RangeIndex, MultiIndex, mkindex,
                    isna_scalar, _astype_list, to_np, sortkey_list)
 from . import fmt as _fmt
 
-_NUMDT = ('int64', 'float64', 'bool')
+_NUMDT = ('int64', 'float64', 'bool', 'int32')
 
 
 class ObjArray:
@@ -153,22 +153,38 @@ def _to_index(x, n=None, name=None):
     if isinstance(x, range):
         return RangeIndex(x.start, x.stop, x.step, name=name)
     if isinstance(x, Series):
-        return Index(x._v, name=x.name)
+        return mkindex(x._v, name=x.name)
     if isinstance(x, np.ndarray):
-        return Index(x.tolist(), name=name)
+        return mkindex(x.tolist(), name=name)
     if isinstance(x, ObjArray):
-        return Index(x._a, name=name)
+        return mkindex(x._a, name=name)
     if isinstance(x, (list, tuple)):
         if len(x) > 0 and isinstance(x[0], tuple) and name is None:
             return MultiIndex.from_tuples(x)
-        return Index(list(x), name=name)
-    return Index(list(x), name=name)
+        return mkindex(list(x), name=name)
+    return mkindex(list(x), name=name)
 
 
 def _astype_vals(vals, dt, dn):
     """convert python list from dtype dt to dtype name dn"""
     if dn == dt:
         return list(vals)
+    if dn.startswith('datetime64') or dn.startswith('timedelta64'):
+        from . import dtindex
+        if dn.startswith('datetime64'):
+            if dt.startswith('datetime'):
+                return list(vals)
+            return dtindex.convert_list(list(vals))
+        return dtindex.to_timedelta(list(vals))._v
+    if dt.startswith('datetime') or dt.startswith('timedelta'):
+        if dn == 'int64':
+            return [(x._epoch_us() if dt.startswith('datetime') else x._us) for x in vals]
+        if dn == 'float64':
+            return [(nan if x != x else float(x._epoch_us() if dt.startswith('datetime') else x._us)) for x in vals]
+        if dn == 'str':
+            if dt.startswith('datetime'):
+                return [(nan if s == 'NaT' else s) for s in _fmt.dt_strings(vals)]
+            return [(nan if s == 'NaT' else s) for s in _fmt.td_strings(vals)]
     if dn == 'float64':
         if dt == 'str' or dt == 'object':
             out = []
@@ -262,9 +278,9 @@ def _isnum_scalar(x):
 def _calc(op, a, adt, b, bdt):
     """a: list; b: list (same length) or scalar. returns (list, dtype)"""
     bvec = isinstance(b, list)
-    anum = adt == 'int64' or adt == 'float64' or adt == 'bool'
+    anum = adt == 'int64' or adt == 'float64' or adt == 'bool' or adt == 'int32'
     if bvec:
-        bnum = bdt == 'int64' or bdt == 'float64' or bdt == 'bool'
+        bnum = bdt == 'int64' or bdt == 'float64' or bdt == 'bool' or bdt == 'int32'
     else:
         bnum = isinstance(b, (int, float))
     if anum and bnum:
@@ -369,6 +385,21 @@ class _At:
 
 def _positions(idx, key, kind, n):
     """resolve one axis indexer to (positions list, is_scalar)"""
+    if kind == 'loc' and idx._dt.startswith('datetime') and idx.nlevels == 1:
+        from . import dtindex
+        if isinstance(key, slice):
+            if (key.start is not None and not isinstance(key.start, int)) or (key.stop is not None and not isinstance(key.stop, int)):
+                ps = dtindex.dt_slice_positions(idx, key.start, key.stop, n)
+                if key.step is not None:
+                    ps = ps[::key.step]
+                return ps, False
+        elif dtindex.is_dtkey(key):
+            return dtindex.dt_positions(idx, key)
+        elif isinstance(key, (list, tuple)) and len(key) > 0 and dtindex.is_dtkey(key[0]) and not isinstance(key, tuple):
+            out = []
+            for k in key:
+                out.extend(dtindex.dt_positions(idx, k)[0])
+            return out, False
     if isinstance(key, slice):
         if kind == 'iloc':
             return list(range(n))[key], False
@@ -597,8 +628,8 @@ class Series:
 
     @property
     def dt(self):
-        from .strs import DatetimeMethods
-        return DatetimeMethods(self)
+        from .dtindex import make_dt_accessor
+        return make_dt_accessor(self)
 
     @property
     def axes(self):
@@ -690,9 +721,20 @@ class Series:
     def to_csv(self, path_or_buf=None, **kw):
         return self.to_frame().to_csv(path_or_buf, **kw)
 
-    def to_json(self, *a, **k):
+    def to_json(self, path_or_buf=None, orient='index', **k):
         import json
-        return json.dumps(self.to_dict())
+        from .dtindex import json_prepare, json_key
+        dfmt = k.get('date_format')
+        d = self.to_dict()
+        if orient == 'index':
+            d = {json_key(i, dfmt): x for i, x in d.items()}
+        s = json.dumps(json_prepare(d, dfmt), separators=(",", ":"))
+        if path_or_buf is None:
+            return s
+        f = open(path_or_buf, 'w')
+        f.write(s)
+        f.close()
+        return None
 
     # ------------------------------------------------------------ selection
     def __getitem__(self, key):
@@ -714,6 +756,10 @@ class Series:
             return self._getitem_ix(list(kl), 'loc')
         if callable(key):
             return self[key(self)]
+        if self._idx._dt.startswith('datetime'):
+            from . import dtindex
+            if dtindex.is_dtkey(key):
+                return self._getitem_ix(key, 'loc')
         pos = self._idx._mkpos()
         if key in pos:
             ps = self._idx._locs(key)
@@ -731,7 +777,10 @@ class Series:
     def _take(self, pos, drop_first=False):
         v = self._v
         iv = self._idx._v
-        nix = self._idx._new([iv[i] for i in pos], self._idx.name)
+        if getattr(self._idx, '_freq', None) is not None:
+            nix = self._idx._take_pos(pos)
+        else:
+            nix = self._idx._new([iv[i] for i in pos], self._idx.name)
         if drop_first:
             nix = nix.droplevel(0)
         return Series([v[i] for i in pos], nix, name=self.name, _dt=self._dt)
@@ -744,6 +793,8 @@ class Series:
         if scalar:
             return self._v[ps[0]]
         r = self._take(ps)
+        if kind == 'loc' and getattr(r._idx, '_freq', None) is not None and isinstance(key, (list, np.ndarray)) and not _is_boolvec(_lst(key)):
+            r._idx._freq = None
         if kind == 'loc' and self._idx.nlevels > 1 and not _is_listlike(key) or (isinstance(key, tuple) and self._idx.nlevels > len(key)):
             k = len(key) if isinstance(key, tuple) else 1
             if k < self._idx.nlevels:
@@ -855,6 +906,8 @@ class Series:
     # ------------------------------------------------------------ arithmetic
     def _binop(self, other, op, rev=False):
         name = self.name
+        if self._dt[:1] in ('d', 't') and (self._dt.startswith('datetime') or self._dt.startswith('timedelta')):
+            other = self._dt_other(other)
         if isinstance(other, Series):
             if other.name != self.name:
                 name = None
@@ -898,10 +951,25 @@ class Series:
             vals, dt = _calc(op, a, adt, b, bdt)
         return Series(vals, idx, name=name, _dt=dt)
 
+    def _dt_other(self, other):
+        """strings compared with / combined with datetime-like data are parsed"""
+        from . import dtindex
+        isdt = self._dt.startswith('datetime')
+        if isinstance(other, str):
+            return dtindex.Timestamp(other) if isdt else dtindex.Timedelta(other)
+        if isinstance(other, (list, tuple)) or isinstance(other, (Series, Index)) or isinstance(other, np.ndarray):
+            ol = _lst(other)
+            if len(ol) > 0 and isinstance(ol[0], str):
+                conv = [(dtindex.Timestamp(x) if isdt else dtindex.Timedelta(x)) if isinstance(x, str) else x for x in ol]
+                if isinstance(other, Series):
+                    return Series(conv, other._idx, name=other.name)
+                return conv
+        return other
+
     def _rscalar(self, op, b):
         a = self._v
         adt = self._dt
-        if (adt == 'int64' or adt == 'float64' or adt == 'bool') and isinstance(b, (int, float)):
+        if (adt == 'int64' or adt == 'float64' or adt == 'bool' or adt == 'int32') and isinstance(b, (int, float)):
             B = np.array(a)
             r = _npop(op, b, B)
             return r.tolist(), _np_dt(r)
@@ -997,6 +1065,8 @@ class Series:
     def __neg__(self):
         if self._dt == 'bool':
             return self._new([not x for x in self._v], 'bool')
+        if self._dt.startswith('timedelta'):
+            return self._new([(x if x != x else -x) for x in self._v], self._dt)
         r = -np.array(self._v)
         return self._new(r.tolist(), self._dt)
 
@@ -1012,6 +1082,8 @@ class Series:
         return self.abs()
 
     def abs(self):
+        if self._dt.startswith('timedelta'):
+            return self._new([(x if x != x else abs(x)) for x in self._v], self._dt)
         return self._new(np.abs(np.array(self._v)).tolist(), self._dt)
 
     def add(self, o, fill_value=None):
@@ -1110,6 +1182,9 @@ class Series:
 
     def between(self, left, right, inclusive='both'):
         v = self._v
+        if self._dt.startswith('datetime') or self._dt.startswith('timedelta'):
+            left = self._dt_other(left)
+            right = self._dt_other(right)
         res = []
         for x in v:
             if x != x:
@@ -1379,7 +1454,7 @@ class Series:
     def _nn(self):
         """numpy array of non-missing numeric values"""
         dt = self._dt
-        if dt == 'int64' or dt == 'bool':
+        if dt == 'int64' or dt == 'bool' or dt == 'int32':
             return np.array(self._v)
         if dt == 'float64':
             a = np.array(self._v)
@@ -1390,13 +1465,18 @@ class Series:
         return [x for x in self._v if not (x is None or x != x)]
 
     def count(self):
-        if self._dt in ('int64', 'bool'):
+        if self._dt in ('int64', 'bool', 'int32'):
             return len(self._v)
         return len(self._nonna())
 
     def sum(self, axis=None, skipna=True, numeric_only=False, min_count=0, **kw):
         dt = self._dt
-        if dt == 'int64':
+        if dt.startswith('timedelta'):
+            from . import dtindex
+            return dtindex.td_reduce(self._v, 'sum')
+        if dt.startswith('datetime'):
+            raise TypeError("'sum' with datetime64 dtype is not supported")
+        if dt == 'int64' or dt == 'int32':
             return sum(self._v)
         if dt == 'bool':
             return sum(self._v)
@@ -1425,6 +1505,9 @@ class Series:
     product = prod
 
     def mean(self, axis=None, skipna=True, numeric_only=False, **kw):
+        if self._dt.startswith('datetime') or self._dt.startswith('timedelta'):
+            from . import dtindex
+            return dtindex.dt_reduce(self._v, 'mean', self._dt)
         a = self._nn() if skipna else np.array(self._v)
         n = len(a)
         if n == 0:
@@ -1432,6 +1515,9 @@ class Series:
         return float(a.sum()) / n
 
     def median(self, axis=None, skipna=True, **kw):
+        if self._dt.startswith('datetime') or self._dt.startswith('timedelta'):
+            from . import dtindex
+            return dtindex.dt_reduce(self._v, 'median', self._dt)
         a = self._nn()
         if len(a) == 0:
             return nan
@@ -1447,6 +1533,9 @@ class Series:
         return float((d * d).sum()) / (n - ddof)
 
     def std(self, axis=None, skipna=True, ddof=1, **kw):
+        if self._dt.startswith('datetime') or self._dt.startswith('timedelta'):
+            from . import dtindex
+            return dtindex.dt_reduce(self._v, 'std', self._dt, ddof)
         v = self.var(ddof=ddof)
         return math.sqrt(v) if v == v else nan
 
@@ -1487,7 +1576,7 @@ class Series:
 
     def min(self, axis=None, skipna=True, numeric_only=False, **kw):
         dt = self._dt
-        if dt == 'int64' or dt == 'bool':
+        if dt == 'int64' or dt == 'bool' or dt == 'int32':
             return min(self._v) if self._v else nan
         if dt == 'float64':
             a = self._nn() if skipna else np.array(self._v)
@@ -1503,7 +1592,7 @@ class Series:
 
     def max(self, axis=None, skipna=True, numeric_only=False, **kw):
         dt = self._dt
-        if dt == 'int64' or dt == 'bool':
+        if dt == 'int64' or dt == 'bool' or dt == 'int32':
             return max(self._v) if self._v else nan
         if dt == 'float64':
             a = self._nn() if skipna else np.array(self._v)
@@ -1615,7 +1704,7 @@ class Series:
         else:
             vals = [c for k, c in items]
             nm = 'count'
-        ix = Index(keys, name=self.name)
+        ix = mkindex(keys, name=self.name)
         if self._dt in ('str', 'object', 'bool', 'int64', 'float64'):
             ix._dt = self._dt if len(keys) else ix._dt
         return Series(vals, ix, name=nm, _dt='float64' if normalize else 'int64')
@@ -1707,6 +1796,9 @@ class Series:
         return self.corr(self.shift(lag))
 
     def describe(self, percentiles=None, include=None, exclude=None):
+        if self._dt.startswith('datetime') or self._dt.startswith('timedelta'):
+            from . import dtindex
+            return dtindex.dt_describe(self, percentiles)
         if self._dt in _NUMDT and self._dt != 'bool':
             ps = percentiles if percentiles is not None else [0.25, 0.5, 0.75]
             nn = sorted(self._nn().tolist())
@@ -1774,6 +1866,15 @@ class Series:
     def diff(self, periods=1):
         v = self._v
         n = len(v)
+        if self._dt.startswith('datetime') or self._dt.startswith('timedelta'):
+            res = [NaT] * n
+            for i in range(n):
+                j = i - periods
+                if 0 <= j < n and v[i] == v[i] and v[j] == v[j]:
+                    res[i] = v[i] - v[j]
+            if self._dt.startswith('datetime'):
+                return self._new(res, 'timedelta' + self._dt[8:])
+            return self._new(res, self._dt)
         if self._dt not in _NUMDT:
             raise TypeError('unsupported operand')
         res = [nan] * n
@@ -1796,6 +1897,10 @@ class Series:
     def shift(self, periods=1, freq=None, fill_value=nan):
         v = self._v
         n = len(v)
+        if freq is not None:
+            if not self._idx._dt.startswith('datetime'):
+                raise NotImplementedError('freq shift needs a DatetimeIndex')
+            return Series(list(v), self._idx.shift(periods, freq), name=self.name, _dt=self._dt)
         if periods >= 0:
             res = [fill_value] * min(periods, n) + v[:max(n - periods, 0)]
         else:
@@ -1841,8 +1946,23 @@ class Series:
         return self._new(ranks, 'float64')
 
     def rolling(self, window, min_periods=None, center=False, **kw):
-        from .window import Rolling
+        from .window import Rolling, RollingTime
+        if isinstance(window, str) or not isinstance(window, int):
+            return RollingTime(self, window, min_periods, center, kw.get('closed'))
         return Rolling(self, window, min_periods, center)
+
+    def resample(self, rule, axis=0, closed=None, label=None, convention='start', kind=None, on=None, level=None,
+                 origin='start_day', offset=None, group_keys=False):
+        from .resample import Resampler
+        return Resampler(self, rule, closed, label, on, origin)
+
+    def asfreq(self, freq, method=None, how=None, normalize=False, fill_value=None):
+        from .resample import asfreq
+        return asfreq(self, freq, method, normalize, fill_value)
+
+    def truncate(self, before=None, after=None, axis=None, copy=None):
+        from .resample import truncate
+        return truncate(self, before, after)
 
     def expanding(self, min_periods=1, **kw):
         from .window import Expanding
@@ -2477,7 +2597,10 @@ class DataFrame:
 
     def _take_rows(self, pos):
         iv = self._idx._v
-        nix = self._idx._new([iv[i] for i in pos], self._idx.name)
+        if getattr(self._idx, '_freq', None) is not None:
+            nix = self._idx._take_pos(pos)
+        else:
+            nix = self._idx._new([iv[i] for i in pos], self._idx.name)
         vals = [[v[i] for i in pos] for v in self._vals]
         return DataFrame._fast(vals, list(self._dts), self._cols, nix)
 
@@ -2564,14 +2687,16 @@ class DataFrame:
 
     def to_json(self, path_or_buf=None, orient='columns', **kw):
         import json
+        from .dtindex import json_prepare, json_key
+        dfmt = kw.get('date_format')
         if orient == 'records':
             d = self.to_dict('records')
         elif orient == 'columns':
             d = self.to_dict('dict')
-            d = {str(k): {str(i): x for i, x in v.items()} for k, v in d.items()}
+            d = {str(k): {json_key(i, dfmt): x for i, x in v.items()} for k, v in d.items()}
         else:
             d = self.to_dict(orient)
-        s = json.dumps(d)
+        s = json.dumps(json_prepare(d, dfmt), separators=(",", ":"))
         if path_or_buf is None:
             return s
         f = open(path_or_buf, 'w')
@@ -2690,6 +2815,8 @@ class DataFrame:
             iv = self._idx._v
             return Series([v[i] for i in rp], self._idx._new([iv[i] for i in rp], self._idx.name), name=self._cols._v[j], _dt=self._dts[j])
         r = self._take_rows(rp) if not (len(rp) == n and rp == list(range(n))) else self.copy()
+        if kind == 'loc' and getattr(r._idx, '_freq', None) is not None and isinstance(rk, (list, np.ndarray)) and not _is_boolvec(_lst(rk)):
+            r._idx._freq = None
         if len(cp) != m or cp != list(range(m)):
             r = r._take_cols(cp)
         if kind == 'loc' and self._idx.nlevels > 1 and (not _is_listlike(rk) or isinstance(rk, tuple)) and not isinstance(rk, slice):
@@ -2990,7 +3117,7 @@ class DataFrame:
                 arrays = [[t[q] for t in self._idx._v] for q in range(self._idx.nlevels)] + arrays
                 names = self._idx.names + names
         if len(arrays) == 1:
-            ix = Index(list(arrays[0]), name=names[0])
+            ix = mkindex(list(arrays[0]), name=names[0])
         else:
             ix = MultiIndex(_tuples=list(zip(*arrays)), names=names)
         r = self
@@ -3110,7 +3237,13 @@ class DataFrame:
             specs = spec if isinstance(spec, (list, tuple)) else [spec]
             for s in specs:
                 if s == 'number':
-                    if dt in ('int64', 'float64'):
+                    if dt in ('int64', 'float64', 'int32') or dt.startswith('timedelta'):
+                        return True
+                elif s == 'datetime':
+                    if dt.startswith('datetime'):
+                        return True
+                elif s == 'timedelta':
+                    if dt.startswith('timedelta'):
                         return True
                 elif s in ('object', object):
                     if dt in ('object',):
@@ -3742,8 +3875,8 @@ class DataFrame:
         return Series([v[0] for v in cols.values()], Index(list(cols.keys())), name=q)
 
     def describe(self, percentiles=None, include=None, exclude=None):
-        numcols = [j for j in range(len(self._vals)) if self._dts[j] in ('int64', 'float64')]
-        objcols = [j for j in range(len(self._vals)) if self._dts[j] not in ('int64', 'float64')]
+        numcols = [j for j in range(len(self._vals)) if self._dts[j] in ('int64', 'float64', 'int32') or self._dts[j].startswith('datetime') or self._dts[j].startswith('timedelta')]
+        objcols = [j for j in range(len(self._vals)) if j not in numcols]
         if include == 'all':
             sel = list(range(len(self._vals)))
         elif include is not None:
@@ -3763,15 +3896,10 @@ class DataFrame:
         for j in sel:
             ds[self._cols._v[j]] = self._col(j).describe(percentiles)
         labs = []
-        for d in ds.values():
+        for d in sorted(list(ds.values()), key=lambda x: len(x._idx._v)):
             for k in d._idx._v:
                 if k not in labs:
                     labs.append(k)
-        if include == 'all' and numcols and objcols:
-            order = ['count', 'unique', 'top', 'freq', 'mean', 'std', 'min']
-            labs = [k for k in order if k in labs] + [k for k in labs if k not in order]
-            mid = [k for k in labs if k not in ('count', 'unique', 'top', 'freq', 'mean', 'std', 'min', 'max')]
-            labs = ['count', 'unique', 'top', 'freq', 'mean', 'std', 'min'] + mid + ['max']
         cols = {}
         for c, d in ds.items():
             p = d._idx._mkpos()
@@ -3855,13 +3983,32 @@ class DataFrame:
         return self._mapcols(lambda s: s.pct_change(periods), True)
 
     def shift(self, periods=1, freq=None, axis=0, fill_value=nan):
+        if freq is not None:
+            r = self.copy()
+            r._idx = self._idx.shift(periods, freq)
+            return r
         return self._mapcols(lambda s: s.shift(periods, fill_value=fill_value))
+
+    def resample(self, rule, axis=0, closed=None, label=None, convention='start', kind=None, on=None, level=None,
+                 origin='start_day', offset=None, group_keys=False):
+        from .resample import Resampler
+        return Resampler(self, rule, closed, label, on, origin)
+
+    def asfreq(self, freq, method=None, how=None, normalize=False, fill_value=None):
+        from .resample import asfreq
+        return asfreq(self, freq, method, normalize, fill_value)
+
+    def truncate(self, before=None, after=None, axis=None, copy=None):
+        from .resample import truncate
+        return truncate(self, before, after)
 
     def rank(self, **kw):
         return self._mapcols(lambda s: s.rank(**kw), True)
 
     def rolling(self, window, min_periods=None, center=False, **kw):
-        from .window import Rolling
+        from .window import Rolling, RollingTime
+        if isinstance(window, str) or not isinstance(window, int):
+            return RollingTime(self, window, min_periods, center, kw.get('closed'))
         return Rolling(self, window, min_periods, center)
 
     def expanding(self, min_periods=1, **kw):
@@ -4093,7 +4240,7 @@ class DataFrame:
                 r[j] = y
                 rows.append(r)
         out = DataFrame(rows, columns=self._cols)
-        out._idx = RangeIndex(len(rows)) if ignore_index else Index(idx)
+        out._idx = RangeIndex(len(rows)) if ignore_index else mkindex(idx)
         return out
 
     def append(self, other, ignore_index=False):

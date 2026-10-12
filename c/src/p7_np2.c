@@ -933,8 +933,19 @@ BI(np_polyval)
     Nd *p, *xs, *r;
     long i, j;
     need(x, 2, 2, "polyval");
-    p = nd_coerce(A(0), &tp); xs = nd_coerce(A(1), &tx);
+    p = nd_coerce_c(A(0), &tp); xs = nd_coerce_c(A(1), &tx);
     if (p->nd > 1) throw_new(cls_ValueError, "object too deep for desired array");
+    if (p->dt == ND_COMPLEX || xs->dt == ND_COMPLEX) {
+        Nd *pc = nd_astype(p, ND_COMPLEX), *xc = nd_astype(xs, ND_COMPLEX);
+        r = nd_new(ND_COMPLEX, xs->nd, xs->shape);
+        for (i = 0; i < xs->size; i++) {
+            Cx v = cx_mk(0.0, 0.0), xv = cx_mk(xc->dv[2 * i], xc->dv[2 * i + 1]);
+            for (j = 0; j < p->size; j++)
+                v = cx_add(cx_mul(v, xv), cx_mk(pc->dv[2 * j], pc->dv[2 * j + 1]));
+            r->dv[2 * i] = v.r; r->dv[2 * i + 1] = v.i;
+        }
+        return nd_ret(r);
+    }
     if (p->dt == ND_FLOAT || xs->dt == ND_FLOAT) {
         r = nd_new(ND_FLOAT, xs->nd, xs->shape);
         for (i = 0; i < xs->size; i++) {
@@ -950,6 +961,34 @@ BI(np_polyval)
             r->iv[i] = v;
         }
     }
+    return nd_ret(r);
+}
+BI(np_roots)
+{
+    NdTmp tp;
+    Nd *p, *pf, *m, *w, *r;
+    long lo = 0, hi, nz, n, i, j, sh[2];
+    need(x, 1, 1, "roots");
+    p = nd_coerce(A(0), &tp);
+    if (p->nd != 1) throw_new(cls_ValueError, "Input must be a rank-1 array.");
+    pf = nd_astype(p, ND_FLOAT);
+    hi = pf->size;
+    while (lo < hi && pf->dv[lo] == 0.0) lo++;
+    nz = 0;
+    while (hi > lo && pf->dv[hi - 1] == 0.0) { hi--; nz++; }
+    n = hi - lo - 1;
+    if (n < 1) { sh[0] = 0; return nd_ret(nd_new(ND_FLOAT, 1, sh)); }
+    sh[0] = n; sh[1] = n;
+    m = nd_new(ND_FLOAT, 2, sh);
+    for (i = 0; i < n * n; i++) m->dv[i] = 0.0;
+    for (j = 0; j < n; j++) m->dv[j] = -pf->dv[lo + 1 + j] / pf->dv[lo];
+    for (i = 1; i < n; i++) m->dv[i * n + i - 1] = 1.0;
+    w = eigvals_nd(m, n);
+    if (nz == 0) return nd_ret(w);
+    sh[0] = n + nz;
+    r = nd_new(w->dt, 1, sh);
+    if (w->dt == ND_COMPLEX) memcpy(r->dv, w->dv, sizeof(double) * (size_t)(2 * n));
+    else memcpy(r->dv, w->dv, sizeof(double) * (size_t)n);
     return nd_ret(r);
 }
 BI(np_convolve)
@@ -1364,7 +1403,8 @@ static void np_init2(Module *m)
     mod_def(m, "triu", np_triu); mod_def(m, "kron", np_kron); mod_def(m, "outer", np_outer);
     mod_def(m, "inner", np_inner); mod_def(m, "vdot", np_vdot); mod_def(m, "cross", np_cross);
     mod_def(m, "meshgrid", np_meshgrid); mod_def(m, "polyfit", np_polyfit);
-    mod_def(m, "polyval", np_polyval); mod_def(m, "convolve", np_convolve);
+    mod_def(m, "polyval", np_polyval); mod_def(m, "roots", np_roots); mod_def(m, "convolve",
+        np_convolve);
     mod_def(m, "trapz", np_trapz); mod_def(m, "trapezoid", np_trapz);
     mod_def(m, "flip", np_flip); mod_def(m, "fliplr", np_fliplr); mod_def(m, "flipud", np_flipud);
     mod_def(m, "roll", np_roll); mod_def(m, "tile", np_tile); mod_def(m, "repeat", np_repeat);

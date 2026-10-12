@@ -8,6 +8,7 @@
 options levelb numeric_classic
 import rxfnsb
 import rxfloat
+import rxsocket
 import _rxsysb
 @@EXPOSE@@
 
@@ -308,6 +309,18 @@ init: procedure = .void
   ob_y = .int[]
   ob_s = .string[]
   ob_f = .float[]
+  ob_g = .float[]
+  nat_skip = 0
+  bm_names = " append extend insert remove pop clear index count sort reverse copy keys values items get popitem setdefault update fromkeys add discard union intersection difference symmetric_difference issubset issuperset isdisjoint difference_update intersection_update symmetric_difference_update upper lower strip lstrip rstrip split rsplit join replace find rfind startswith endswith format capitalize title swapcase center ljust rjust zfill splitlines partition rpartition isdigit isalpha isalnum isspace isupper islower istitle isnumeric isdecimal isidentifier isprintable encode decode expandtabs casefold translate removeprefix removesuffix maketrans format_map bit_length bit_count to_bytes from_bytes conjugate is_integer hex fromhex as_integer_ratio real imag __init__ __new__ __setitem__ __getitem__ __delitem__ __len__ __iter__ __contains__ __repr__ __str__ __eq__ __ne__ __hash__ __add__ __radd__ __mul__ __rmul__ __lt__ __le__ __gt__ __ge__ __format__ __bool__ __sub__ __mod__ __neg__ __abs__ __int__ __float__ "
+  npcx_f = 0
+  npcx_d = 0
+  cx_re = 0.0
+  cx_im = 0.0
+  cx_re2 = 0.0
+  cx_im2 = 0.0
+  cr_r = 0.0
+  cr_i = 0.0
+  nat_at = .stem()
   nsl = 0
   sl = .int[]
   sl_a = 0
@@ -576,7 +589,7 @@ boot: procedure = .void
     ob_x[o % 2] = i
     bi_oop[i] = o
     if p > 0 then modattr[nm] = o as .string
-    else if left(nm, 1) \== "_" | nm == "__import__" then bimap[nm] = o as .string
+    else if left(nm, 1) \== "_" | nm == "__import__" | nm == "_sock" then bimap[nm] = o as .string
   end
   do i = 1 to words(aliasboot)
     spec = word(aliasboot, i)
@@ -613,6 +626,8 @@ boot: procedure = .void
   kcls[K_ELLIPSIS] = C_ELLIPSIS
   kcls[K_NOTIMPL] = C_NOTIMPLEMENTEDTYPE
   kcls[K_ARRAY] = C_NDARRAY
+  kcls[K_BYTES] = C_BYTES
+  kcls[K_COMPLEX] = C_COMPLEX
   np_nidT = nameid("T")
   modattr["numpy.pi"] = mkfloat(parse_flt("3.141592653589793")) as .string
   modattr["numpy.e"] = mkfloat(parse_flt("2.718281828459045")) as .string

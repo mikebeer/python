@@ -8,6 +8,7 @@
 options levelb numeric_classic
 import rxfnsb
 import rxfloat
+import rxsocket
 import _rxsysb
 namespace py expose rc_exit obuf h_out h_err h_in stdin_eof rnd_s nsargs,
    sargs wsch nameboot clsboot bboot aliasboot kwlist ops2 tx tlen tp,
@@ -18,25 +19,26 @@ namespace py expose rc_exit obuf h_out h_err h_in stdin_eof rnd_s nsargs,
    pq_kind nfd fd_np fd_nk fd_ps fd_vs fd_ks fd_nr fd_ns fd_fl fd_cd,
    fd_body fd_cx fd_gd fd_name fd_mod npr pr_name pr_def pr_kind pr_slot,
    ncd cd_name cd_body cd_ns cd_cv0 cd_cv1 cd_obj cd_sc nob ob_k ob_c ob_n,
-   ob_p ob_x ob_y ob_s ob_f nsl sl sl_a sl_b sl_n chr_oop nnid nid_name,
-   nidm ncls cl_name cl_base cl_ns cl_flags cl_obj cl_dflt ca sm cgen kcls,
-   opd ropd iopd cmpd cmpr bimap modattr modo bi_name bi_oop range_oop,
-   identity_oop ndd nde dd_head dd_tail dd_n de_key de_val de_next de_live,
-   de_hk dmap nvp vp fl_head gfb asp ast asn cdepth unw unw_v exc_cur,
-   ev_self ev_bm ea_np ea_nk depth_guard ngn ngs gn_fd gn_fb gn_st gn_sp,
-   gn_rb gn_val gs_n gs_s gs_a gs_b nfl fl_h fl_mode fl_txt fl_pos bq brm,
-   sg mg sq sr fx_d fx_q fx_e fneg_max nmod pypath script_dir mod_name,
-   mod_file mod_pkg mod_pdir mod_ispkg mod_sc mod_fb mod_obj mod_dyn modx,
-   hyb cur_mi parse_mi parse_dyn cur_msc ndyn dyn_mi dyn_slot dyn_val nbn,
-   bn_sc bn_name bn_slot sys_modules syspath nsyspath imp_file imp_ispkg,
-   imp_pdir imp_quiet natives shadow cl_mod cl_bt cl_ms cl_mn cl_bs cl_bn,
-   mro_a bs_a nmro nbs nca ca_c ca_n nis is_c is_n is_s gn_ret gen_throw,
-   mod_fsz parse_dyn_init fmt_nested fmt_auto_in fmt_auto_out fnattr dd_own,
-   bl_a bl_n sq_a sq_s sq_e sq_p sup_c npn npf npta nptb nptc npsel np_sc,
-   nprs nprn npcat npco npcc npcd npcs npit npax npnb npes npip npfp npxp,
-   npnf npls npstr npsm npnd np_sep np_ip np_fp np_es np_ds np_de nti ntf,
-   nts ntn ntnd ntfb ntfi ntff npfl npil np_outer np_n np_inner np_axn,
-   np_hasax np_axv np_ddof np_nidT
+   ob_p ob_x ob_y ob_s ob_f ob_g nat_skip bm_names npcx_f npcx_d cx_re,
+   cx_im cx_re2 cx_im2 cr_r cr_i nat_at nsl sl sl_a sl_b sl_n chr_oop nnid,
+   nid_name nidm ncls cl_name cl_base cl_ns cl_flags cl_obj cl_dflt ca sm,
+   cgen kcls opd ropd iopd cmpd cmpr bimap modattr modo bi_name bi_oop,
+   range_oop identity_oop ndd nde dd_head dd_tail dd_n de_key de_val,
+   de_next de_live de_hk dmap nvp vp fl_head gfb asp ast asn cdepth unw,
+   unw_v exc_cur ev_self ev_bm ea_np ea_nk depth_guard ngn ngs gn_fd gn_fb,
+   gn_st gn_sp gn_rb gn_val gs_n gs_s gs_a gs_b nfl fl_h fl_mode fl_txt,
+   fl_pos bq brm sg mg sq sr fx_d fx_q fx_e fneg_max nmod pypath script_dir,
+   mod_name mod_file mod_pkg mod_pdir mod_ispkg mod_sc mod_fb mod_obj,
+   mod_dyn modx hyb cur_mi parse_mi parse_dyn cur_msc ndyn dyn_mi dyn_slot,
+   dyn_val nbn bn_sc bn_name bn_slot sys_modules syspath nsyspath imp_file,
+   imp_ispkg imp_pdir imp_quiet natives shadow cl_mod cl_bt cl_ms cl_mn,
+   cl_bs cl_bn mro_a bs_a nmro nbs nca ca_c ca_n nis is_c is_n is_s gn_ret,
+   gen_throw mod_fsz parse_dyn_init fmt_nested fmt_auto_in fmt_auto_out,
+   fnattr dd_own bl_a bl_n sq_a sq_s sq_e sq_p sup_c npn npf npta nptb nptc,
+   npsel np_sc nprs nprn npcat npco npcc npcd npcs npit npax npnb npes npip,
+   npfp npxp npnf npls npstr npsm npnd np_sep np_ip np_fp np_es np_ds np_de,
+   nti ntf nts ntn ntnd ntfb ntfi ntff npfl npil np_outer np_n np_inner,
+   np_axn np_hasax np_axv np_ddof np_nidT
 
 arg av = .string[]
 if av.0 >= 1 then do
@@ -234,17 +236,17 @@ init: procedure = .void
   sargs = .string[]
   wsch = '20090a0b0c0d'x
   nameboot = "add all any append appendleft argmax argmin args astype bit_length capitalize casefold center clear clip close closed conjugate copy count cumsum"
-  nameboot = nameboot || " decode denominator difference difference_update discard dot dtype encode endswith expandtabs extend fill find flatten flush format fromkeys get getter"
-  nameboot = nameboot || " imag index insert intersection intersection_update isalnum isalpha isascii isdecimal isdigit isdisjoint isidentifier islower isnumeric isspace"
-  nameboot = nameboot || " issubset issuperset istitle isupper is_integer item items join keys ljust lower lstrip max mean min most_common name ndim numerator partition pop"
-  nameboot = nameboot || " popitem popleft prod ravel read readline readlines real remove removeprefix removesuffix replace reshape reverse rfind rindex rjust round rpartition"
-  nameboot = nameboot || " rsplit rstrip send setdefault setter shape size sort split splitlines start startswith std step stop strip sum swapcase symmetric_difference throw"
-  nameboot = nameboot || " title tolist translate transpose union update upper value values var write writelines zfill __abs__ __add__ __and__ __bases__ __bool__ __call__"
-  nameboot = nameboot || " __class__ __contains__ __delattr__ __delitem__ __dict__ __divmod__ __doc__ __enter__ __eq__ __exit__ __float__ __floordiv__ __format__ __func__"
-  nameboot = nameboot || " __getattribute__ __getattr__ __getitem__ __ge__ __gt__ __hash__ __index__ __init__ __int__ __invert__ __iter__ __len__ __le__ __lshift__ __lt__"
-  nameboot = nameboot || " __matmul__ __module__ __mod__ __mro__ __mul__ __name__ __neg__ __new__ __next__ __ne__ __or__ __pos__ __pow__ __qualname__ __radd__ __rdivmod__"
-  nameboot = nameboot || " __repr__ __rfloordiv__ __rmod__ __rmul__ __round__ __rpow__ __rshift__ __rsub__ __rtruediv__ __self__ __setattr__ __setitem__ __str__ __sub__"
-  nameboot = nameboot || " __truediv__ __xor__"
+  nameboot = nameboot || " decode denominator difference difference_update discard dot dtype encode endswith expandtabs extend fill find flatten flush format fromhex fromkeys"
+  nameboot = nameboot || " from_bytes get getter hex imag index insert intersection intersection_update isalnum isalpha isascii isdecimal isdigit isdisjoint isidentifier islower"
+  nameboot = nameboot || " isnumeric isspace issubset issuperset istitle isupper is_integer item items join keys ljust lower lstrip max mean min most_common name ndim numerator"
+  nameboot = nameboot || " partition pop popitem popleft prod ravel read readline readlines real remove removeprefix removesuffix replace reshape reverse rfind rindex rjust"
+  nameboot = nameboot || " round rpartition rsplit rstrip send setdefault setter shape size sort split splitlines start startswith std step stop strip sum swapcase"
+  nameboot = nameboot || " symmetric_difference throw title tolist to_bytes translate transpose union update upper value values var write writelines zfill __abs__ __add__"
+  nameboot = nameboot || " __and__ __bases__ __bool__ __call__ __class__ __contains__ __delattr__ __delitem__ __dict__ __divmod__ __doc__ __enter__ __eq__ __exit__ __float__"
+  nameboot = nameboot || " __floordiv__ __format__ __func__ __getattribute__ __getattr__ __getitem__ __ge__ __gt__ __hash__ __index__ __init__ __int__ __invert__ __iter__"
+  nameboot = nameboot || " __len__ __le__ __lshift__ __lt__ __matmul__ __missing__ __module__ __mod__ __mro__ __mul__ __name__ __neg__ __new__ __next__ __ne__ __or__ __pos__"
+  nameboot = nameboot || " __pow__ __qualname__ __radd__ __rdivmod__ __repr__ __rfloordiv__ __rmod__ __rmul__ __round__ __rpow__ __rshift__ __rsub__ __rtruediv__ __self__"
+  nameboot = nameboot || " __setattr__ __setitem__ __str__ __sub__ __truediv__ __xor__"
   clsboot = "object/0/1/1 type/1/1/1 int/1/1/1 float/1/1/1 bool/3/1/1 str/1/1/1 list/1/1/1 tuple/1/1/1 dict/1/1/1 set/1/1/1 range/1/1/1 NoneType/1/1/0"
   clsboot = clsboot || " function/1/1/0 builtin_function_or_method/1/1/0 method/1/1/0 generator/1/1/0 iterator/1/1/0 module/1/1/0 slice/1/1/1 ellipsis/1/1/0"
   clsboot = clsboot || " NotImplementedType/1/1/0 property/1/1/1 staticmethod/1/1/1 classmethod/1/1/1 super/1/1/1 TextIOWrapper/1/1/0 BaseException/1/3/1 Exception/27/3/1"
@@ -256,25 +258,28 @@ init: procedure = .void
   clsboot = clsboot || " PendingDeprecationWarning/61/3/1 RuntimeWarning/61/3/1 SyntaxWarning/61/3/1 FutureWarning/61/3/1 ImportWarning/61/3/1 UnicodeWarning/61/3/1"
   clsboot = clsboot || " BytesWarning/61/3/1 ResourceWarning/61/3/1 MemoryError/28/3/1 BufferError/28/3/1 TimeoutError/53/3/1 PermissionError/53/3/1 FileExistsError/53/3/1"
   clsboot = clsboot || " IsADirectoryError/53/3/1 NotADirectoryError/53/3/1 UnicodeDecodeError/37/3/1 UnicodeEncodeError/37/3/1 IndentationError/52/3/1"
-  clsboot = clsboot || " StopAsyncIteration/28/3/1 ndarray/1/1/0 AxisError/36/3/0"
+  clsboot = clsboot || " StopAsyncIteration/28/3/1 bytes/1/1/1 bytearray/1/1/1 complex/1/1/1 ConnectionError/53/3/1 ConnectionRefusedError/86/3/1 ConnectionResetError/86/3/1"
+  clsboot = clsboot || " ConnectionAbortedError/86/3/1 BrokenPipeError/86/3/1 BlockingIOError/53/3/1 InterruptedError/53/3/1 ProcessLookupError/53/3/1 ChildProcessError/53/3/1"
+  clsboot = clsboot || " ndarray/1/1/0 AxisError/36/3/0"
   bboot = "print len isinstance min max abs sum sorted enumerate zip map filter repr ascii any all round divmod pow chr ord hex oct bin issubclass getattr"
   bboot = bboot || " hasattr setattr delattr callable next iter id hash input open reversed format super exit quit globals eval exec vars dir __import__ _exc_init"
-  bboot = bboot || " _obj_init _identity _decorator _second math.sqrt math.floor math.ceil math.trunc math.fabs math.pow math.sin math.cos math.tan math.asin math.acos"
-  bboot = bboot || " math.atan math.atan2 math.sinh math.cosh math.exp math.log math.log10 math.log2 math.hypot math.tanh math.isnan math.isinf math.isfinite math.degrees"
-  bboot = bboot || " math.radians math.copysign math.fmod math.cbrt math.fsum math.prod math.gcd math.lcm math.factorial math.isqrt math.comb math.perm random.seed"
-  bboot = bboot || " random.random random.randint random.randrange random.uniform random.choice random.shuffle random.sample time.time time.perf_counter time.monotonic"
-  bboot = bboot || " time.process_time time.sleep itertools.chain itertools.count itertools.islice itertools.takewhile itertools.product itertools.combinations"
-  bboot = bboot || " itertools.permutations itertools.accumulate functools.reduce functools.partial collections.defaultdict collections.Counter collections.OrderedDict"
-  bboot = bboot || " collections.deque copy.copy copy.deepcopy os.getenv os.getcwd os.path.join os.path.exists os.path.basename os.path.dirname os.path.splitext"
-  bboot = bboot || " os.path.isfile os.path.isdir os.path.abspath os.path.split os.path.expanduser os.path.normpath time.time_ns time.perf_counter_ns sys.getrecursionlimit"
-  bboot = bboot || " numpy.array numpy.asarray numpy.zeros numpy.ones numpy.empty numpy.full numpy.zeros_like numpy.ones_like numpy.full_like numpy.eye numpy.identity"
-  bboot = bboot || " numpy.arange numpy.linspace numpy.sqrt numpy.abs numpy.exp numpy.sin numpy.cos numpy.tan numpy.log numpy.log10 numpy.log2 numpy.floor numpy.ceil"
-  bboot = bboot || " numpy.square numpy.isnan numpy.where numpy.concatenate numpy.vstack numpy.hstack numpy.sort numpy.unique numpy.dot numpy.matmul numpy.transpose"
-  bboot = bboot || " numpy.diag numpy.trace numpy.cumsum numpy.maximum numpy.minimum numpy.power numpy.clip numpy.any numpy.all numpy.allclose numpy.array_equal"
-  bboot = bboot || " numpy.median numpy.std numpy.var numpy.round numpy.sum numpy.mean numpy.min numpy.max numpy.prod numpy.argmax numpy.argmin numpy.reshape numpy.ravel"
+  bboot = bboot || " _obj_init _identity _decorator _second _sock math.sqrt math.floor math.ceil math.trunc math.fabs math.pow math.sin math.cos math.tan math.asin"
+  bboot = bboot || " math.acos math.atan math.atan2 math.sinh math.cosh math.exp math.log math.log10 math.log2 math.hypot math.tanh math.isnan math.isinf math.isfinite"
+  bboot = bboot || " math.degrees math.radians math.copysign math.fmod math.cbrt math.fsum math.prod math.gcd math.lcm math.factorial math.isqrt math.comb math.perm"
+  bboot = bboot || " random.seed random.random random.randint random.randrange random.uniform random.choice random.shuffle random.sample time.time time.perf_counter"
+  bboot = bboot || " time.monotonic time.process_time time.sleep itertools.chain itertools.count itertools.islice itertools.takewhile itertools.product"
+  bboot = bboot || " itertools.combinations itertools.permutations itertools.accumulate functools.reduce functools.partial collections.defaultdict collections.Counter"
+  bboot = bboot || " collections.OrderedDict collections.deque copy.copy copy.deepcopy os.getenv os.getcwd os.path.join os.path.exists os.path.basename os.path.dirname"
+  bboot = bboot || " os.path.splitext os.path.isfile os.path.isdir os.path.abspath os.path.split os.path.expanduser os.path.normpath time.time_ns time.perf_counter_ns"
+  bboot = bboot || " sys.getrecursionlimit numpy.array numpy.asarray numpy.zeros numpy.ones numpy.empty numpy.full numpy.zeros_like numpy.ones_like numpy.full_like"
+  bboot = bboot || " numpy.eye numpy.identity numpy.arange numpy.linspace numpy.sqrt numpy.abs numpy.exp numpy.sin numpy.cos numpy.tan numpy.log numpy.log10 numpy.log2"
+  bboot = bboot || " numpy.floor numpy.ceil numpy.square numpy.isnan numpy.where numpy.concatenate numpy.vstack numpy.hstack numpy.sort numpy.unique numpy.dot numpy.matmul"
+  bboot = bboot || " numpy.transpose numpy.diag numpy.trace numpy.cumsum numpy.maximum numpy.minimum numpy.power numpy.clip numpy.any numpy.all numpy.allclose"
+  bboot = bboot || " numpy.array_equal numpy.median numpy.std numpy.var numpy.round numpy.sum numpy.mean numpy.min numpy.max numpy.prod numpy.argmax numpy.argmin"
+  bboot = bboot || " numpy.reshape numpy.ravel"
   aliasboot = "functools.lru_cache=51 functools.cache=51 functools.wraps=51 sys.exit=40 warnings.warn=50 warnings.simplefilter=50 warnings.filterwarnings=50"
-  aliasboot = aliasboot || " warnings.resetwarnings=50 abc.abstractmethod=50 abc.abstractproperty=50 os.getpid=50 sys.setrecursionlimit=50 numpy.absolute=149 numpy.around=184"
-  aliasboot = aliasboot || " numpy.amax=188 numpy.amin=187"
+  aliasboot = aliasboot || " warnings.resetwarnings=50 abc.abstractmethod=50 abc.abstractproperty=50 os.getpid=50 sys.setrecursionlimit=50 numpy.absolute=150 numpy.around=185"
+  aliasboot = aliasboot || " numpy.amax=189 numpy.amin=188"
   kwlist = " False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield "
   ops2 = " == != <= >= ** // << >> += -= *= /= %= &= |= ^= @= -> := "
   /* ---- lexer ---- */
@@ -373,6 +378,18 @@ init: procedure = .void
   ob_y = .int[]
   ob_s = .string[]
   ob_f = .float[]
+  ob_g = .float[]
+  nat_skip = 0
+  bm_names = " append extend insert remove pop clear index count sort reverse copy keys values items get popitem setdefault update fromkeys add discard union intersection difference symmetric_difference issubset issuperset isdisjoint difference_update intersection_update symmetric_difference_update upper lower strip lstrip rstrip split rsplit join replace find rfind startswith endswith format capitalize title swapcase center ljust rjust zfill splitlines partition rpartition isdigit isalpha isalnum isspace isupper islower istitle isnumeric isdecimal isidentifier isprintable encode decode expandtabs casefold translate removeprefix removesuffix maketrans format_map bit_length bit_count to_bytes from_bytes conjugate is_integer hex fromhex as_integer_ratio real imag __init__ __new__ __setitem__ __getitem__ __delitem__ __len__ __iter__ __contains__ __repr__ __str__ __eq__ __ne__ __hash__ __add__ __radd__ __mul__ __rmul__ __lt__ __le__ __gt__ __ge__ __format__ __bool__ __sub__ __mod__ __neg__ __abs__ __int__ __float__ "
+  npcx_f = 0
+  npcx_d = 0
+  cx_re = 0.0
+  cx_im = 0.0
+  cx_re2 = 0.0
+  cx_im2 = 0.0
+  cr_r = 0.0
+  cr_i = 0.0
+  nat_at = .stem()
   nsl = 0
   sl = .int[]
   sl_a = 0
@@ -641,7 +658,7 @@ boot: procedure = .void
     ob_x[o % 2] = i
     bi_oop[i] = o
     if p > 0 then modattr[nm] = o as .string
-    else if left(nm, 1) \== "_" | nm == "__import__" then bimap[nm] = o as .string
+    else if left(nm, 1) \== "_" | nm == "__import__" | nm == "_sock" then bimap[nm] = o as .string
   end
   do i = 1 to words(aliasboot)
     spec = word(aliasboot, i)
@@ -677,7 +694,9 @@ boot: procedure = .void
   kcls[26] = 26
   kcls[27] = 20
   kcls[28] = 21
-  kcls[29] = 83
+  kcls[29] = 95
+  kcls[31] = 83
+  kcls[32] = 85
   np_nidT = nameid("T")
   modattr["numpy.pi"] = mkfloat(parse_flt("3.141592653589793")) as .string
   modattr["numpy.e"] = mkfloat(parse_flt("2.718281828459045")) as .string
@@ -689,7 +708,7 @@ boot: procedure = .void
   modattr["numpy.int64"] = cl_obj[3] as .string
   modattr["numpy.int32"] = cl_obj[3] as .string
   modattr["numpy.bool_"] = cl_obj[5] as .string
-  modattr["numpy.ndarray"] = cl_obj[83] as .string
+  modattr["numpy.ndarray"] = cl_obj[95] as .string
   /* operator method names */
   w = "add sub mul truediv floordiv mod pow lshift rshift and or xor matmul"
   do i = 1 to 13
@@ -705,8 +724,8 @@ boot: procedure = .void
   cmpr[4] = nameid("__ge__")
   cmpr[5] = nameid("__lt__")
   cmpr[6] = nameid("__le__")
-  call cls_set 27, 156, bi_oop[48]
-  call cls_set 1, 156, bi_oop[49]
+  call cls_set 27, 160, bi_oop[48]
+  call cls_set 1, 160, bi_oop[49]
   /* module constants */
   modattr["math.pi"] = mkfloat(parse_flt("3.141592653589793")) as .string
   modattr["math.e"] = mkfloat(parse_flt("2.718281828459045")) as .string
@@ -1128,12 +1147,17 @@ lex_string: procedure = .void
     if isr = 1 then call addtok 8, body, 3
     else call addtok 8, body, 1
   end
+  else if isb = 1 then do
+    if isr = 1 then call addtok 8, body, 4
+    else call addtok 8, unescape(body), 4
+  end
   else if isr = 1 then call addtok 8, body, 0
   else call addtok 8, unescape(body), 0
   lnum = lnum + n
   return
 
 lex_number: procedure = .void
+  isj = .int
   q = .int
   p = .int
   c = .string
@@ -1226,8 +1250,13 @@ lex_number: procedure = .void
       q = v
     end
   end
+  isj = 0
+  if substr(tx, q, 1) == "j" | substr(tx, q, 1) == "J" then do
+    isj = 1
+    q = q + 1
+  end
   tp = q
-  if isf = 1 then do
+  if isf = 1 | isj = 1 then do
     if dg == "" then dg = "0"
     if fr == "" then fr = "0"
     s = dg || "." || fr
@@ -1235,7 +1264,7 @@ lex_number: procedure = .void
     ntk = ntk + 1
     tk_t[ntk] = 7
     tk_s[ntk] = s
-    tk_i[ntk] = 0
+    tk_i[ntk] = isj
     tk_l[ntk] = lnum
     tk_f[ntk] = parse_flt(s)
     return
@@ -2003,7 +2032,8 @@ p_atom: procedure = .int
     return n
   end
   if t = 7 then do
-    n = mkc(mkfloat(tk_f[tpp]))
+    if tk_i[tpp] = 1 then n = mkc(mkcplx(0.0, tk_f[tpp]))
+    else n = mkc(mkfloat(tk_f[tpp]))
     tpp = tpp + 1
     return n
   end
@@ -2104,12 +2134,20 @@ p_strings: procedure = .int
   anyf = .int
   fl = .int
   x = .int
+  bacc = .string
+  isbyt = .int
   acc = ""
   anyf = 0
   base = psp
+  bacc = ""
+  isbyt = 0
   do while tk_t[tpp] = 8
     fl = tk_i[tpp]
     if fl = 0 then acc = acc || tk_s[tpp]
+    else if fl = 4 then do
+      isbyt = 1
+      bacc = bacc || tk_s[tpp]
+    end
     else do
       anyf = 1
       /* flush literal accumulated so far */
@@ -2124,6 +2162,7 @@ p_strings: procedure = .int
     end
     tpp = tpp + 1
   end
+  if isbyt = 1 then return mkc(mkbytes(bacc))
   if anyf = 0 then return mkc(mkstr(acc))
   if acc \== "" then do
     psp = psp + 1
@@ -3332,6 +3371,11 @@ ival: procedure = .int
   arg x = .int
   if x // 2 \= 0 then return (x - 1) % 2
   if x = 4 then return 1
+  if ob_k[x % 2] = 4 then do
+    if ob_c[x % 2] > 0 then do
+      if length(ob_s[x % 2]) <= 18 then return ob_s[x % 2] as .int
+    end
+  end
   return 0
 
 mkstr: procedure = .int
@@ -3614,7 +3658,7 @@ set_btype: procedure = .void
   cl_bt[c] = 0
   do i = 1 to cl_mn[c] - 1
     k = mro_a[cl_ms[c] + i - 1]
-    if k = 9 | k = 7 | k = 8 | k = 10 | k = 6 | k = 3 | k = 4 then do
+    if k = 9 | k = 7 | k = 8 | k = 10 | k = 6 | k = 3 | k = 4 | k = 83 | k = 84 then do
       cl_bt[c] = k
       return
     end
@@ -3684,6 +3728,10 @@ cls_of: procedure = .int
   if k >= 6 & k <= 10 then do
     if ob_c[x % 2] > 0 then return ob_c[x % 2]
   end
+  if k = 5 | k = 4 | k = 31 then do
+    if ob_c[x % 2] > 0 then return ob_c[x % 2]
+  end
+  if k = 31 & ob_y[x % 2] = 1 then return 84
   if k = 30 then return 56 + ob_n[x % 2] - 1
   return kcls[k]
 
@@ -3808,8 +3856,8 @@ truthy: procedure = .int
   k = ob_k[x % 2]
   if k >= 6 & k <= 10 then do
     if ob_c[x % 2] > 0 then do
-      m = cls_find(ob_c[x % 2], 133)
-      if m = 0 then m = cls_find(ob_c[x % 2], 160)
+      m = cls_find(ob_c[x % 2], 137)
+      if m = 0 then m = cls_find(ob_c[x % 2], 164)
       if m > 0 then do
         r = call0(m, x)
         if r = 0 then return 0
@@ -3834,7 +3882,18 @@ truthy: procedure = .int
       if ob_f[x % 2] = 0.0 then return 0
       return 1
     end
-    when k = 4 then return 1
+    when k = 4 then do
+      if ob_s[x % 2] == "0" then return 0
+      return 1
+    end
+    when k = 31 then do
+      if length(ob_s[x % 2]) > 0 then return 1
+      return 0
+    end
+    when k = 32 then do
+      if ob_f[x % 2] \= 0.0 | ob_g[x % 2] \= 0.0 then return 1
+      return 0
+    end
     when k = 29 then do
       if ob_n[x % 2] = 1 then return truthy(np_scalar(x, 0))
       if ob_n[x % 2] = 0 then return 0
@@ -3850,13 +3909,13 @@ truthy: procedure = .int
       return 0
     end
     when k = 17 then do
-      m = cls_find(ob_c[x % 2], 133)
+      m = cls_find(ob_c[x % 2], 137)
       if m > 0 then do
         r = call0(m, x)
         if r = 0 then return 0
         return truthy(r)
       end
-      m = cls_find(ob_c[x % 2], 160)
+      m = cls_find(ob_c[x % 2], 164)
       if m > 0 then do
         r = call0(m, x)
         if r = 0 then return 0
@@ -3968,6 +4027,11 @@ hashkey: procedure = .string
       return "i0"
     end
     when k = 1 then return "N"
+    when k = 31 then return "b" || ob_s[x % 2]
+    when k = 32 then do
+      if ob_g[x % 2] = 0.0 then return hashkey(mkfloat(ob_f[x % 2]))
+      return "c" || float_repr(ob_f[x % 2]) || "," || float_repr(ob_g[x % 2])
+    end
     when k = 4 then return "i" || ob_s[x % 2]
     when k = 5 then do
       f = ob_f[x % 2]
@@ -3983,7 +4047,7 @@ hashkey: procedure = .string
       return s || ")"
     end
     when k = 17 then do
-      m = cls_find(ob_c[x % 2], 154)
+      m = cls_find(ob_c[x % 2], 158)
       if m > 0 then do
         r = call0(m, x)
         if r = 0 then return "?"
@@ -5015,7 +5079,44 @@ arith: procedure = .int
   q = .int
   kx = kind_of(x)
   ky = kind_of(y)
+  if kx = 32 | ky = 32 then do
+    if (kx = 32 | numkind(x) > 0) & (ky = 32 | numkind(y) > 0) then return cplx_arith(op, x, y)
+  end
+  if x // 2 = 0 then do
+    if ob_c[x % 2] > 0 & op <= 13 then do
+      m = nsov(x, opd[op])
+      if m > 0 then do
+        r = call2(m, x, y)
+        if r \= 10 then return r
+        if unw > 0 then return 0
+      end
+    end
+  end
+  if y // 2 = 0 then do
+    if ob_c[y % 2] > 0 & op <= 13 then do
+      m = nsov(y, ropd[op])
+      if m > 0 then do
+        r = call2(m, y, x)
+        if r \= 10 then return r
+        if unw > 0 then return 0
+      end
+    end
+  end
+  if kx = 4 then do
+    if ob_c[x % 2] > 0 then do
+      x = big_norm(ob_s[x % 2])
+      kx = kind_of(x)
+    end
+  end
+  if ky = 4 then do
+    if ob_c[y % 2] > 0 then do
+      y = big_norm(ob_s[y % 2])
+      ky = kind_of(y)
+    end
+  end
   if numkind(x) > 0 & numkind(y) > 0 then return numarith(op, x, y)
+  if kx = 29 & ky = 32 then return arith(op, cx_call1("_from_real", x), y)
+  if kx = 32 & ky = 29 then return arith(op, x, cx_call1("_from_real", y))
   if (kx = 29 | ky = 29) & kx \= 17 & ky \= 17 & kx \= 6 then return np_binop(op, x, y)
   if kx = 17 | ky = 17 then do
     if kx = 17 then do
@@ -5054,6 +5155,7 @@ arith: procedure = .int
   select
     when op = 1 then do
       if kx = 6 & ky = 6 then return mkstr(ob_s[x % 2] || ob_s[y % 2])
+      if kx = 31 & ky = 31 then return bytes_like(x, ob_s[x % 2] || ob_s[y % 2])
       if kx = 7 & ky = 7 then do
         o = mklist(ob_n[x % 2] + ob_n[y % 2])
         call list_extend_from o, x
@@ -5073,6 +5175,8 @@ arith: procedure = .int
       end
     end
     when op = 3 then do
+      if kx = 31 & numkind(y) = 1 then return bytes_rep(x, ival(y))
+      if ky = 31 & numkind(x) = 1 then return bytes_rep(y, ival(x))
       if (kx = 6 | kx = 7 | kx = 8) & numkind(y) = 1 then return seq_repeat(x, ival(y))
       if (ky = 6 | ky = 7 | ky = 8) & numkind(x) = 1 then return seq_repeat(y, ival(x))
     end
@@ -5213,13 +5317,14 @@ unary: procedure = .int
   r = .int
   m = .int
   if kind_of(x) = 29 then return np_unary(op, x)
+  if kind_of(x) = 32 then return cplx_unary(op, x)
   k = numkind(x)
   if op = 1 then do
     if k = 1 then return mkint(0 - ival(x))
     if k = 3 then return mkfloat(fneg(ob_f[x % 2]))
     if k = 2 then return big_norm(sneg(ob_s[x % 2]))
     if kind_of(x) = 17 then do
-      m = cls_find(ob_c[x % 2], 170)
+      m = cls_find(ob_c[x % 2], 175)
       if m > 0 then return call1(m, x)
     end
     return raise_exc(38, "bad operand type for unary -: '" || type_name(x) || "'")
@@ -5228,7 +5333,7 @@ unary: procedure = .int
     if k = 1 then return mkint(ival(x))
     if k > 0 then return x
     if kind_of(x) = 17 then do
-      m = cls_find(ob_c[x % 2], 175)
+      m = cls_find(ob_c[x % 2], 180)
       if m > 0 then return call1(m, x)
     end
     return raise_exc(38, "bad operand type for unary +: '" || type_name(x) || "'")
@@ -5240,7 +5345,7 @@ unary: procedure = .int
   end
   if k = 2 then return big_norm(ssub(sneg(ob_s[x % 2]), "1"))
   if kind_of(x) = 17 then do
-    m = cls_find(ob_c[x % 2], 158)
+    m = cls_find(ob_c[x % 2], 162)
     if m > 0 then return call1(m, x)
   end
   return raise_exc(38, "bad operand type for unary ~: '" || type_name(x) || "'")
@@ -5303,6 +5408,11 @@ py_eq: procedure = .int
     if ob_s[x % 2] == ob_s[y % 2] then return 1
     return 0
   end
+  if kx = 32 | ky = 32 then return cplx_eq(x, y)
+  if kx = 31 & ky = 31 then do
+    if ob_s[x % 2] == ob_s[y % 2] then return 1
+    return 0
+  end
   if kx = 30 | ky = 30 then do
     if kx = 30 then do
       if ob_n[x % 2] = 2 then return 0
@@ -5324,7 +5434,7 @@ py_eq: procedure = .int
     return 0
   end
   if kx = 17 then do
-    m = cls_find(ob_c[x % 2], 143)
+    m = cls_find(ob_c[x % 2], 147)
     if m > 0 then do
       r = call2(m, x, y)
       if r = 0 then return 0
@@ -5334,7 +5444,7 @@ py_eq: procedure = .int
     return 0
   end
   if ky = 17 then do
-    m = cls_find(ob_c[y % 2], 143)
+    m = cls_find(ob_c[y % 2], 147)
     if m > 0 then do
       r = call2(m, y, x)
       if r = 0 then return 0
@@ -5438,6 +5548,14 @@ py_cmp: procedure = .int
     else if s1 == s2 then c = 0
     return cmp_res(op, c)
   end
+  if kx = 31 & ky = 31 then do
+    s1 = ob_s[x % 2]
+    s2 = ob_s[y % 2]
+    c = 1
+    if s1 << s2 then c = -1
+    else if s1 == s2 then c = 0
+    return cmp_res(op, c)
+  end
   if (kx = 7 & ky = 7) | (kx = 8 & ky = 8) then do
     n = ob_n[x % 2]
     n2 = ob_n[y % 2]
@@ -5461,19 +5579,19 @@ py_cmp: procedure = .int
   if kx = 10 & ky = 10 then do
     return set_cmp(op, x, y)
   end
-  if kx = 17 | ky = 17 then do
+  if ocls(x) > 0 | ocls(y) > 0 then do
     nid = cmpd[op]
     rnid = cmpr[op]
-    if kx = 17 then do
-      m = cls_find(ob_c[x % 2], nid)
+    if ocls(x) > 0 then do
+      m = ovr(x, nid)
       if m > 0 then do
         r = call2(m, x, y)
         if r \= 10 then return r
         if unw > 0 then return 0
       end
     end
-    if ky = 17 then do
-      m = cls_find(ob_c[y % 2], rnid)
+    if ocls(y) > 0 then do
+      m = ovr(y, rnid)
       if m > 0 then do
         r = call2(m, y, x)
         if r \= 10 then return r
@@ -5533,7 +5651,18 @@ py_contains: procedure = .int
   st = .int
   b = ob_x[c % 2]
   k = kind_of(c)
+  if c // 2 = 0 then do
+    if ob_c[c % 2] > 0 then do
+      m = nsov(c, 140)
+      if m > 0 then do
+        r = call2(m, c, x)
+        if r = 0 then return 0
+        return truthy(r)
+      end
+    end
+  end
   select
+    when k = 31 then return bytes_contains(c, x)
     when k = 6 then do
       if kind_of(x) \= 6 then do
         call raise_exc 38, "'in <string>' requires string as left operand, not " || type_name(x)
@@ -5600,7 +5729,7 @@ py_contains: procedure = .int
       return 0
     end
     when k = 17 then do
-      m = cls_find(ob_c[c % 2], 136)
+      m = cls_find(ob_c[c % 2], 140)
       if m > 0 then do
         r = call2(m, c, x)
         if r = 0 then return 0
@@ -5654,7 +5783,7 @@ repr_str: procedure = .string
     else if c == '0d'x then r = r || "\r"
     else do
       v = c2d(c)
-      if v < 32 | v = 127 then r = r || "\x" || right(d2x(v), 2, "0")
+      if v < 32 | v = 127 then r = r || "\x" || lower(right(d2x(v), 2, "0"))
       else r = r || c
     end
   end
@@ -5674,8 +5803,25 @@ repr_of: procedure = .string
   c = .int
   if x // 2 \= 0 then return ((x - 1) % 2) as .string
   k = ob_k[x % 2]
+  if ob_c[x % 2] > 0 then do
+    m = nsov(x, 185)
+    if m > 0 then do
+      r = call1(m, x)
+      if r = 0 then return ""
+      if kind_of(r) \= 6 then do
+        call raise_exc 38, "__repr__ returned non-string (type " || type_name(r) || ")"
+        return ""
+      end
+      return ob_s[r % 2]
+    end
+  end
   select
     when k = 6 then return repr_str(ob_s[x % 2])
+    when k = 31 then do
+      if ob_y[x % 2] = 1 then return "bytearray(" || bytes_repr(ob_s[x % 2]) || ")"
+      return bytes_repr(ob_s[x % 2])
+    end
+    when k = 32 then return cplx_repr(ob_f[x % 2], ob_g[x % 2])
     when k = 5 then return float_repr(ob_f[x % 2])
     when k = 4 then return ob_s[x % 2]
     when k = 2 then do
@@ -5724,7 +5870,10 @@ repr_of: procedure = .string
       return s || "}"
     end
     when k = 10 then do
-      if dd_n[ob_x[x % 2]] = 0 then return "set()"
+      if dd_n[ob_x[x % 2]] = 0 then do
+        if ob_c[x % 2] > 0 then return cl_name[ob_c[x % 2]] || "()"
+        return "set()"
+      end
       s = "{"
       first = 1
       e = dd_head[ob_x[x % 2]]
@@ -5736,6 +5885,7 @@ repr_of: procedure = .string
         end
         e = de_next[e]
       end
+      if ob_c[x % 2] > 0 then return cl_name[ob_c[x % 2]] || "(" || s || "})"
       return s || "}"
     end
     when k = 30 then do
@@ -5768,7 +5918,7 @@ repr_of: procedure = .string
     when k = 29 then return np_repr(x)
     when k = 27 then return "Ellipsis"
     when k = 17 then do
-      m = cls_find(ob_c[x % 2], 180)
+      m = cls_find(ob_c[x % 2], 185)
       if m > 0 then do
         r = call1(m, x)
         if r = 0 then return ""
@@ -5814,6 +5964,9 @@ exc_str: procedure = .string
     if cls_issub(ob_c[x % 2], 35) = 1 then return repr_of(sl[ob_p[a % 2]])
     return str_of(sl[ob_p[a % 2]])
   end
+  if ob_n[a % 2] = 2 & cls_issub(ob_c[x % 2], 53) = 1 then do
+    if sl[ob_p[a % 2]] // 2 = 1 then return "[Errno " || str_of(sl[ob_p[a % 2]]) || "] " || str_of(sl[ob_p[a % 2] + 1])
+  end
   return repr_of(a)
 
 str_of: procedure = .string
@@ -5823,10 +5976,22 @@ str_of: procedure = .string
   r = .int
   if x // 2 \= 0 then return ((x - 1) % 2) as .string
   k = ob_k[x % 2]
+  if ob_c[x % 2] > 0 then do
+    m = nsov(x, 197)
+    if m > 0 then do
+      r = call1(m, x)
+      if r = 0 then return ""
+      if kind_of(r) \= 6 then do
+        call raise_exc 38, "__str__ returned non-string (type " || type_name(r) || ")"
+        return ""
+      end
+      return ob_s[r % 2]
+    end
+  end
   if k = 6 then return ob_s[x % 2]
   if k = 29 then return np_str(x)
   if k = 17 then do
-    m = cls_find(ob_c[x % 2], 192)
+    m = cls_find(ob_c[x % 2], 197)
     if m > 0 then do
       r = call1(m, x)
       if r = 0 then return ""
@@ -5947,10 +6112,13 @@ docall: procedure = .int
       call ast_insert base, na + nk, ob_y[f % 2]
       return docall(ob_x[f % 2], base, na + 1, nk)
     end
-    when k = 15 then return bmeth(ob_y[f % 2], ob_x[f % 2], base, na, nk)
+    when k = 15 then do
+      if ob_c[f % 2] = 1 then return bmeth_unbound(ob_x[ob_y[f % 2] % 2], ob_x[f % 2], base, na, nk)
+      return bmeth(ob_y[f % 2], ob_x[f % 2], base, na, nk)
+    end
     when k = 16 then return instantiate(ob_x[f % 2], base, na, nk)
     when k = 17 then do
-      m = cls_find(ob_c[f % 2], 134)
+      m = cls_find(ob_c[f % 2], 138)
       if m = 0 then return raise_exc(38, "'" || type_name(f) || "' object is not callable")
       call ast_insert base, na + nk, f
       return docall(m, base, na + 1, nk)
@@ -6126,11 +6294,18 @@ instantiate: procedure = .int
   fl = .int
   fl = cl_flags[c]
   if fl // 2 = 1 & (fl // 4) < 2 then return bcall_type(c, base, na, nk)
+  init = cls_find(c, 176)
+  if init > 0 then return inst_with_new(c, init, base, na, nk)
+  if cl_bt[c] > 0 then return inst_native(c, base, na, nk)
   inst = inst_new(c)
   if (fl // 4) >= 2 then do
     call inst_set inst, 8, tup_from_ast(base + 1, base + na)
+    if na >= 2 & cls_issub(c, 53) = 1 then do
+      call inst_set inst, nameid("errno"), ast[base + 1]
+      call inst_set inst, nameid("strerror"), ast[base + 2]
+    end
   end
-  init = cls_find(c, 156)
+  init = cls_find(c, 160)
   if init > 0 then do
     call ast_insert base, na + nk, inst
     r = docall(init, base, na + 1, nk)
@@ -6172,6 +6347,9 @@ bind_attr: procedure = .int
   end
   if k = 23 then return ob_x[v % 2]
   if k = 24 then return mkbmeth(ob_x[v % 2], cl_obj[c])
+  if k = 15 & o > 0 then do
+    if ob_c[v % 2] = 1 then return mkbmethb(o, ob_x[v % 2])
+  end
   return v
 
 getattr_obj: procedure = .int
@@ -6184,6 +6362,18 @@ getattr_obj: procedure = .int
   slot = .int
   m = .int
   k = kind_of(o)
+  if k \= 17 then do
+    if o // 2 = 0 then do
+      if ob_c[o % 2] > 0 then do
+        c = nsub(o)
+        if c > 0 then do
+          v = nat_getattr(o, c, nid)
+          if v \= 0 then return v
+          if unw > 0 then return 0
+        end
+      end
+    end
+  end
   if k = 17 then do
     ix = o % 2
     c = ob_c[ix]
@@ -6207,16 +6397,16 @@ getattr_obj: procedure = .int
     end
     v = cls_find(c, nid)
     if v > 0 then return bind_attr(v, o, c)
-    if nid = 135 then return cl_obj[c]
-    m = cls_find(c, 150)
+    if nid = 139 then return cl_obj[c]
+    m = cls_find(c, 154)
     if m > 0 then return call2(m, o, mkstr(nid_name[nid]))
-    if nid = 139 then return inst_dict(o)
+    if nid = 143 then return inst_dict(o)
     return no_attr(o, nid)
   end
   if k = 21 then do
-    if nid = 106 then return ob_n[o % 2]
-    if nid = 110 then return ob_x[o % 2]
-    if nid = 109 then return ob_y[o % 2]
+    if nid = 109 then return ob_n[o % 2]
+    if nid = 113 then return ob_x[o % 2]
+    if nid = 112 then return ob_y[o % 2]
   end
   if k = 16 then do
     c = ob_x[o % 2]
@@ -6226,19 +6416,27 @@ getattr_obj: procedure = .int
       if kind_of(v) = 23 then return ob_x[v % 2]
       return v
     end
-    if nid = 169 | nid = 177 then return mkstr(cl_name[c])
-    if nid = 132 then do
+    if nid = 174 | nid = 182 then return mkstr(cl_name[c])
+    if nid = 136 then do
       v = mktuple(cl_bn[c])
       do ix = 0 to cl_bn[c] - 1
         sl[ob_p[v % 2] + ix] = cl_obj[bs_a[cl_bs[c] + ix]]
       end
       return v
     end
-    if nid = 167 then return cls_mro(c)
-    if nid = 139 then return cls_dict(c)
-    if nid = 165 then return mkstr(modname_of(cl_mod[c]))
-    if nid = 141 then return 2
-    if nid = 135 then return cl_obj[2]
+    if nid = 172 then return cls_mro(c)
+    if nid = 143 then return cls_dict(c)
+    if nid = 170 then return mkstr(modname_of(cl_mod[c]))
+    if nid = 145 then return 2
+    if nid = 139 then return cl_obj[2]
+    ix = c
+    if cl_flags[c] // 2 \= 1 then ix = cl_bt[c]
+    if ix = 1 then ix = 0
+    if ix > 0 & pos(" " || nid_name[nid] || " ", bm_names) > 0 then do
+      v = mkbmethb(cl_obj[ix], nid)
+      ob_c[v % 2] = 1
+      return v
+    end
     return no_attr(o, nid)
   end
   if k = 18 then do
@@ -6249,9 +6447,13 @@ getattr_obj: procedure = .int
   end
   if k = 25 then do
     v = super_find(o, nid)
+    if v = bi_oop[49] then do
+      if nsub(ob_x[o % 2]) > 0 then return mkbmethb(ob_x[o % 2], nid)
+    end
     if v = 0 then do
       c = ob_x[o % 2]
       if kind_of(c) \= 16 then return mkbmethb(c, nid)
+      if nid = 176 then return mkbmethb(cl_obj[super_base(o)], nid)
       return raise_exc(41, "'super' object has no attribute '" || nid_name[nid] || "'")
     end
     return bind_attr(v, ob_x[o % 2], sup_c)
@@ -6259,44 +6461,48 @@ getattr_obj: procedure = .int
   if k = 12 then do
     s = fnattr[o || "." || nid]
     if s \== "" then return s as .int
-    if nid = 169 | nid = 177 then return mkstr(fd_name[ob_x[o % 2]])
-    if nid = 141 then return 2
-    if nid = 135 then return cl_obj[13]
+    if nid = 174 | nid = 182 then return mkstr(fd_name[ob_x[o % 2]])
+    if nid = 145 then return 2
+    if nid = 139 then return cl_obj[13]
     return no_attr(o, nid)
   end
   if k = 13 then do
-    if nid = 169 then return mkstr(bi_name[ob_x[o % 2]])
+    if nid = 174 then return mkstr(bi_name[ob_x[o % 2]])
     return no_attr(o, nid)
   end
   if k = 14 then do
-    if nid = 169 then return mkstr(fd_name[ob_x[ob_x[o % 2] % 2]])
-    if nid = 189 then return ob_y[o % 2]
-    if nid = 148 then return ob_x[o % 2]
+    if nid = 174 then return mkstr(fd_name[ob_x[ob_x[o % 2] % 2]])
+    if nid = 194 then return ob_y[o % 2]
+    if nid = 152 then return ob_x[o % 2]
     return no_attr(o, nid)
   end
   if k = 22 then do
-    if nid = 100 then return mkbmethb(o, nid)
-    if nid = 40 then return mkbmethb(o, nid)
+    if nid = 103 then return mkbmethb(o, nid)
+    if nid = 42 then return mkbmethb(o, nid)
     return no_attr(o, nid)
   end
-  if nid = 135 then return cl_obj[cls_of(o)]
-  if nid = 169 & k = 19 then return mkstr(fd_name[gn_fd[ob_x[o % 2]]])
+  if nid = 139 then return cl_obj[cls_of(o)]
+  if nid = 174 & k = 19 then return mkstr(fd_name[gn_fd[ob_x[o % 2]]])
   if k = 3 | k = 2 | k = 4 then do
-    if nid = 84 | nid = 74 then return o
-    if nid = 41 then return mkint(0)
+    if nid = 87 | nid = 77 then return o
+    if nid = 44 then return mkint(0)
     if nid = 23 then return mkint(1)
   end
   if k = 5 then do
-    if nid = 84 then return o
-    if nid = 41 then return mkfloat(0.0)
+    if nid = 87 then return o
+    if nid = 44 then return mkfloat(0.0)
+  end
+  if k = 32 then do
+    if nid = 87 then return mkfloat(ob_f[o % 2])
+    if nid = 44 then return mkfloat(ob_g[o % 2])
   end
   if k = 11 then do
-    if nid = 106 then return mkint(ob_n[o % 2])
-    if nid = 110 then return mkint(ob_x[o % 2])
-    if nid = 109 then return mkint(ob_y[o % 2])
+    if nid = 109 then return mkint(ob_n[o % 2])
+    if nid = 113 then return mkint(ob_x[o % 2])
+    if nid = 112 then return mkint(ob_y[o % 2])
   end
   if k = 26 then do
-    if nid = 72 then return mkstr(ob_s[o % 2])
+    if nid = 75 then return mkstr(ob_s[o % 2])
     if nid = 17 then return mkbool(ob_c[o % 2])
   end
   if k = 29 then do
@@ -6425,18 +6631,44 @@ getattr_call: procedure = .int
     end
     return getattr_obj(o, nid, 0)
   end
-  if k = 6 | k = 7 | k = 9 | k = 8 | k = 10 | k = 5 | k = 3 | k = 4 | k = 2 | k = 19 | k = 26 | k = 11 | k = 29 then do
-    if nid = 135 | nid = 169 then return getattr_obj(o, nid, 0)
-    if (k = 3 | k = 4 | k = 2 | k = 5) & (nid = 84 | nid = 41) then return getattr_obj(o, nid, 0)
+  if k \= 17 then do
+    if o // 2 = 0 then do
+      if ob_c[o % 2] > 0 then do
+        c = nsub(o)
+        if c > 0 then do
+          v = nat_holder(o)
+          if v > 0 then do
+            v = inst_get(v, nid)
+            if v \= 0 then return v
+          end
+          v = cls_find(c, nid)
+          if v > 0 then do
+            if kind_of(v) = 12 then do
+              ev_self = o
+              return v
+            end
+            return bind_attr(v, o, c)
+          end
+        end
+      end
+    end
+  end
+  if k = 6 | k = 7 | k = 9 | k = 8 | k = 10 | k = 5 | k = 3 | k = 4 | k = 2 | k = 19 | k = 26 | k = 11 | k = 29 | k = 31 | k = 32 then do
+    if nid = 139 | nid = 174 then return getattr_obj(o, nid, 0)
+    if (k = 3 | k = 4 | k = 2 | k = 5) & (nid = 87 | nid = 44) then return getattr_obj(o, nid, 0)
     ev_bm = 1
     ev_self = o
     return 1
   end
   if k = 25 then do
     v = super_find(o, nid)
+    if v = bi_oop[49] then do
+      if nsub(ob_x[o % 2]) > 0 then return mkbmethb(ob_x[o % 2], nid)
+    end
     if v = 0 then do
       c = ob_x[o % 2]
       if kind_of(c) \= 16 then return mkbmethb(c, nid)
+      if nid = 176 then return mkbmethb(cl_obj[super_base(o)], nid)
       return raise_exc(41, "'super' object has no attribute '" || nid_name[nid] || "'")
     end
     ev_self = ob_x[o % 2]
@@ -6467,6 +6699,10 @@ setattr_raw: procedure = .void
   arg o = .int, nid = .int, v = .int
   p = .int
   r = .int
+  if nsub(o) > 0 then do
+    call nat_setattr o, nsub(o), nid, v, 1
+    return
+  end
   if kind_of(o) \= 17 then do
     call setattr_obj o, nid, v
     return
@@ -6492,6 +6728,12 @@ setattr_obj: procedure = .void
   p = .int
   r = .int
   k = kind_of(o)
+  if k \= 17 then do
+    if nsub(o) > 0 then do
+      call nat_setattr o, nsub(o), nid, v, 0
+      return
+    end
+  end
   if k = 17 then do
     c = ob_c[o % 2]
     p = cls_find(c, nid)
@@ -6505,8 +6747,8 @@ setattr_obj: procedure = .void
         return
       end
     end
-    p = cls_find(c, 190)
-    if p > 0 & nid \= 135 then do
+    p = cls_find(c, 195)
+    if p > 0 & nid \= 139 then do
       r = call3(p, o, mkstr(nid_name[nid]), v)
       return
     end
@@ -6615,6 +6857,7 @@ getslice: procedure = .int
     ob_y[t % 2] = st
     return np_getitem(o, t)
   end
+  if k = 31 then return bytes_slice(o, lo, hi, st)
   if k = 6 then do
     s = ob_s[o % 2]
     r = slice_calc(length(s), lo, hi, st)
@@ -6647,7 +6890,7 @@ getslice: procedure = .int
     return mkrange(ob_n[o % 2] + sl_a * ob_y[o % 2], ob_n[o % 2] + (sl_a + sl_n * sl_b) * ob_y[o % 2], sl_b * ob_y[o % 2])
   end
   if k = 17 then do
-    r = cls_find(ob_c[o % 2], 151)
+    r = cls_find(ob_c[o % 2], 155)
     if r > 0 then do
       t = newobj(21)
       ob_n[t % 2] = lo
@@ -6662,6 +6905,7 @@ idx_int: procedure = .int
   arg x = .int
   if x // 2 \= 0 then return (x - 1) % 2
   if ob_k[x % 2] = 2 then return ival(x)
+  if ob_k[x % 2] = 4 then return ival(x)
   return 0
 
 getitem: procedure = .int
@@ -6675,14 +6919,26 @@ getitem: procedure = .int
   s = .string
   a = .int
   st = .int
+  ix = unsub(ix)
   if o // 2 \= 0 then return raise_exc(38, "'int' object is not subscriptable")
   k = ob_k[o % 2]
   if k = 29 then return np_getitem(o, ix)
+  if k = 31 then do
+    if ix // 2 = 0 then do
+      if ob_k[ix % 2] = 21 then return bytes_slice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    end
+    if ob_c[o % 2] = 0 then return bytes_geti(o, ix)
+  end
+  if ob_c[o % 2] > 0 then do
+    m = nsov(o, 155)
+    if m > 0 then return call2(m, o, ix)
+    if k = 31 then return bytes_geti(o, ix)
+  end
   if k = 7 | k = 8 then do
     if ix // 2 = 0 & ob_k[ix % 2] \= 2 then do
       if ob_k[ix % 2] = 21 then return getslice(o, ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
       if kind_of(ix) = 17 then do
-        m = cls_find(ob_c[ix % 2], 155)
+        m = cls_find(ob_c[ix % 2], 159)
         if m > 0 then ix = call1(m, ix)
       end
       else return raise_exc(38, "list indices must be integers or slices, not " || type_name(ix))
@@ -6705,6 +6961,10 @@ getitem: procedure = .int
       call dict_put ob_x[o % 2], hashkey(ix), ix, t
       return t
     end
+    if ob_c[o % 2] > 0 then do
+      m = nsov(o, 169)
+      if m > 0 then return call2(m, o, ix)
+    end
     return raise_key(ix)
   end
   if k = 6 then do
@@ -6726,7 +6986,7 @@ getitem: procedure = .int
     return mkint(ob_n[o % 2] + i * ob_y[o % 2])
   end
   if k = 17 then do
-    m = cls_find(ob_c[o % 2], 151)
+    m = cls_find(ob_c[o % 2], 155)
     if m > 0 then return call2(m, o, ix)
     return raise_exc(38, "'" || type_name(o) || "' object is not subscriptable")
   end
@@ -6755,6 +7015,7 @@ setitem: procedure = .void
   newl = .int
   j = .int
   cnt = .int
+  ix = unsub(ix)
   if o // 2 \= 0 then do
     r = raise_exc(38, "'int' object does not support item assignment")
     return
@@ -6762,6 +7023,17 @@ setitem: procedure = .void
   k = ob_k[o % 2]
   if k = 29 then do
     call np_setitem o, ix, v
+    return
+  end
+  if ob_c[o % 2] > 0 then do
+    m = nsov(o, 196)
+    if m > 0 then do
+      r = call3(m, o, ix, v)
+      return
+    end
+  end
+  if k = 31 then do
+    call bytes_seti o, ix, v
     return
   end
   if k = 7 then do
@@ -6788,7 +7060,7 @@ setitem: procedure = .void
     return
   end
   if k = 17 then do
-    m = cls_find(ob_c[o % 2], 191)
+    m = cls_find(ob_c[o % 2], 196)
     if m > 0 then do
       r = call3(m, o, ix, v)
       return
@@ -6849,7 +7121,21 @@ delitem: procedure = .void
   e = .int
   j = .int
   newl = .int
+  ix = unsub(ix)
   k = kind_of(o)
+  if o // 2 = 0 then do
+    if ob_c[o % 2] > 0 then do
+      m = nsov(o, 142)
+      if m > 0 then do
+        r = call2(m, o, ix)
+        return
+      end
+    end
+  end
+  if k = 31 then do
+    call bytes_deli o, ix
+    return
+  end
   if k = 7 then do
     if ix // 2 = 0 & ob_k[ix % 2] = 21 then do
       r = slice_calc(ob_n[o % 2], ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
@@ -6889,7 +7175,7 @@ delitem: procedure = .void
     return
   end
   if k = 17 then do
-    m = cls_find(ob_c[o % 2], 138)
+    m = cls_find(ob_c[o % 2], 142)
     if m > 0 then do
       r = call2(m, o, ix)
       return
@@ -7056,8 +7342,13 @@ iter_new: procedure = .int
   it = .int
   if x // 2 \= 0 then return raise_exc(38, "'int' object is not iterable")
   k = ob_k[x % 2]
+  if ob_c[x % 2] > 0 then do
+    m = nsov(x, 163)
+    if m > 0 then return iter_wrap(call1(m, x))
+  end
   select
     when k = 7 | k = 8 then return mkiter(1, x, 0)
+    when k = 31 then return mkiter(20, x, 0)
     when k = 6 then return mkiter(2, x, 0)
     when k = 11 then do
       it = mkiter(3, ob_n[x % 2], ob_x[x % 2])
@@ -7073,18 +7364,18 @@ iter_new: procedure = .int
     end
     when k = 19 | k = 20 then return x
     when k = 17 then do
-      m = cls_find(ob_c[x % 2], 159)
+      m = cls_find(ob_c[x % 2], 163)
       if m > 0 then do
         r = call1(m, x)
         if r = 0 then return 0
         if kind_of(r) = 19 | kind_of(r) = 20 then return r
         if kind_of(r) = 17 then do
-          if cls_find(ob_c[r % 2], 172) > 0 then return mkiter(7, r, 0)
+          if cls_find(ob_c[r % 2], 177) > 0 then return mkiter(7, r, 0)
         end
         if kind_of(r) = 7 | kind_of(r) = 8 then return mkiter(1, r, 0)
         return raise_exc(38, "iter() returned non-iterator of type '" || type_name(r) || "'")
       end
-      m = cls_find(ob_c[x % 2], 151)
+      m = cls_find(ob_c[x % 2], 155)
       if m > 0 then return mkiter(13, x, 0)
       return raise_exc(38, "'" || type_name(x) || "' object is not iterable")
     end
@@ -7154,6 +7445,14 @@ iter_next: procedure = .int
       ob_y[ix] = i + 1
       return mkchr(substr(s, i + 1, 1))
     end
+    when sub = 20 then do
+      src = ob_x[ix]
+      i = ob_y[ix]
+      s = ob_s[src % 2]
+      if i >= length(s) then return 0
+      ob_y[ix] = i + 1
+      return mkint(c2d(substr(s, i + 1, 1)))
+    end
     when sub = 4 | sub = 5 | sub = 6 then do
       e = de_live_from(ob_y[ix])
       if e = 0 then return 0
@@ -7166,7 +7465,7 @@ iter_next: procedure = .int
       return t
     end
     when sub = 7 then do
-      r = call1(cls_find(ob_c[ob_x[ix] % 2], 172), ob_x[ix])
+      r = call1(cls_find(ob_c[ob_x[ix] % 2], 177), ob_x[ix])
       if r = 0 then do
         if unw = 4 then do
           if cls_issub(ob_c[unw_v % 2], 45) = 1 then unw = 0
@@ -7233,7 +7532,7 @@ iter_next: procedure = .int
     end
     when sub = 13 then do
       i = ob_y[ix]
-      r = call2(cls_find(ob_c[ob_x[ix] % 2], 151), ob_x[ix], mkint(i))
+      r = call2(cls_find(ob_c[ob_x[ix] % 2], 155), ob_x[ix], mkint(i))
       if r = 0 then do
         if unw = 4 then do
           if cls_issub(ob_c[unw_v % 2], 34) = 1 | cls_issub(ob_c[unw_v % 2], 45) = 1 then unw = 0
@@ -7306,6 +7605,13 @@ iter_list: procedure = .int
   n = .int
   e = .int
   k = kind_of(x)
+  if x // 2 = 0 then do
+    if ob_c[x % 2] > 0 then do
+      if nsub(x) > 0 then do
+        if cls_find(nsub(x), 163) > 0 then k = 0
+      end
+    end
+  end
   if k = 7 | k = 8 then do
     n = ob_n[x % 2]
     l = mklist(n)
@@ -7614,7 +7920,7 @@ ev: procedure = .int
     ix = ev(ix, fb)
     if ix = 0 then return 0
     if ix // 2 \= 0 & o // 2 = 0 then do
-      if ob_k[o % 2] = 7 then do
+      if ob_k[o % 2] = 7 & ob_c[o % 2] = 0 then do
         i = (ix - 1) % 2
         if i >= 0 & i < ob_n[o % 2] then return sl[ob_p[o % 2] + i]
       end
@@ -7825,18 +8131,18 @@ cmp_general: procedure = .int
     if (kind_of(l) = 29 | kind_of(r) = 29) & kind_of(l) \= 17 & kind_of(r) \= 17 then return np_binop(30 + op, l, r)
   end
   if op = 1 | op = 2 then do
-    if kind_of(l) = 17 then do
-      if op = 1 then m = cls_find(ob_c[l % 2], 143)
-      else m = cls_find(ob_c[l % 2], 173)
+    if ocls(l) > 0 then do
+      if op = 1 then m = ovr(l, 147)
+      else m = ovr(l, 178)
       if m > 0 then do
         v = call2(m, l, r)
         if v = 0 then return 0
         if v \= 10 then return v
       end
     end
-    if kind_of(r) = 17 then do
-      if op = 1 then m = cls_find(ob_c[r % 2], 143)
-      else m = cls_find(ob_c[r % 2], 173)
+    if ocls(r) > 0 then do
+      if op = 1 then m = ovr(r, 147)
+      else m = ovr(r, 178)
       if m > 0 then do
         v = call2(m, r, l)
         if v = 0 then return 0
@@ -7964,6 +8270,22 @@ aug_op_apply: procedure = .int
   if k = 9 & op = 11 & kind_of(v) = 9 then do
     call dict_update cur, v
     return cur
+  end
+  if k = 31 then do
+    if ob_y[cur % 2] = 1 then do
+      if op = 1 then do
+        if kind_of(v) = 31 then ob_s[cur % 2] = ob_s[cur % 2] || ob_s[v % 2]
+        else do
+          l = arith(op, cur, v)
+          return l
+        end
+        return cur
+      end
+      if op = 3 & numkind(v) = 1 then do
+        ob_s[cur % 2] = copies(ob_s[cur % 2], ival(v))
+        return cur
+      end
+    end
   end
   if k = 29 then do
     l = arith(op, cur, v)
@@ -8394,6 +8716,7 @@ exec_class: procedure = .void
   if n_c[n] > 0 then do
     bo = ev(n_c[n], fb)
     if bo = 0 then return
+    bl_n = 0
     do i = 0 to ob_n[bo % 2] - 1
       b = sl[ob_p[bo % 2] + i]
       if kind_of(b) \= 16 then do
@@ -8547,8 +8870,8 @@ exec_with: procedure = .void
     r = raise_exc(41, "__enter__")
     return
   end
-  en = cls_find(ob_c[ctx % 2], 142)
-  exm = cls_find(ob_c[ctx % 2], 144)
+  en = cls_find(ob_c[ctx % 2], 146)
+  exm = cls_find(ob_c[ctx % 2], 148)
   if en = 0 | exm = 0 then do
     r = raise_exc(41, "__enter__")
     return
@@ -9209,8 +9532,8 @@ gen_resume0: procedure = .int
         exm = 0
         r = 0
         if k = 17 then do
-          en = cls_find(ob_c[ctx % 2], 142)
-          exm = cls_find(ob_c[ctx % 2], 144)
+          en = cls_find(ob_c[ctx % 2], 146)
+          exm = cls_find(ob_c[ctx % 2], 148)
           if en = 0 | exm = 0 then r = raise_exc(41, "__enter__")
           else r = call1(en, ctx)
         end
@@ -9278,6 +9601,9 @@ nargs_err: procedure = .int
 chk_int: procedure = .int
   arg v = .int
   if numkind(v) = 1 then return 1
+  if numkind(v) = 2 then do
+    if unsub(v) \= v then return 1
+  end
   if numkind(v) = 2 then do
     call raise_exc 31, "Python int too large to convert to C long"
     return 0
@@ -9360,7 +9686,7 @@ bi_print: procedure = .int
     if i > 1 then out = out || sep
     v = ast[base + i]
     if v // 2 = 0 then do
-      if ob_k[v % 2] = 6 then do
+      if ob_k[v % 2] = 6 & ob_c[v % 2] = 0 then do
         out = out || ob_s[v % 2]
         iterate
       end
@@ -9372,7 +9698,7 @@ bi_print: procedure = .int
   out = out || endv
   if fo > 0 & fo \= 2 then do
     if kind_of(fo) = 17 then do
-      v = getattr_obj(fo, 126, 0)
+      v = getattr_obj(fo, 130, 0)
       if v = 0 then return 0
       if call1(v, mkstr(out)) = 0 then return 0
       return 2
@@ -9389,8 +9715,15 @@ bi_len: procedure = .int
   k = .int
   m = .int
   k = kind_of(x)
+  if x // 2 = 0 then do
+    if ob_c[x % 2] > 0 then do
+      m = nsov(x, 164)
+      if m > 0 then return call1(m, x)
+    end
+  end
   select
     when k = 6 then return mkint(length(ob_s[x % 2]))
+    when k = 31 then return mkint(length(ob_s[x % 2]))
     when k = 7 | k = 8 then return mkint(ob_n[x % 2])
     when k = 9 | k = 10 then return mkint(dd_n[ob_x[x % 2]])
     when k = 30 then return mkint(dd_n[ob_x[ob_x[x % 2] % 2]])
@@ -9400,7 +9733,7 @@ bi_len: procedure = .int
       return mkint(sl[ob_y[x % 2]])
     end
     when k = 17 then do
-      m = cls_find(ob_c[x % 2], 160)
+      m = cls_find(ob_c[x % 2], 164)
       if m > 0 then do
         m = call1(m, x)
         if m = 0 then return 0
@@ -9423,15 +9756,17 @@ bi_abs: procedure = .int
     when ob_k[x % 2] = 5 then return mkfloat(rxfloat..fabs(ob_f[x % 2]))
     when ob_k[x % 2] = 4 then do
       s = ob_s[x % 2]
-      if left(s, 1) == "-" then return mkbig(substr(s, 2))
+      if left(s, 1) == "-" then return big_norm(substr(s, 2))
+      if ob_c[x % 2] > 0 then return big_norm(s)
       return x
     end
     when ob_k[x % 2] = 2 then return mkint(ival(x))
-    when ob_k[x % 2] = 29 then return np_math1(149, x)
+    when ob_k[x % 2] = 32 then return cplx_abs(x)
+    when ob_k[x % 2] = 29 then return np_math1(150, x)
     otherwise nop
   end
   if kind_of(x) = 17 then do
-    m = cls_find(ob_c[x % 2], 129)
+    m = cls_find(ob_c[x % 2], 133)
     if m > 0 then return call1(m, x)
   end
   return raise_exc(38, "bad operand type for abs(): '" || type_name(x) || "'")
@@ -9693,7 +10028,7 @@ bi_round: procedure = .int
   if na < 1 | na > 2 then return nargs_err("round", na, 1, 2)
   x = ast[base + 1]
   if kind_of(x) = 17 then do
-    p = cls_find(ob_c[x % 2], 184)
+    p = cls_find(ob_c[x % 2], 189)
     if p > 0 then do
       if na = 1 then return call1(p, x)
       return call2(p, x, ast[base + 2])
@@ -9766,7 +10101,7 @@ bi_divmod: procedure = .int
   r = .int
   t = .int
   if kind_of(a) = 17 then do
-    q = cls_find(ob_c[a % 2], 140)
+    q = cls_find(ob_c[a % 2], 144)
     if q > 0 then do
       r = call2(q, a, b)
       if r \= 10 then return r
@@ -9774,7 +10109,7 @@ bi_divmod: procedure = .int
     end
   end
   if kind_of(b) = 17 then do
-    q = cls_find(ob_c[b % 2], 179)
+    q = cls_find(ob_c[b % 2], 184)
     if q > 0 then do
       r = call2(q, b, a)
       if r \= 10 then return r
@@ -9832,6 +10167,11 @@ bi_ord: procedure = .int
   s = .string
   n = .int
   c = .int
+  if kind_of(x) = 31 then do
+    s = ob_s[x % 2]
+    if length(s) \= 1 then return raise_exc(38, "ord() expected a character, but string of length " || length(s) || " found")
+    return mkint(c2d(s))
+  end
   if kind_of(x) \= 6 then return raise_exc(38, "ord() expected string of length 1, but " || type_name(x) || " found")
   s = ob_s[x % 2]
   n = length(s)
@@ -9935,7 +10275,7 @@ bi_callable: procedure = .int
   k = kind_of(x)
   if k = 12 | k = 13 | k = 14 | k = 15 | k = 16 then return 4
   if k = 17 then do
-    if cls_find(ob_c[x % 2], 134) > 0 then return 4
+    if cls_find(ob_c[x % 2], 138) > 0 then return 4
   end
   return 6
 
@@ -9947,7 +10287,7 @@ bi_next: procedure = .int
   if na < 1 | na > 2 then return nargs_err("next", na, 1, 2)
   it = ast[base + 1]
   if kind_of(it) = 17 then do
-    m = cls_find(ob_c[it % 2], 172)
+    m = cls_find(ob_c[it % 2], 177)
     if m = 0 then return raise_exc(38, "'" || type_name(it) || "' object is not an iterator")
     v = call1(m, it)
     if v = 0 & na = 2 then do
@@ -10015,14 +10355,28 @@ bi_hash: procedure = .int
   i = .int
   if x // 2 \= 0 then return x
   k = ob_k[x % 2]
+  if ob_c[x % 2] > 0 then do
+    m = nsov(x, 158)
+    if m > 0 then return call1(m, x)
+  end
   select
     when k = 6 then return mkint(strhash(ob_s[x % 2]))
+    when k = 31 then return mkint(strhash(ob_s[x % 2]))
+    when k = 32 then do
+      if ob_g[x % 2] = 0.0 then return bi_hash(mkfloat(ob_f[x % 2]))
+      r = bi_hash(mkfloat(ob_f[x % 2]))
+      h = bi_hash(mkfloat(ob_g[x % 2]))
+      return mkint(ival(r) + 1000003 * ival(h))
+    end
     when k = 2 then return mkint(ival(x))
     when k = 5 then do
       if ob_f[x % 2] = rxfloat..floor(ob_f[x % 2]) & rxfloat..fabs(ob_f[x % 2]) < 900000000000000000.0 then return float_to_int(ob_f[x % 2])
       return mkint(strhash(float_repr(ob_f[x % 2])))
     end
-    when k = 4 then return mkint(strhash(ob_s[x % 2]))
+    when k = 4 then do
+      if ob_c[x % 2] > 0 then return bi_hash(big_norm(ob_s[x % 2]))
+      return mkint(strhash(ob_s[x % 2]))
+    end
     when k = 8 then do
       h = 3430008
       do i = 0 to ob_n[x % 2] - 1
@@ -10035,7 +10389,7 @@ bi_hash: procedure = .int
     when k = 1 then return mkint(1)
     when k = 7 | k = 9 | k = 10 then return raise_exc(38, "unhashable type: '" || type_name(x) || "'")
     when k = 17 then do
-      m = cls_find(ob_c[x % 2], 154)
+      m = cls_find(ob_c[x % 2], 158)
       if m > 0 then return call1(m, x)
       return mkint(x)
     end
@@ -10327,14 +10681,17 @@ ctor_int: procedure = .int
   end
   else if kwarg(base, na, nk, "base") \= 0 then bs = ival(kwarg(base, na, nk, "base"))
   else bs = -1
-  if kind_of(x) = 6 then do
+  if kind_of(x) = 6 | kind_of(x) = 31 then do
     if bs = -1 then bs = 10
     return parse_int(ob_s[x % 2], bs)
   end
   if bs \= -1 then return raise_exc(38, "int() can't convert non-string with explicit base")
   select
     when numkind(x) = 1 then return mkint(ival(x))
-    when numkind(x) = 2 then return x
+    when numkind(x) = 2 then do
+      if ob_c[x % 2] = 0 then return x
+      return big_norm(ob_s[x % 2])
+    end
     when numkind(x) = 3 then do
       f = ob_f[x % 2]
       if f \= f then return raise_exc(36, "cannot convert float NaN to integer")
@@ -10342,8 +10699,8 @@ ctor_int: procedure = .int
       return float_to_int(f)
     end
     when kind_of(x) = 17 then do
-      m = cls_find(ob_c[x % 2], 157)
-      if m = 0 then m = cls_find(ob_c[x % 2], 155)
+      m = cls_find(ob_c[x % 2], 161)
+      if m = 0 then m = cls_find(ob_c[x % 2], 159)
       if m > 0 then return call1(m, x)
     end
     otherwise nop
@@ -10356,10 +10713,10 @@ ctor_float: procedure = .int
   m = .int
   if na = 0 then return mkfloat(0.0)
   x = ast[base + 1]
-  if kind_of(x) = 6 then return parse_float_str(ob_s[x % 2])
+  if kind_of(x) = 6 | kind_of(x) = 31 then return parse_float_str(ob_s[x % 2])
   if numkind(x) > 0 then return mkfloat(tofloat(x))
   if kind_of(x) = 17 then do
-    m = cls_find(ob_c[x % 2], 145)
+    m = cls_find(ob_c[x % 2], 149)
     if m > 0 then return call1(m, x)
   end
   return raise_exc(38, "float() argument must be a string or a real number, not '" || type_name(x) || "'")
@@ -10378,8 +10735,8 @@ ctor_dict: procedure = .int
   if na = 1 then do
     x = ast[base + 1]
     if kind_of(x) = 9 then call dict_update o, x
-    else if kind_of(x) = 17 & cls_find(ob_c[x % 2], 64) > 0 then do
-      it = iter_new(callz(getattr_obj(x, 64, 0)))
+    else if kind_of(x) = 17 & cls_find(ob_c[x % 2], 67) > 0 then do
+      it = iter_new(callz(getattr_obj(x, 67, 0)))
       if it = 0 then return 0
       do forever
         v = iter_next(it)
@@ -10450,6 +10807,7 @@ bcall_type: procedure = .int
   x = .int
   l = .int
   o = .int
+  ss = .string
   select
     when c = 19 then do
       if na < 1 | na > 3 then return nargs_err("slice", na, 1, 3)
@@ -10471,9 +10829,16 @@ bcall_type: procedure = .int
     when c = 3 then return ctor_int(base, na, nk)
     when c = 6 then do
       if na = 0 then return mkstr("")
-      if kind_of(ast[base + 1]) = 6 then return ast[base + 1]
-      return mkstr(str_of(ast[base + 1]))
+      x = ast[base + 1]
+      if kind_of(x) = 31 & (na >= 2 | nk > 0) then return meth_bytes(x, 22, base + 1, na - 1, nk)
+      if kind_of(x) = 6 & ob_c[x % 2] = 0 then return x
+      ss = str_of(x)
+      if unw > 0 then return 0
+      return mkstr(ss)
     end
+    when c = 83 then return ctor_bytes(0, base, na, nk)
+    when c = 84 then return ctor_bytes(1, base, na, nk)
+    when c = 85 then return ctor_complex(base, na, nk)
     when c = 4 then return ctor_float(base, na)
     when c = 5 then do
       if na = 0 then return 6
@@ -10485,7 +10850,7 @@ bcall_type: procedure = .int
     end
     when c = 8 then do
       if na = 0 then return mktuple(0)
-      if kind_of(ast[base + 1]) = 8 then return ast[base + 1]
+      if kind_of(ast[base + 1]) = 8 & ob_c[ast[base + 1] % 2] = 0 then return ast[base + 1]
       l = iter_list(ast[base + 1])
       if l = 0 then return 0
       return tup_of_list(l)
@@ -10658,6 +11023,7 @@ bcall: procedure = .int
     when bid = 52 then do
       return sl[ob_p[ast[base + 1] % 2] + 1]
     end
+    when bid = 53 then return sock_call(base, na)
     when bid = 50 then do
       if na >= 1 then return ast[base + 1]
       return 2
@@ -10668,7 +11034,7 @@ bcall: procedure = .int
     end
     otherwise nop
   end
-  if bid >= 53 then return bcall_mod(bid, base, na, nk)
+  if bid >= 54 then return bcall_mod(bid, base, na, nk)
   return raise_exc(38, "unsupported built-in function")
 
 /* ---------------------------------------------------------------------
@@ -10689,12 +11055,17 @@ bmeth: procedure = .int
     when k = 19 | k = 20 then return meth_gen(o, nid, base, na, nk)
     when k = 26 then return meth_file(o, nid, base, na, nk)
     when k = 29 then return meth_arr(o, nid, base, na, nk)
+    when k = 31 then return meth_bytes(o, nid, base, na, nk)
+    when k = 32 then return meth_complex(o, nid, base, na, nk)
+    when k = 16 then do
+      if nid = 176 then return cls_new(ob_x[o % 2], base, na, nk)
+    end
     when k = 22 then do
-      if nid = 100 | nid = 40 then do
+      if nid = 103 | nid = 42 then do
         k = newobj(22)
         ob_x[k % 2] = ob_x[o % 2]
         ob_y[k % 2] = ob_y[o % 2]
-        if nid = 100 then ob_y[k % 2] = ast[base + 1]
+        if nid = 103 then ob_y[k % 2] = ast[base + 1]
         else ob_x[k % 2] = ast[base + 1]
         return k
       end
@@ -10706,97 +11077,112 @@ bmeth: procedure = .int
 /* unbound call  type.method(receiver, args...) */
 bmeth_unbound: procedure = .int
   arg c = .int, nid = .int, base = .int, na = .int, nk = .int
-  if c = 9 & nid = 38 then return dict_fromkeys(base, na)
-  if c = 1 & nid = 171 & na >= 1 then do
-    if kind_of(ast[base + 1]) = 16 then return inst_new(ob_x[ast[base + 1] % 2])
+  if c = 9 & nid = 39 then return dict_fromkeys(base, na)
+  if nid = 176 then return cls_new(c, base, na, nk)
+  if nid = 38 & (c = 83 | c = 84) then do
+    if c = 84 then return bytes_fromhex(1, base, na)
+    return bytes_fromhex(0, base, na)
   end
+  if nid = 40 & c = 3 then return int_from_bytes(base, na, nk)
+  if nid = 39 & c \= 9 then return raise_exc(41, "type object '" || cl_name[c] || "' has no attribute 'fromkeys'")
   if na < 1 then return raise_exc(38, "descriptor '" || nid_name[nid] || "' of '" || cl_name[c] || "' object needs an argument")
   return bmeth(ast[base + 1], nid, base + 1, na - 1, nk)
 
 meth_common: procedure = .int
   arg o = .int, nid = .int, base = .int, na = .int, nk = .int
   r = .int
+  if nsub(o) = 0 then return meth_common0(o, nid, base, na, nk)
+  nat_skip = o
+  r = meth_common0(o, nid, base, na, nk)
+  nat_skip = 0
+  return r
+
+meth_common0: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  r = .int
+  rs = .string
+  if nid = 160 & kind_of(o) \= 17 then return 2
   if kind_of(o) = 17 then do
     select
-      when nid = 190 & na = 2 then do
+      when nid = 195 & na = 2 then do
         call setattr_raw o, nameid(ob_s[ast[base + 1] % 2]), ast[base + 2]
         if unw > 0 then return 0
         return 2
       end
-      when nid = 149 & na = 1 then return getattr_obj(o, nameid(ob_s[ast[base + 1] % 2]), 0)
-      when nid = 137 & na = 1 then return bi_delattr(o, ast[base + 1])
-      when nid = 156 then return 2
-      when nid = 173 & na = 1 then do
+      when nid = 153 & na = 1 then return getattr_obj(o, nameid(ob_s[ast[base + 1] % 2]), 0)
+      when nid = 141 & na = 1 then return bi_delattr(o, ast[base + 1])
+      when nid = 160 then return 2
+      when nid = 178 & na = 1 then do
         r = py_eq(o, ast[base + 1])
         if unw > 0 then return 0
         return mkbool(1 - r)
       end
-      when nid = 143 & na = 1 then do
+      when nid = 147 & na = 1 then do
         if o = ast[base + 1] then return 4
         return 10
       end
-      when nid = 154 then return mkint(o)
-      when nid = 180 | nid = 192 then return mkstr(inst_repr0(o))
+      when nid = 158 then return mkint(o)
+      when nid = 185 | nid = 197 then return mkstr(inst_repr0(o))
       otherwise nop
     end
   end
   select
-    when nid = 130 then return arith(1, o, ast[base + 1])
-    when nid = 193 then return arith(2, o, ast[base + 1])
-    when nid = 168 then return arith(3, o, ast[base + 1])
-    when nid = 194 then return arith(4, o, ast[base + 1])
-    when nid = 146 then return arith(5, o, ast[base + 1])
-    when nid = 166 then return arith(6, o, ast[base + 1])
-    when nid = 176 then return arith(7, o, ast[base + 1])
-    when nid = 162 then return arith(8, o, ast[base + 1])
-    when nid = 186 then return arith(9, o, ast[base + 1])
-    when nid = 131 then return arith(10, o, ast[base + 1])
-    when nid = 174 then return arith(11, o, ast[base + 1])
-    when nid = 195 then return arith(12, o, ast[base + 1])
-    when nid = 164 then return arith(13, o, ast[base + 1])
-    when nid = 178 then return arith(1, ast[base + 1], o)
-    when nid = 187 then return arith(2, ast[base + 1], o)
-    when nid = 183 then return arith(3, ast[base + 1], o)
-    when nid = 188 then return arith(4, ast[base + 1], o)
-    when nid = 181 then return arith(5, ast[base + 1], o)
-    when nid = 182 then return arith(6, ast[base + 1], o)
-    when nid = 185 then return arith(7, ast[base + 1], o)
-    when nid = 163 then return py_cmp(3, o, ast[base + 1])
-    when nid = 161 then return py_cmp(4, o, ast[base + 1])
-    when nid = 153 then return py_cmp(5, o, ast[base + 1])
-    when nid = 152 then return py_cmp(6, o, ast[base + 1])
-    when nid = 173 then do
+    when nid = 134 then return arith(1, o, ast[base + 1])
+    when nid = 198 then return arith(2, o, ast[base + 1])
+    when nid = 173 then return arith(3, o, ast[base + 1])
+    when nid = 199 then return arith(4, o, ast[base + 1])
+    when nid = 150 then return arith(5, o, ast[base + 1])
+    when nid = 171 then return arith(6, o, ast[base + 1])
+    when nid = 181 then return arith(7, o, ast[base + 1])
+    when nid = 166 then return arith(8, o, ast[base + 1])
+    when nid = 191 then return arith(9, o, ast[base + 1])
+    when nid = 135 then return arith(10, o, ast[base + 1])
+    when nid = 179 then return arith(11, o, ast[base + 1])
+    when nid = 200 then return arith(12, o, ast[base + 1])
+    when nid = 168 then return arith(13, o, ast[base + 1])
+    when nid = 183 then return arith(1, ast[base + 1], o)
+    when nid = 192 then return arith(2, ast[base + 1], o)
+    when nid = 188 then return arith(3, ast[base + 1], o)
+    when nid = 193 then return arith(4, ast[base + 1], o)
+    when nid = 186 then return arith(5, ast[base + 1], o)
+    when nid = 187 then return arith(6, ast[base + 1], o)
+    when nid = 190 then return arith(7, ast[base + 1], o)
+    when nid = 167 then return py_cmp(3, o, ast[base + 1])
+    when nid = 165 then return py_cmp(4, o, ast[base + 1])
+    when nid = 157 then return py_cmp(5, o, ast[base + 1])
+    when nid = 156 then return py_cmp(6, o, ast[base + 1])
+    when nid = 178 then do
       r = py_eq(o, ast[base + 1])
       if unw > 0 then return 0
       return mkbool(1 - r)
     end
-    when nid = 170 then return unary(1, o)
-    when nid = 175 then return unary(2, o)
-    when nid = 158 then return unary(3, o)
-    when nid = 129 then return bi_abs(o)
-    when nid = 191 then do
+    when nid = 175 then return unary(1, o)
+    when nid = 180 then return unary(2, o)
+    when nid = 162 then return unary(3, o)
+    when nid = 133 then return bi_abs(o)
+    when nid = 196 then do
       call setitem o, ast[base + 1], ast[base + 2]
       if unw > 0 then return 0
       return 2
     end
-    when nid = 138 then do
+    when nid = 142 then do
       call delitem o, ast[base + 1]
       if unw > 0 then return 0
       return 2
     end
-    when nid = 160 then return bi_len(o)
-    when nid = 192 then do
-      r = str_of(o)
+    when nid = 164 then return bi_len(o)
+    when nid = 197 then do
+      rs = str_of(o)
       if unw > 0 then return 0
-      return mkstr(r)
+      return mkstr(rs)
     end
-    when nid = 180 then do
-      r = repr_of(o)
+    when nid = 185 then do
+      rs = repr_of(o)
       if unw > 0 then return 0
-      return mkstr(r)
+      return mkstr(rs)
     end
-    when nid = 159 then return iter_new(o)
-    when nid = 172 then do
+    when nid = 163 then return iter_new(o)
+    when nid = 177 then do
       r = iter_next(o)
       if r = 0 then do
         if unw > 0 then return 0
@@ -10806,19 +11192,19 @@ meth_common: procedure = .int
       end
       return r
     end
-    when nid = 136 then do
+    when nid = 140 then do
       r = py_contains(o, ast[base + 1])
       if unw > 0 then return 0
       return mkbool(r)
     end
-    when nid = 151 then return getitem(o, ast[base + 1])
-    when nid = 143 then do
+    when nid = 155 then return getitem(o, ast[base + 1])
+    when nid = 147 then do
       r = py_eq(o, ast[base + 1])
       if unw > 0 then return 0
       return mkbool(r)
     end
-    when nid = 154 then return bi_hash(o)
-    when nid = 133 then do
+    when nid = 158 then return bi_hash(o)
+    when nid = 137 then do
       r = truthy(o)
       if unw > 0 then return 0
       return mkbool(r)
@@ -11156,7 +11542,7 @@ meth_str: procedure = .int
   x = .string
   s = ob_s[o % 2]
   select
-    when nid = 63 then do
+    when nid = 66 then do
       if na \= 1 then return nargs_err("join", na, 1, 1)
       l = iter_list(ast[base + 1])
       if l = 0 then return 0
@@ -11170,19 +11556,19 @@ meth_str: procedure = .int
       end
       return mkstr(t)
     end
-    when nid = 122 then return mkstr(upper(s))
-    when nid = 66 | nid = 12 then return mkstr(lower(s))
-    when nid = 111 | nid = 67 | nid = 97 then do
+    when nid = 126 then return mkstr(upper(s))
+    when nid = 69 | nid = 12 then return mkstr(lower(s))
+    when nid = 114 | nid = 70 | nid = 100 then do
       a = ""
       if na >= 1 then do
         if ast[base + 1] \= 2 then a = ob_s[ast[base + 1] % 2]
       end
       m = 3
-      if nid = 67 then m = 1
-      if nid = 97 then m = 2
+      if nid = 70 then m = 1
+      if nid = 100 then m = 2
       return mkstr(str_strip(s, a, m))
     end
-    when nid = 104 | nid = 96 then do
+    when nid = 107 | nid = 99 then do
       a = ""
       w = 0
       m = -1
@@ -11202,21 +11588,21 @@ meth_str: procedure = .int
           w = 1
         end
       end
-      if nid = 104 then do
+      if nid = 107 then do
         if w = 0 then return split_ws(s, m)
         return split_sep(s, a, m)
       end
       if w = 0 then return rsplit_ws(s, m)
       return rsplit_sep(s, a, m)
     end
-    when nid = 88 then do
+    when nid = 91 then do
       if na < 2 then return nargs_err("replace", na, 2, 3)
       if kind_of(ast[base + 1]) \= 6 | kind_of(ast[base + 2]) \= 6 then return raise_exc(38, "replace() argument must be str")
       m = -1
       if na >= 3 then m = ival(ast[base + 3])
       return mkstr(str_replace(s, ob_s[ast[base + 1] % 2], ob_s[ast[base + 2] % 2], m))
     end
-    when nid = 34 | nid = 91 | nid = 42 | nid = 92 | nid = 20 then do
+    when nid = 34 | nid = 94 | nid = 45 | nid = 95 | nid = 20 then do
       if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
       if kind_of(ast[base + 1]) \= 6 then return raise_exc(38, "must be str, not " || type_name(ast[base + 1]))
       a = ob_s[ast[base + 1] % 2]
@@ -11225,7 +11611,7 @@ meth_str: procedure = .int
       en = sl_n
       if st > en | st > length(s) then do
         if nid = 20 then return mkint(0)
-        if nid = 34 | nid = 91 then return mkint(-1)
+        if nid = 34 | nid = 94 then return mkint(-1)
         return raise_exc(36, "substring not found")
       end
       t = substr(s, st + 1, en - st)
@@ -11234,18 +11620,18 @@ meth_str: procedure = .int
         return mkint(countstr(a, t))
       end
       if a == "" then do
-        if nid = 91 | nid = 92 then return mkint(en)
+        if nid = 94 | nid = 95 then return mkint(en)
         return mkint(st)
       end
-      if nid = 34 | nid = 42 then p = pos(a, t)
+      if nid = 34 | nid = 45 then p = pos(a, t)
       else p = lastpos(a, t)
       if p = 0 then do
-        if nid = 34 | nid = 91 then return mkint(-1)
+        if nid = 34 | nid = 94 then return mkint(-1)
         return raise_exc(36, "substring not found")
       end
       return mkint(p - 1 + st)
     end
-    when nid = 107 | nid = 30 then do
+    when nid = 110 | nid = 30 then do
       if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
       if slice_args(length(s), base, na, 2) = 0 then return 0
       st = sl_a
@@ -11268,7 +11654,7 @@ meth_str: procedure = .int
         else a = ob_s[sl[ob_p[v % 2] + j] % 2]
         n = length(a)
         if n <= length(t) then do
-          if nid = 107 then do
+          if nid = 110 then do
             if left(t, n) == a then return 4
           end
           else do
@@ -11279,33 +11665,33 @@ meth_str: procedure = .int
       end
       return 6
     end
-    when nid = 47 then return mkbool(str_isclass(s, 1))
-    when nid = 50 | nid = 49 | nid = 54 then return mkbool(str_isclass(s, 2))
-    when nid = 46 then return mkbool(str_isclass(s, 3))
-    when nid = 55 then return mkbool(str_isclass(s, 4))
-    when nid = 52 then return mkbool(str_isclass(s, 5))
-    when nid = 59 then do
+    when nid = 50 then return mkbool(str_isclass(s, 1))
+    when nid = 53 | nid = 52 | nid = 57 then return mkbool(str_isclass(s, 2))
+    when nid = 49 then return mkbool(str_isclass(s, 3))
+    when nid = 58 then return mkbool(str_isclass(s, 4))
+    when nid = 55 then return mkbool(str_isclass(s, 5))
+    when nid = 62 then do
       if upper(s) == s & lower(s) \== s then return 4
       return 6
     end
-    when nid = 53 then do
+    when nid = 56 then do
       if lower(s) == s & upper(s) \== s then return 4
       return 6
     end
-    when nid = 58 then do
+    when nid = 61 then do
       if str_title(s) == s & upper(s) \== lower(s) then return 4
       return 6
     end
-    when nid = 48 then do
+    when nid = 51 then do
       do i = 1 to length(s)
         if c2d(substr(s, i, 1)) >= 128 then return 6
       end
       return 4
     end
     when nid = 11 then return mkstr(upper(left(s, 1)) || lower(substr(s, 2)))
-    when nid = 116 then return mkstr(str_title(s))
-    when nid = 113 then return mkstr(str_swapcase(s))
-    when nid = 13 | nid = 65 | nid = 93 then do
+    when nid = 119 then return mkstr(str_title(s))
+    when nid = 116 then return mkstr(str_swapcase(s))
+    when nid = 13 | nid = 68 | nid = 96 then do
       if na < 1 then return nargs_err(nid_name[nid], na, 1, 2)
       if chk_int(ast[base + 1]) = 0 then return 0
       w = ival(ast[base + 1])
@@ -11314,12 +11700,12 @@ meth_str: procedure = .int
       n = length(s)
       if w <= n then return o
       m = w - n
-      if nid = 65 then return mkstr(s || copies(f, m))
-      if nid = 93 then return mkstr(copies(f, m) || s)
+      if nid = 68 then return mkstr(s || copies(f, m))
+      if nid = 96 then return mkstr(copies(f, m) || s)
       i = m % 2 + (m // 2) * (w // 2)
       return mkstr(copies(f, i) || s || copies(f, m - i))
     end
-    when nid = 128 then do
+    when nid = 132 then do
       if chk_int(ast[base + 1]) = 0 then return 0
       w = ival(ast[base + 1])
       n = length(s)
@@ -11327,16 +11713,16 @@ meth_str: procedure = .int
       if left(s, 1) == "-" | left(s, 1) == "+" then return mkstr(left(s, 1) || copies("0", w - n) || substr(s, 2))
       return mkstr(copies("0", w - n) || s)
     end
-    when nid = 75 | nid = 95 then do
+    when nid = 78 | nid = 98 then do
       if na \= 1 then return nargs_err(nid_name[nid], na, 1, 1)
       if kind_of(ast[base + 1]) \= 6 then return raise_exc(38, "must be str, not " || type_name(ast[base + 1]))
       a = ob_s[ast[base + 1] % 2]
       if a == "" then return raise_exc(36, "empty separator")
-      if nid = 75 then p = pos(a, s)
+      if nid = 78 then p = pos(a, s)
       else p = lastpos(a, s)
       v = mktuple(3)
       if p = 0 then do
-        if nid = 75 then do
+        if nid = 78 then do
           sl[ob_p[v % 2]] = o
           sl[ob_p[v % 2] + 1] = mkstr("")
           sl[ob_p[v % 2] + 2] = mkstr("")
@@ -11354,7 +11740,7 @@ meth_str: procedure = .int
       return v
     end
     when nid = 37 then return fmt_format(s, base, na, nk)
-    when nid = 105 then do
+    when nid = 108 then do
       l = mklist(8)
       m = 0
       if na >= 1 then m = truthy(ast[base + 1])
@@ -11377,15 +11763,22 @@ meth_str: procedure = .int
       end
       return l
     end
-    when nid = 29 | nid = 22 then return o
-    when nid = 86 then do
+    when nid = 29 then do
+      a = enc_arg(base, na, nk, 1)
+      if unw > 0 then return 0
+      t = str_encode(s, a, err_arg(base, na, nk, 2))
+      if unw > 0 then return 0
+      return mkbytes(t)
+    end
+    when nid = 22 then return o
+    when nid = 89 then do
       a = ob_s[ast[base + 1] % 2]
       if length(a) <= length(s) then do
         if left(s, length(a)) == a then return mkstr(substr(s, length(a) + 1))
       end
       return o
     end
-    when nid = 87 then do
+    when nid = 90 then do
       a = ob_s[ast[base + 1] % 2]
       if length(a) <= length(s) & length(a) > 0 then do
         if right(s, length(a)) == a then return mkstr(left(s, length(s) - length(a)))
@@ -11415,7 +11808,7 @@ meth_str: procedure = .int
       end
       return mkstr(t)
     end
-    when nid = 118 then return o
+    when nid = 122 then return o
     otherwise nop
   end
   return meth_common(o, nid, base, na, nk)
@@ -11440,12 +11833,21 @@ meth_list: procedure = .int
   t = .int
   ix = o % 2
   select
+    when nid = 160 then do
+      ob_n[ix] = 0
+      if na >= 1 then do
+        l = iter_list(ast[base + 1])
+        if l = 0 then return 0
+        call list_extend_from o, l
+      end
+      return 2
+    end
     when nid = 4 then do
       if na \= 1 then return nargs_err("append", na, 1, 1)
       call list_append o, ast[base + 1]
       return 2
     end
-    when nid = 76 then do
+    when nid = 79 then do
       n = ob_n[ix]
       if n = 0 then return raise_exc(34, "pop from empty list")
       i = n - 1
@@ -11470,7 +11872,7 @@ meth_list: procedure = .int
       call list_extend_from o, l
       return 2
     end
-    when nid = 43 then do
+    when nid = 46 then do
       if na \= 2 then return nargs_err("insert", na, 2, 2)
       if chk_int(ast[base + 1]) = 0 then return 0
       n = ob_n[ix]
@@ -11487,7 +11889,7 @@ meth_list: procedure = .int
       ob_n[ix] = n + 1
       return 2
     end
-    when nid = 85 then do
+    when nid = 88 then do
       if na \= 1 then return nargs_err("remove", na, 1, 1)
       n = ob_n[ix]
       p = ob_p[ix]
@@ -11504,13 +11906,13 @@ meth_list: procedure = .int
       end
       return raise_exc(36, "list.remove(x): x not in list")
     end
-    when nid = 42 | nid = 20 then do
+    when nid = 45 | nid = 20 then do
       if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
       n = ob_n[ix]
       p = ob_p[ix]
       st = 0
       en = n
-      if nid = 42 then do
+      if nid = 45 then do
         if slice_args(n, base, na, 2) = 0 then return 0
         st = sl_a
         en = sl_n
@@ -11520,14 +11922,14 @@ meth_list: procedure = .int
         r = py_eq(sl[p + i], ast[base + 1])
         if unw > 0 then return 0
         if r = 1 then do
-          if nid = 42 then return mkint(i)
+          if nid = 45 then return mkint(i)
           j = j + 1
         end
       end
       if nid = 20 then return mkint(j)
       return raise_exc(36, repr_of(ast[base + 1]) || " is not in list")
     end
-    when nid = 103 then do
+    when nid = 106 then do
       keyf = kwarg(base, na, nk, "key")
       if keyf = 2 then keyf = 0
       rev = 0
@@ -11536,7 +11938,7 @@ meth_list: procedure = .int
       if sort_list(o, keyf, rev) = 0 then return 0
       return 2
     end
-    when nid = 90 then do
+    when nid = 93 then do
       n = ob_n[ix]
       p = ob_p[ix]
       i = 0
@@ -11555,7 +11957,7 @@ meth_list: procedure = .int
       ob_n[ix] = 0
       return 2
     end
-    when nid = 78 then do
+    when nid = 81 then do
       n = ob_n[ix]
       if n = 0 then return raise_exc(34, "pop from an empty deque")
       p = ob_p[ix]
@@ -11590,14 +11992,14 @@ meth_tuple: procedure = .int
   r = .int
   n = ob_n[o % 2]
   p = ob_p[o % 2]
-  if nid = 42 | nid = 20 then do
+  if nid = 45 | nid = 20 then do
     if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
     j = 0
     do i = 0 to n - 1
       r = py_eq(sl[p + i], ast[base + 1])
       if unw > 0 then return 0
       if r = 1 then do
-        if nid = 42 then return mkint(i)
+        if nid = 45 then return mkint(i)
         j = j + 1
       end
     end
@@ -11665,22 +12067,32 @@ meth_dict: procedure = .int
   a = .int
   d = ob_x[o % 2]
   select
-    when nid = 39 then do
+    when nid = 160 then do
+      call dict_clear d
+      if na >= 1 then do
+        if dict_fill(o, ast[base + 1]) = 0 then return 0
+      end
+      do j = 1 to nk
+        call dset o, mkstr(asn[base + na + j]), ast[base + na + j]
+      end
+      return 2
+    end
+    when nid = 41 then do
       if na < 1 | na > 2 then return nargs_err("get", na, 1, 2)
       e = dict_find(d, hashkey(ast[base + 1]))
       if e > 0 then return de_val[e]
       if na = 2 then return ast[base + 2]
       return 2
     end
-    when nid = 62 | nid = 64 | nid = 124 then do
+    when nid = 65 | nid = 67 | nid = 128 then do
       t = newobj(30)
       ob_x[t % 2] = o
-      if nid = 64 then ob_n[t % 2] = 1
-      else if nid = 124 then ob_n[t % 2] = 2
+      if nid = 67 then ob_n[t % 2] = 1
+      else if nid = 128 then ob_n[t % 2] = 2
       else ob_n[t % 2] = 3
       return t
     end
-    when nid = 99 then do
+    when nid = 102 then do
       if na < 1 | na > 2 then return nargs_err("setdefault", na, 1, 2)
       e = dict_find(d, hashkey(ast[base + 1]))
       if e > 0 then return de_val[e]
@@ -11689,7 +12101,7 @@ meth_dict: procedure = .int
       call dset o, ast[base + 1], v
       return v
     end
-    when nid = 76 then do
+    when nid = 79 then do
       if na < 1 | na > 2 then return nargs_err("pop", na, 1, 2)
       e = dict_find(d, hashkey(ast[base + 1]))
       if e = 0 then do
@@ -11700,7 +12112,7 @@ meth_dict: procedure = .int
       r = dict_del(d, de_hk[e])
       return v
     end
-    when nid = 77 then do
+    when nid = 80 then do
       last = 0
       e = dd_head[d]
       do while e > 0
@@ -11714,7 +12126,7 @@ meth_dict: procedure = .int
       r = dict_del(d, de_hk[last])
       return t
     end
-    when nid = 121 then do
+    when nid = 125 then do
       if na >= 1 then do
         if dict_fill(o, ast[base + 1]) = 0 then return 0
       end
@@ -11732,8 +12144,8 @@ meth_dict: procedure = .int
       call dict_clear d
       return 2
     end
-    when nid = 71 then do
-      l = iter_list(meth_dict(o, 62, base, 0, 0))
+    when nid = 74 then do
+      l = iter_list(meth_dict(o, 65, base, 0, 0))
       /* stable sort by count, descending */
       a = newobj(13)
       ob_x[a % 2] = 52
@@ -11768,6 +12180,17 @@ meth_set: procedure = .int
   ok = .int
   d = ob_x[o % 2]
   select
+    when nid = 160 then do
+      call dict_clear d
+      if na >= 1 then do
+        l = iter_list(ast[base + 1])
+        if l = 0 then return 0
+        do i = 0 to ob_n[l % 2] - 1
+          call dset o, sl[ob_p[l % 2] + i], 4
+        end
+      end
+      return 2
+    end
     when nid = 1 then do
       if na \= 1 then return nargs_err("add", na, 1, 1)
       call dset o, ast[base + 1], 4
@@ -11777,12 +12200,12 @@ meth_set: procedure = .int
       r = dict_del(d, hashkey(ast[base + 1]))
       return 2
     end
-    when nid = 85 then do
+    when nid = 88 then do
       r = dict_del(d, hashkey(ast[base + 1]))
       if r = 0 then return raise_key(ast[base + 1])
       return 2
     end
-    when nid = 76 then do
+    when nid = 79 then do
       e = de_live_from(dd_head[d])
       if e = 0 then return raise_exc(35, "pop from an empty set")
       v = de_key[e]
@@ -11796,7 +12219,7 @@ meth_set: procedure = .int
       call dict_clear d
       return 2
     end
-    when nid = 120 | nid = 44 | nid = 24 | nid = 114 then do
+    when nid = 124 | nid = 47 | nid = 24 | nid = 117 then do
       t = dict_copy(o)
       do i = 1 to na
         x = ast[base + i]
@@ -11808,14 +12231,14 @@ meth_set: procedure = .int
             call dset x, sl[ob_p[l % 2] + j], 4
           end
         end
-        if nid = 120 then t = set_op(11, t, x)
-        else if nid = 44 then t = set_op(10, t, x)
+        if nid = 124 then t = set_op(11, t, x)
+        else if nid = 47 then t = set_op(10, t, x)
         else if nid = 24 then t = set_op(2, t, x)
         else t = set_op(12, t, x)
       end
       return t
     end
-    when nid = 121 | nid = 45 | nid = 25 then do
+    when nid = 125 | nid = 48 | nid = 25 then do
       do i = 1 to na
         x = ast[base + i]
         if kind_of(x) \= 10 then do
@@ -11826,14 +12249,14 @@ meth_set: procedure = .int
             call dset x, sl[ob_p[l % 2] + j], 4
           end
         end
-        if nid = 121 then t = set_op(11, o, x)
-        else if nid = 45 then t = set_op(10, o, x)
+        if nid = 125 then t = set_op(11, o, x)
+        else if nid = 48 then t = set_op(10, o, x)
         else t = set_op(2, o, x)
         ob_x[o % 2] = ob_x[t % 2]
       end
       return 2
     end
-    when nid = 56 | nid = 57 | nid = 51 then do
+    when nid = 59 | nid = 60 | nid = 54 then do
       x = ast[base + 1]
       if kind_of(x) \= 10 then do
         l = iter_list(x)
@@ -11843,8 +12266,8 @@ meth_set: procedure = .int
           call dset x, sl[ob_p[l % 2] + j], 4
         end
       end
-      if nid = 56 then return set_cmp(4, o, x)
-      if nid = 57 then return set_cmp(6, o, x)
+      if nid = 59 then return set_cmp(4, o, x)
+      if nid = 60 then return set_cmp(6, o, x)
       t = set_op(10, o, x)
       if dd_n[ob_x[t % 2]] = 0 then return 4
       return 6
@@ -11866,14 +12289,15 @@ meth_num: procedure = .int
     if s == "0" then return mkint(0)
     return mkint(length(radix_str(s, 2)))
   end
-  if nid = 60 then do
+  if nid = 63 then do
     if kind_of(o) \= 5 then return 4
     f = ob_f[o % 2]
     if f = rxfloat..floor(f) & rxfloat..fabs(f) < 1.0e300 then return 4
     return 6
   end
   if nid = 18 then return o
-  if nid = 94 & kind_of(o) = 5 then do
+  if nid = 121 & kind_of(o) \= 5 then return int_to_bytes(o, base, na, nk)
+  if nid = 97 & kind_of(o) = 5 then do
     if na = 0 then return o
     return mkfloat(np_round1(ob_f[o % 2], ival(ast[base + 1])))
   end
@@ -11883,8 +12307,8 @@ stop_exc: procedure = .int
   arg o = .int
   e = .int
   e = exc_new0(45)
-  if kind_of(o) = 19 then call inst_set e, 123, gn_ret[ob_x[o % 2]]
-  else call inst_set e, 123, 2
+  if kind_of(o) = 19 then call inst_set e, 127, gn_ret[ob_x[o % 2]]
+  else call inst_set e, 127, 2
   return e
 
 meth_gen: procedure = .int
@@ -11892,7 +12316,7 @@ meth_gen: procedure = .int
   v = .int
   g = .int
   e = .int
-  if nid = 98 then do
+  if nid = 101 then do
     if kind_of(o) \= 19 then return no_attr(o, nid)
     v = gen_resume(ob_x[o % 2], ast[base + 1])
     if v = 0 then do
@@ -11903,7 +12327,7 @@ meth_gen: procedure = .int
     end
     return v
   end
-  if nid = 115 & kind_of(o) = 19 then do
+  if nid = 118 & kind_of(o) = 19 then do
     g = ob_x[o % 2]
     e = ast[base + 1]
     if kind_of(e) = 16 then e = exc_new0(ob_x[e % 2])
@@ -12111,15 +12535,15 @@ meth_file: procedure = .int
   e = .int
   id = ob_x[o % 2]
   select
-    when nid = 126 then do
+    when nid = 130 then do
       if na \= 1 then return nargs_err("write", na, 1, 1)
       if kind_of(ast[base + 1]) \= 6 then return raise_exc(38, "write() argument must be str, not " || type_name(ast[base + 1]))
       call file_write o, ob_s[ast[base + 1] % 2]
       if unw > 0 then return 0
       return mkint(length(ob_s[ast[base + 1] % 2]))
     end
-    when nid = 82 then return file_readline(o, 0)
-    when nid = 81 then do
+    when nid = 85 then return file_readline(o, 0)
+    when nid = 84 then do
       if ob_c[o % 2] = 1 then return raise_exc(36, "I/O operation on closed file.")
       s = ""
       if id = 3 then do
@@ -12146,7 +12570,7 @@ meth_file: procedure = .int
       fl_pos[id] = fl_pos[id] + length(s)
       return mkstr(s)
     end
-    when nid = 83 then do
+    when nid = 86 then do
       l = mklist(8)
       do forever
         v = file_readline(o, 1)
@@ -12156,7 +12580,7 @@ meth_file: procedure = .int
       if unw > 0 then return 0
       return l
     end
-    when nid = 127 then do
+    when nid = 131 then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
       do forever
@@ -12175,8 +12599,8 @@ meth_file: procedure = .int
       if id = 1 then call flush_out
       return 2
     end
-    when nid = 142 then return o
-    when nid = 144 then do
+    when nid = 146 then return o
+    when nid = 148 then do
       call file_close o
       return 6
     end
@@ -12366,9 +12790,14 @@ deep_copy: procedure = .int
     end
     return o
   end
+  if k = 31 then do
+    if ob_y[x % 2] = 1 then return mkbytearr(ob_s[x % 2])
+    return x
+  end
   if k = 9 | k = 10 then do
     o = dict_new(k)
     ob_y[o % 2] = ob_y[x % 2]
+    ob_c[o % 2] = ob_c[x % 2]
     e = dd_head[ob_x[x % 2]]
     do while e > 0
       if de_live[e] = 1 then do
@@ -12413,11 +12842,11 @@ bcall_mod: procedure = .int
   a = .int
   b = .int
   st = .int
-  if bid >= 135 then return bcall_np(bid, base, na, nk)
-  if bid >= 119 & bid <= 134 then return bcall_os(bid, base, na, nk)
-  if bid <= 89 & na >= 1 then do
+  if bid >= 136 then return bcall_np(bid, base, na, nk)
+  if bid >= 120 & bid <= 135 then return bcall_os(bid, base, na, nk)
+  if bid <= 90 & na >= 1 then do
     /* functions of one or two floats */
-    if bid <= 73 | bid = 72 then do
+    if bid <= 74 | bid = 73 then do
       x = mf(ast[base + 1])
       if unw > 0 then return 0
       if na >= 2 then do
@@ -12427,11 +12856,11 @@ bcall_mod: procedure = .int
     end
   end
   select
-    when bid = 53 then do
+    when bid = 54 then do
       if x < 0.0 then return domain_err()
       return mkfloat(rxfloat..sqrt(x))
     end
-    when bid = 54 | bid = 55 | bid = 56 then do
+    when bid = 55 | bid = 56 | bid = 57 then do
       v = ast[base + 1]
       if numkind(v) = 1 | numkind(v) = 2 then return mkint(ival(v))
       if numkind(v) \= 3 then do
@@ -12443,51 +12872,51 @@ bcall_mod: procedure = .int
       end
       if x \= x then return raise_exc(36, "cannot convert float NaN to integer")
       if finf(x) \= 0 then return raise_exc(31, "cannot convert float infinity to integer")
-      if bid = 54 then return float_to_int(rxfloat..floor(x))
-      if bid = 55 then return float_to_int(rxfloat..ceil(x))
+      if bid = 55 then return float_to_int(rxfloat..floor(x))
+      if bid = 56 then return float_to_int(rxfloat..ceil(x))
       return float_to_int(rxfloat..trunc(x))
     end
-    when bid = 57 then return mkfloat(rxfloat..fabs(x))
-    when bid = 58 then do
+    when bid = 58 then return mkfloat(rxfloat..fabs(x))
+    when bid = 59 then do
       if x = 0.0 & y < 0.0 then return domain_err()
       if x < 0.0 & y \= rxfloat..floor(y) then return domain_err()
       return mkfloat(rxfloat..pow(x, y))
     end
-    when bid = 59 then return mkfloat(rxfloat..sin(x))
-    when bid = 60 then return mkfloat(rxfloat..cos(x))
-    when bid = 61 then return mkfloat(rxfloat..tan(x))
-    when bid = 62 then do
+    when bid = 60 then return mkfloat(rxfloat..sin(x))
+    when bid = 61 then return mkfloat(rxfloat..cos(x))
+    when bid = 62 then return mkfloat(rxfloat..tan(x))
+    when bid = 63 then do
       if x > 1.0 | x < -1.0 then return domain_err()
       return mkfloat(rxfloat..asin(x))
     end
-    when bid = 63 then do
+    when bid = 64 then do
       if x > 1.0 | x < -1.0 then return domain_err()
       return mkfloat(rxfloat..acos(x))
     end
-    when bid = 64 then return mkfloat(rxfloat..atan(x))
-    when bid = 65 then return mkfloat(rxfloat..atan2(x, y))
-    when bid = 66 then return mkfloat(rxfloat..sinh(x))
-    when bid = 67 then return mkfloat(rxfloat..cosh(x))
-    when bid = 73 then return mkfloat(rxfloat..tanh(x))
-    when bid = 68 then do
+    when bid = 65 then return mkfloat(rxfloat..atan(x))
+    when bid = 66 then return mkfloat(rxfloat..atan2(x, y))
+    when bid = 67 then return mkfloat(rxfloat..sinh(x))
+    when bid = 68 then return mkfloat(rxfloat..cosh(x))
+    when bid = 74 then return mkfloat(rxfloat..tanh(x))
+    when bid = 69 then do
       z = rxfloat..exp(x)
       if finf(z) = 1 & x < 1000000.0 then return raise_exc(31, "math range error")
       return mkfloat(z)
     end
-    when bid = 69 | bid = 70 | bid = 71 then do
+    when bid = 70 | bid = 71 | bid = 72 then do
       if numkind(ast[base + 1]) = 2 then do
         /* huge integers: use the digit count */
         s = ob_s[ast[base + 1] % 2]
         if left(s, 1) == "-" then return domain_err()
         z = rxfloat..log10(parse_flt("0." || s)) + (length(s) as .float)
-        if bid = 70 then return mkfloat(z)
-        if bid = 71 then return mkfloat(z / rxfloat..log10(2.0))
+        if bid = 71 then return mkfloat(z)
+        if bid = 72 then return mkfloat(z / rxfloat..log10(2.0))
         z = z * 2.302585092994046
       end
       else do
         if x <= 0.0 then return domain_err()
-        if bid = 70 then return mkfloat(rxfloat..log10(x))
-        if bid = 71 then return mkfloat(rxfloat..log2(x))
+        if bid = 71 then return mkfloat(rxfloat..log10(x))
+        if bid = 72 then return mkfloat(rxfloat..log2(x))
         z = rxfloat..log(x)
       end
       if na >= 2 then do
@@ -12496,49 +12925,49 @@ bcall_mod: procedure = .int
       end
       return mkfloat(z)
     end
-    when bid = 72 then return mkfloat(rxfloat..hypot(x, y))
-    when bid = 74 then do
+    when bid = 73 then return mkfloat(rxfloat..hypot(x, y))
+    when bid = 75 then do
       x = mf(ast[base + 1])
       if x \= x then return 4
       return 6
     end
-    when bid = 75 then do
+    when bid = 76 then do
       x = mf(ast[base + 1])
       if finf(x) \= 0 then return 4
       return 6
     end
-    when bid = 76 then do
+    when bid = 77 then do
       x = mf(ast[base + 1])
       if x \= x then return 6
       if finf(x) \= 0 then return 6
       return 4
     end
-    when bid = 77 then do
+    when bid = 78 then do
       x = mf(ast[base + 1])
       return mkfloat(x * 180.0 / 3.141592653589793)
     end
-    when bid = 78 then do
+    when bid = 79 then do
       x = mf(ast[base + 1])
       return mkfloat(x * 3.141592653589793 / 180.0)
     end
-    when bid = 79 then do
+    when bid = 80 then do
       x = mf(ast[base + 1])
       y = mf(ast[base + 2])
       x = rxfloat..fabs(x)
       if y < 0.0 | fl_negzero(y) = 1 then x = 0.0 - x
       return mkfloat(x)
     end
-    when bid = 80 then do
+    when bid = 81 then do
       x = mf(ast[base + 1])
       y = mf(ast[base + 2])
       if y = 0.0 then return domain_err()
       return mkfloat(rxfloat..fmod(x, y))
     end
-    when bid = 81 then do
+    when bid = 82 then do
       x = mf(ast[base + 1])
       return mkfloat(rxfloat..cbrt(x))
     end
-    when bid = 82 then do
+    when bid = 83 then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
       z = 0.0
@@ -12550,7 +12979,7 @@ bcall_mod: procedure = .int
       if unw > 0 then return 0
       return mkfloat(z)
     end
-    when bid = 83 then do
+    when bid = 84 then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
       acc = mkint(1)
@@ -12564,13 +12993,13 @@ bcall_mod: procedure = .int
       if unw > 0 then return 0
       return acc
     end
-    when bid = 84 | bid = 85 then do
+    when bid = 85 | bid = 86 then do
       acc = mkint(0)
-      if bid = 85 then acc = mkint(1)
+      if bid = 86 then acc = mkint(1)
       do i = 1 to na
         v = ast[base + i]
         if numkind(v) \= 1 & numkind(v) \= 2 then return raise_exc(38, "'" || type_name(v) || "' object cannot be interpreted as an integer")
-        if bid = 84 then acc = gcd2(acc, v)
+        if bid = 85 then acc = gcd2(acc, v)
         else do
           if num_str(acc) == "0" | num_str(v) == "0" then acc = mkint(0)
           else do
@@ -12581,7 +13010,7 @@ bcall_mod: procedure = .int
       end
       return acc
     end
-    when bid = 86 then do
+    when bid = 87 then do
       v = ast[base + 1]
       if numkind(v) \= 1 then return raise_exc(38, "'" || type_name(v) || "' object cannot be interpreted as an integer")
       n = ival(v)
@@ -12592,7 +13021,7 @@ bcall_mod: procedure = .int
       end
       return acc
     end
-    when bid = 87 then do
+    when bid = 88 then do
       v = ast[base + 1]
       if numkind(v) \= 1 & numkind(v) \= 2 then return raise_exc(38, "'" || type_name(v) || "' object cannot be interpreted as an integer")
       if left(num_str(v), 1) == "-" then return raise_exc(36, "isqrt() argument must be nonnegative")
@@ -12615,35 +13044,35 @@ bcall_mod: procedure = .int
       end
       return a
     end
-    when bid = 88 | bid = 89 then do
+    when bid = 89 | bid = 90 then do
       if numkind(ast[base + 1]) \= 1 | numkind(ast[base + 2]) \= 1 then return raise_exc(38, "comb() arguments must be integers")
       n = ival(ast[base + 1])
       i = ival(ast[base + 2])
       if n < 0 | i < 0 then return raise_exc(36, "n must be a non-negative integer")
       if i > n then return mkint(0)
-      if bid = 88 & i > n - i then i = n - i
+      if bid = 89 & i > n - i then i = n - i
       acc = mkint(1)
       do w = 0 to i - 1
         acc = arith(3, acc, mkint(n - w))
-        if bid = 88 then acc = arith(5, acc, mkint(w + 1))
+        if bid = 89 then acc = arith(5, acc, mkint(w + 1))
       end
       return acc
     end
-    when bid = 90 then do
+    when bid = 91 then do
       if na >= 1 & numkind(ast[base + 1]) = 1 then rnd_s = (abs(ival(ast[base + 1])) // 2147483646) + 1
       else if na >= 1 then rnd_s = (strhash(str_of(ast[base + 1])) // 2147483646) + 1
       else rnd_s = (time("US") as .int) // 2147483646 + 1
       return 2
     end
-    when bid = 91 then return mkfloat(rnd_float())
-    when bid = 92 then do
+    when bid = 92 then return mkfloat(rnd_float())
+    when bid = 93 then do
       if chk_int(ast[base + 1]) = 0 | chk_int(ast[base + 2]) = 0 then return 0
       a = ival(ast[base + 1])
       b = ival(ast[base + 2])
       if b < a then return raise_exc(36, "empty range for randrange() (" || a || ", " || (b + 1) || ", " || (b + 1 - a) || ")")
       return mkint(a + rnd_below(b - a + 1))
     end
-    when bid = 93 then do
+    when bid = 94 then do
       if chk_int(ast[base + 1]) = 0 then return 0
       a = 0
       st = 1
@@ -12659,19 +13088,19 @@ bcall_mod: procedure = .int
       if n <= 0 then return raise_exc(36, "empty range in randrange(" || a || ", " || b || ")")
       return mkint(a + st * rnd_below(n))
     end
-    when bid = 94 then do
+    when bid = 95 then do
       x = mf(ast[base + 1])
       y = mf(ast[base + 2])
       return mkfloat(x + (y - x) * rnd_float())
     end
-    when bid = 95 then do
+    when bid = 96 then do
       l = iter_list(ast[base + 1])
       if l = 0 then return 0
       n = ob_n[l % 2]
       if n = 0 then return raise_exc(34, "Cannot choose from an empty sequence")
       return sl[ob_p[l % 2] + rnd_below(n)]
     end
-    when bid = 96 then do
+    when bid = 97 then do
       l = ast[base + 1]
       if kind_of(l) \= 7 then return raise_exc(38, "shuffle() requires a list")
       n = ob_n[l % 2]
@@ -12683,7 +13112,7 @@ bcall_mod: procedure = .int
       end
       return 2
     end
-    when bid = 97 then do
+    when bid = 98 then do
       l = iter_list(ast[base + 1])
       if l = 0 then return 0
       if chk_int(ast[base + 2]) = 0 then return 0
@@ -12702,29 +13131,29 @@ bcall_mod: procedure = .int
       end
       return o
     end
-    when bid = 98 then do
+    when bid = 99 then do
       z = ((date("UN") as .int) * 86400) as .float
       z = z + ((time("US") as .int) as .float) / 1000000.0
       return mkfloat(z)
     end
-    when bid = 99 | bid = 100 | bid = 101 then do
+    when bid = 100 | bid = 101 | bid = 102 then do
       z = ((time("US") as .int) as .float) / 1000000.0
       return mkfloat(z)
     end
-    when bid = 102 then return 2
-    when bid = 103 then do
+    when bid = 103 then return 2
+    when bid = 104 then do
       o = mkiter(15, 0, 0)
       ob_c[o % 2] = tup_from_ast(base + 1, base + na)
       return o
     end
-    when bid = 104 then do
+    when bid = 105 then do
       a = 0
       b = 1
       if na >= 1 then a = ival(ast[base + 1])
       if na >= 2 then b = ival(ast[base + 2])
       return mkiter(16, a, b)
     end
-    when bid = 105 then do
+    when bid = 106 then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
       a = 0
@@ -12745,14 +13174,14 @@ bcall_mod: procedure = .int
       sl[ob_p[o % 2] + 2] = 0
       return o
     end
-    when bid = 106 then do
+    when bid = 107 then do
       it = iter_new(ast[base + 2])
       if it = 0 then return 0
       o = mkiter(17, ast[base + 1], it)
       ob_c[o % 2] = 0
       return o
     end
-    when bid = 107 then do
+    when bid = 108 then do
       v = kwarg(base, na, nk, "repeat")
       if v \= 0 then do
         l = iter_list(ast[base + 1])
@@ -12766,16 +13195,16 @@ bcall_mod: procedure = .int
       end
       return it_product(base, na)
     end
-    when bid = 108 | bid = 109 then do
+    when bid = 109 | bid = 110 then do
       l = iter_list(ast[base + 1])
       if l = 0 then return 0
       n = ob_n[l % 2]
       b = n
       if na >= 2 then b = ival(ast[base + 2])
-      if bid = 108 then return it_combin(1, l, b)
+      if bid = 109 then return it_combin(1, l, b)
       return it_combin(2, l, b)
     end
-    when bid = 110 then do
+    when bid = 111 then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
       o = mklist(8)
@@ -12797,7 +13226,7 @@ bcall_mod: procedure = .int
       if unw > 0 then return 0
       return mkiter(1, o, 0)
     end
-    when bid = 111 then do
+    when bid = 112 then do
       if na < 2 then return nargs_err("reduce", na, 2, 3)
       it = iter_new(ast[base + 2])
       if it = 0 then return 0
@@ -12819,18 +13248,18 @@ bcall_mod: procedure = .int
       if unw > 0 then return 0
       return acc
     end
-    when bid = 112 then do
+    when bid = 113 then do
       if na \= 2 then return raise_exc(38, "partial() supports one bound argument")
       return mkbmeth(ast[base + 1], ast[base + 2])
     end
-    when bid = 113 then do
+    when bid = 114 then do
       o = dict_new(9)
       if na >= 1 then do
         if ast[base + 1] \= 2 then ob_y[o % 2] = ast[base + 1]
       end
       return o
     end
-    when bid = 114 then do
+    when bid = 115 then do
       o = dict_new(9)
       if na >= 1 then do
         it = iter_new(ast[base + 1])
@@ -12846,12 +13275,12 @@ bcall_mod: procedure = .int
       end
       return o
     end
-    when bid = 115 then return ctor_dict(base, na, nk)
-    when bid = 116 then do
+    when bid = 116 then return ctor_dict(base, na, nk)
+    when bid = 117 then do
       if na = 0 then return mklist(4)
       return iter_list(ast[base + 1])
     end
-    when bid = 117 then do
+    when bid = 118 then do
       v = ast[base + 1]
       if kind_of(v) = 7 then return iter_list(v)
       if kind_of(v) = 9 then return dict_copy(v)
@@ -12862,7 +13291,7 @@ bcall_mod: procedure = .int
       end
       return v
     end
-    when bid = 118 then return deep_copy(ast[base + 1])
+    when bid = 119 then return deep_copy(ast[base + 1])
     otherwise nop
   end
   return raise_exc(38, "unsupported library function")
@@ -13467,7 +13896,7 @@ bcall_os: procedure = .int
   i = .int
   v = .int
   z = .float
-  if bid = 119 then do
+  if bid = 120 then do
     if na < 1 then return nargs_err("getenv", na, 1, 2)
     s = getenv(ob_s[ast[base + 1] % 2])
     if s == "" then do
@@ -13476,35 +13905,35 @@ bcall_os: procedure = .int
     end
     return mkstr(s)
   end
-  if bid = 120 then do
+  if bid = 121 then do
     s = getenv("PWD")
     if s == "" then s = "."
     return mkstr(s)
   end
-  if bid = 134 then return mkint(900)
-  if bid = 132 then do
+  if bid = 135 then return mkint(900)
+  if bid = 133 then do
     z = ((date("UN") as .int) * 86400) as .float
     z = z * 1000000000.0 + ((time("US") as .int) as .float) * 1000.0
     return float_to_int(z)
   end
-  if bid = 133 then return mkint((time("US") as .int) * 1000)
+  if bid = 134 then return mkint((time("US") as .int) * 1000)
   /* the os.path functions take strings */
   if na < 1 then return nargs_err("path function", na, 1, 2)
   do i = 1 to na
     if kind_of(ast[base + i]) \= 6 then return raise_exc(38, "expected str, bytes or os.PathLike object, not " || type_name(ast[base + i]))
   end
   s = ob_s[ast[base + 1] % 2]
-  if bid = 121 then do
+  if bid = 122 then do
     do i = 2 to na
       s = path_join2(s, ob_s[ast[base + i] % 2])
     end
     return mkstr(s)
   end
-  if bid = 122 | bid = 126 | bid = 127 then do
+  if bid = 123 | bid = 127 | bid = 128 then do
     if s == "" then return 6
     return mkbool(file_exists(s))
   end
-  if bid = 123 | bid = 124 | bid = 129 then do
+  if bid = 124 | bid = 125 | bid = 130 then do
     p = lastpos("/", s)
     t = left(s, p)
     if t \== "" & t \== copies("/", length(t)) then do
@@ -13512,14 +13941,14 @@ bcall_os: procedure = .int
         t = left(t, length(t) - 1)
       end
     end
-    if bid = 123 then return mkstr(substr(s, p + 1))
-    if bid = 124 then return mkstr(t)
+    if bid = 124 then return mkstr(substr(s, p + 1))
+    if bid = 125 then return mkstr(t)
     v = mktuple(2)
     sl[ob_p[v % 2]] = mkstr(t)
     sl[ob_p[v % 2] + 1] = mkstr(substr(s, p + 1))
     return v
   end
-  if bid = 125 then do
+  if bid = 126 then do
     p = lastpos(".", s)
     i = lastpos("/", s)
     if p <= i + 1 then p = 0
@@ -13534,8 +13963,8 @@ bcall_os: procedure = .int
     end
     return v
   end
-  if bid = 131 then return mkstr(path_norm(s))
-  if bid = 128 then do
+  if bid = 132 then return mkstr(path_norm(s))
+  if bid = 129 then do
     if left(s, 1) \== "/" then do
       t = getenv("PWD")
       if t == "" then t = "."
@@ -13543,7 +13972,7 @@ bcall_os: procedure = .int
     end
     return mkstr(path_norm(s))
   end
-  if bid = 130 then do
+  if bid = 131 then do
     if s == "~" | left(s, 2) == "~/" then do
       t = getenv("HOME")
       if t == "" then t = "/"
@@ -13999,8 +14428,9 @@ format_value: procedure = .string
   hasprec = .int
   if spec == "" then return str_of(v)
   k = kind_of(v)
-  if k = 17 then do
-    m = cls_find(ob_c[v % 2], 147)
+  if k = 32 then return format_complex(v, spec)
+  if ocls(v) > 0 then do
+    m = ovr(v, 151)
     if m > 0 then do
       r = call2(m, v, mkstr(spec))
       if r = 0 then return ""
@@ -14849,6 +15279,10 @@ np_walk: procedure = .int
   w = x
   if kind_of(w) = 29 then w = np_scalar(w, 0)
   k = kind_of(w)
+  if k = 32 then do
+    npcx_f = 1
+    return 0
+  end
   if numkind(w) = 1 then do
     ntn = ntn + 1
     v = ival(w)
@@ -14893,7 +15327,14 @@ np_from_obj: procedure = .int
   ntfb = 0
   ntfi = 0
   ntff = 0
-  if np_walk(x, 0) = 0 then return 0
+  npcx_f = 0
+  if np_walk(x, 0) = 0 then do
+    if npcx_f = 1 then do
+      npcx_f = 0
+      return cx_call1("_from_obj", x)
+    end
+    return 0
+  end
   if ntff = 1 then dt = 2
   else if ntfi = 1 then dt = 1
   else if ntfb = 1 then dt = 3
@@ -15424,26 +15865,26 @@ np_math1: procedure = .int
   dt = ob_c[ia]
   pa = ob_p[ia]
   rd = 2
-  if fid = 149 | fid = 159 then rd = dt
-  if fid = 160 then rd = 3
+  if fid = 150 | fid = 160 then rd = dt
+  if fid = 161 then rd = 3
   r = np_new(rd, ob_x[ia], n)
   ir = r % 2
   pr = ob_p[ir]
   do i = 0 to ob_x[ia] - 1
     sl[ob_y[ir] + i] = sl[ob_y[ia] + i]
   end
-  if fid = 149 | fid = 159 then do
+  if fid = 150 | fid = 160 then do
     if dt = 2 then do
       do i = 0 to n - 1
         f = npf[pa + i]
-        if fid = 149 then npf[pr + i] = rxfloat..fabs(f)
+        if fid = 150 then npf[pr + i] = rxfloat..fabs(f)
         else npf[pr + i] = f * f
       end
     end
     else do
       do i = 0 to n - 1
         v = sl[pa + i]
-        if fid = 149 then do
+        if fid = 150 then do
           if v < 0 then v = 0 - v
         end
         else v = v * v
@@ -15460,42 +15901,42 @@ np_math1: procedure = .int
     end
     g = 0.0
     select
-      when fid = 160 then do
+      when fid = 161 then do
         if f \= f then sl[pr + i] = 1
         else sl[pr + i] = 0
       end
-      when fid = 148 then do
+      when fid = 149 then do
         if f \= f then g = f
         else if f < 0.0 then g = f_nan()
         else g = rxfloat..sqrt(f)
       end
-      when fid = 150 then do
+      when fid = 151 then do
         if f \= f then g = f
         else if f > 709.78 then g = f_inf()
         else g = rxfloat..exp(f)
       end
-      when fid = 151 then g = rxfloat..sin(f)
-      when fid = 152 then g = rxfloat..cos(f)
-      when fid = 153 then g = rxfloat..tan(f)
-      when fid = 154 | fid = 155 | fid = 156 then do
+      when fid = 152 then g = rxfloat..sin(f)
+      when fid = 153 then g = rxfloat..cos(f)
+      when fid = 154 then g = rxfloat..tan(f)
+      when fid = 155 | fid = 156 | fid = 157 then do
         if f \= f then g = f
         else if f < 0.0 then g = f_nan()
         else if f = 0.0 then g = 0.0 - f_inf()
-        else if fid = 154 then g = rxfloat..log(f)
-        else if fid = 155 then g = rxfloat..log10(f)
+        else if fid = 155 then g = rxfloat..log(f)
+        else if fid = 156 then g = rxfloat..log10(f)
         else g = rxfloat..log2(f)
       end
-      when fid = 157 then do
+      when fid = 158 then do
         if f \= f | finf(f) \= 0 then g = f
         else g = rxfloat..floor(f)
       end
-      when fid = 158 then do
+      when fid = 159 then do
         if f \= f | finf(f) \= 0 then g = f
         else g = rxfloat..ceil(f)
       end
       otherwise nop
     end
-    if fid \= 160 then npf[pr + i] = g
+    if fid \= 161 then npf[pr + i] = g
   end
   return r
 
@@ -16138,12 +16579,20 @@ np_dtype_of: procedure = .int
   s = .string
   k = kind_of(v)
   if k = 16 then do
+    if ob_x[v % 2] = 85 then do
+      npcx_d = 1
+      return 2
+    end
     if ob_x[v % 2] = 4 then return 2
     if ob_x[v % 2] = 3 then return 1
     if ob_x[v % 2] = 5 then return 3
   end
   if k = 6 then do
     s = ob_s[v % 2]
+    if left(s, 7) == "complex" | s == "c16" | s == "D" then do
+      npcx_d = 1
+      return 2
+    end
     if left(s, 5) == "float" | s == "f8" | s == "double" then return 2
     if left(s, 3) == "int" | s == "i8" | s == "long" then return 1
     if left(s, 4) == "bool" | s == "?" then return 3
@@ -16170,7 +16619,7 @@ np_lanes: procedure = .int
   if hasax = 0 then return 1
   axn = axis
   if axn < 0 then axn = axn + nd
-  if axn < 0 | axn >= nd then return raise_exc(84, "axis " || axis || " is out of bounds for array of dimension " || nd)
+  if axn < 0 | axn >= nd then return raise_exc(96, "axis " || axis || " is out of bounds for array of dimension " || nd)
   np_axn = axn
   np_n = sl[ob_y[ia] + axn]
   do d = 0 to axn - 1
@@ -16697,7 +17146,7 @@ np_concat: procedure = .int
   if nd = 0 then return raise_exc(36, "zero-dimensional arrays cannot be concatenated")
   ax = axis
   if ax < 0 then ax = ax + nd
-  if ax < 0 | ax >= nd then return raise_exc(84, "axis " || axis || " is out of bounds for array of dimension " || nd)
+  if ax < 0 | ax >= nd then return raise_exc(96, "axis " || axis || " is out of bounds for array of dimension " || nd)
   dt = ob_c[first % 2]
   totax = 0
   do i = 0 to n - 1
@@ -17500,12 +17949,12 @@ np_repr: procedure = .string
    --------------------------------------------------------------------- */
 np_attr: procedure = .int
   arg o = .int, nid = .int
-  if nid = 101 then return np_shape_tuple(o)
-  if nid = 73 then return mkint(ob_x[o % 2])
-  if nid = 102 then return mkint(ob_n[o % 2])
+  if nid = 104 then return np_shape_tuple(o)
+  if nid = 76 then return mkint(ob_x[o % 2])
+  if nid = 105 then return mkint(ob_n[o % 2])
   if nid = 28 then return mkstr(np_dtname(ob_c[o % 2]))
   if nid = np_nidT then return np_transpose(o)
-  if nid = 84 then return o
+  if nid = 87 then return o
   return 0
 
 meth_arr: procedure = .int
@@ -17517,33 +17966,38 @@ meth_arr: procedure = .int
   s = .int
   v = .int
   select
-    when nid = 117 then return np_tolist(o)
+    when nid = 120 then return np_tolist(o)
     when nid = 19 then return np_cast(o, ob_c[o % 2])
-    when nid = 89 then do
+    when nid = 92 then do
       if na = 0 then return nargs_err("reshape", 0, 1, 1)
       if np_dims(base, 1, na) = 0 then return 0
       return np_reshape(o)
     end
-    when nid = 35 | nid = 80 then return np_flat(o)
+    when nid = 35 | nid = 83 then return np_flat(o)
     when nid = 9 then do
       if na < 1 then return nargs_err("astype", na, 1, 1)
+      npcx_d = 0
       dt = np_dtype_of(ast[base + 1])
       if dt = 0 then return 0
+      if npcx_d = 1 then do
+        npcx_d = 0
+        return cx_call1("_from_real", np_cast(o, 2))
+      end
       return np_cast(o, dt)
     end
-    when nid = 112 then return np_red_call(o, 1, base, na, nk, 1)
-    when nid = 69 then return np_red_call(o, 2, base, na, nk, 1)
-    when nid = 70 then return np_red_call(o, 3, base, na, nk, 1)
-    when nid = 68 then return np_red_call(o, 4, base, na, nk, 1)
-    when nid = 79 then return np_red_call(o, 5, base, na, nk, 1)
+    when nid = 115 then return np_red_call(o, 1, base, na, nk, 1)
+    when nid = 72 then return np_red_call(o, 2, base, na, nk, 1)
+    when nid = 73 then return np_red_call(o, 3, base, na, nk, 1)
+    when nid = 71 then return np_red_call(o, 4, base, na, nk, 1)
+    when nid = 82 then return np_red_call(o, 5, base, na, nk, 1)
     when nid = 6 then return np_red_call(o, 6, base, na, nk, 1)
     when nid = 7 then return np_red_call(o, 7, base, na, nk, 1)
     when nid = 21 then return np_red_call(o, 8, base, na, nk, 1)
     when nid = 3 then return np_red_call(o, 9, base, na, nk, 1)
     when nid = 2 then return np_red_call(o, 10, base, na, nk, 1)
-    when nid = 108 then return np_red_call(o, 11, base, na, nk, 1)
-    when nid = 125 then return np_red_call(o, 12, base, na, nk, 1)
-    when nid = 94 then do
+    when nid = 111 then return np_red_call(o, 11, base, na, nk, 1)
+    when nid = 129 then return np_red_call(o, 12, base, na, nk, 1)
+    when nid = 97 then do
       w = 0
       if na >= 1 then w = ival(ast[base + 1])
       v = kwarg(base, na, nk, "decimals")
@@ -17561,8 +18015,8 @@ meth_arr: procedure = .int
       if na >= 2 then return np_clip(o, ast[base + 1], ast[base + 2])
       return np_clip(o, ast[base + 1], 0)
     end
-    when nid = 119 then return np_transpose(o)
-    when nid = 103 then do
+    when nid = 123 then return np_transpose(o)
+    when nid = 106 then do
       r = np_sort(o, 1, -1)
       if r = 0 then return 0
       do i = 0 to ob_n[o % 2] - 1
@@ -17579,7 +18033,7 @@ meth_arr: procedure = .int
       end
       return 2
     end
-    when nid = 61 then do
+    when nid = 64 then do
       if ob_n[o % 2] \= 1 then return raise_exc(36, "can only convert an array of size 1 to a Python scalar")
       return np_scalar(o, 0)
     end
@@ -17619,33 +18073,49 @@ bcall_np: procedure = .int
   atl = .float
   l = .int
   isf = .int
+  if bid \= 136 & bid \= 137 then do
+    do i = 1 to na
+      if is_cx(ast[base + i]) = 1 then return cx_dispatch(bid, base, na, nk)
+    end
+  end
   select
-    when bid = 135 | bid = 136 then do
+    when bid = 136 | bid = 137 then do
       if na < 1 then return nargs_err("array", na, 1, 2)
       v = ast[base + 1]
-      if bid = 136 & kind_of(v) = 29 then r = v
+      if bid = 137 & kind_of(v) = 29 then r = v
       else if kind_of(v) = 29 then r = np_cast(v, ob_c[v % 2])
       else r = np_from_obj(v)
       if r = 0 then return 0
+      npcx_d = 0
       dt = np_dt_arg(base, na, nk, 2, -1)
       if dt = 0 then return 0
       if dt > 0 then r = np_cast(r, dt)
+      if npcx_d = 1 then do
+        npcx_d = 0
+        return cx_call1("_from_real", r)
+      end
       return r
     end
-    when bid = 137 | bid = 138 | bid = 139 then do
+    when bid = 138 | bid = 139 | bid = 140 then do
       if na < 1 then return nargs_err("zeros", na, 1, 2)
       if np_dims(base, 1, 1) = 0 then return 0
+      npcx_d = 0
       dt = np_dt_arg(base, na, nk, 2, 2)
       if dt = 0 then return 0
       fi = 0
       z = 0.0
-      if bid = 138 then do
+      if bid = 139 then do
         fi = 1
         z = 1.0
       end
-      return np_make(dt, fi, z)
+      r = np_make(dt, fi, z)
+      if npcx_d = 1 & r \= 0 then do
+        npcx_d = 0
+        return cx_call1("_from_real", r)
+      end
+      return r
     end
-    when bid = 140 then do
+    when bid = 141 then do
       if na < 2 then return nargs_err("full", na, 2, 3)
       if np_dims(base, 1, 1) = 0 then return 0
       v = ast[base + 2]
@@ -17672,7 +18142,7 @@ bcall_np: procedure = .int
       if dt = 3 & fi \= 0 then fi = 1
       return np_make(dt, fi, z)
     end
-    when bid = 141 | bid = 142 | bid = 143 then do
+    when bid = 142 | bid = 143 | bid = 144 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       ntnd = ob_x[a % 2]
@@ -17682,11 +18152,11 @@ bcall_np: procedure = .int
       dt = ob_c[a % 2]
       fi = 0
       z = 0.0
-      if bid = 142 then do
+      if bid = 143 then do
         fi = 1
         z = 1.0
       end
-      if bid = 143 then do
+      if bid = 144 then do
         v = ast[base + 2]
         if numkind(v) >= 2 then do
           z = tofloat(v)
@@ -17700,16 +18170,16 @@ bcall_np: procedure = .int
       if dt = 3 & fi \= 0 then fi = 1
       return np_make(dt, fi, z)
     end
-    when bid = 144 | bid = 145 then do
+    when bid = 145 | bid = 146 then do
       if numkind(ast[base + 1]) \= 1 then return raise_exc(38, "'" || type_name(ast[base + 1]) || "' object cannot be interpreted as an integer")
       n = ival(ast[base + 1])
       j = n
-      if na >= 2 & bid = 144 then do
+      if na >= 2 & bid = 145 then do
         if ast[base + 2] \= 2 then j = ival(ast[base + 2])
       end
       return np_eye(n, j)
     end
-    when bid = 146 then do
+    when bid = 147 then do
       if na < 1 then return nargs_err("arange", na, 1, 3)
       isf = 0
       do i = 1 to na
@@ -17765,7 +18235,7 @@ bcall_np: procedure = .int
       if dt > 0 then r = np_cast(r, dt)
       return r
     end
-    when bid = 147 then do
+    when bid = 148 then do
       if na < 2 then return nargs_err("linspace", na, 2, 3)
       x = mf(ast[base + 1])
       y = mf(ast[base + 2])
@@ -17792,7 +18262,7 @@ bcall_np: procedure = .int
       else if n = 1 then npf[ob_p[r % 2]] = x
       return r
     end
-    when bid = 148 | bid = 149 | bid = 150 | bid = 151 | bid = 152 | bid = 153 | bid = 154 | bid = 155 | bid = 156 | bid = 157 | bid = 158 | bid = 159 | bid = 160 then do
+    when bid = 149 | bid = 150 | bid = 151 | bid = 152 | bid = 153 | bid = 154 | bid = 155 | bid = 156 | bid = 157 | bid = 158 | bid = 159 | bid = 160 | bid = 161 then do
       if na < 1 then return nargs_err("ufunc", na, 1, 1)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
@@ -17801,7 +18271,7 @@ bcall_np: procedure = .int
       if ob_x[r % 2] = 0 then return np_scalar(r, 0)
       return r
     end
-    when bid = 161 then do
+    when bid = 162 then do
       if na = 1 then do
         a = np_coerce(ast[base + 1])
         if a = 0 then return 0
@@ -17816,7 +18286,7 @@ bcall_np: procedure = .int
       if c = 0 then return 0
       return np_where3(a, b, c)
     end
-    when bid = 162 then do
+    when bid = 163 then do
       if na < 1 then return nargs_err("concatenate", na, 1, 2)
       l = np_array_list(ast[base + 1], 0)
       if l = 0 then return 0
@@ -17826,12 +18296,12 @@ bcall_np: procedure = .int
       if v \= 0 then w = ival(v)
       return np_concat(l, w)
     end
-    when bid = 163 then do
+    when bid = 164 then do
       l = np_array_list(ast[base + 1], 2)
       if l = 0 then return 0
       return np_concat(l, 0)
     end
-    when bid = 164 then do
+    when bid = 165 then do
       l = np_array_list(ast[base + 1], 1)
       if l = 0 then return 0
       if ob_n[l % 2] > 0 then do
@@ -17839,7 +18309,7 @@ bcall_np: procedure = .int
       end
       return np_concat(l, 1)
     end
-    when bid = 165 then do
+    when bid = 166 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       w = -1
@@ -17851,12 +18321,12 @@ bcall_np: procedure = .int
       else if v \= 0 then w = ival(v)
       return np_sort(a, c, w)
     end
-    when bid = 166 then do
+    when bid = 167 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_unique(a)
     end
-    when bid = 167 | bid = 168 then do
+    when bid = 168 | bid = 169 then do
       if na < 2 then return nargs_err("dot", na, 2, 2)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
@@ -17864,17 +18334,17 @@ bcall_np: procedure = .int
       if b = 0 then return 0
       return np_dot(a, b)
     end
-    when bid = 169 then do
+    when bid = 170 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_transpose(a)
     end
-    when bid = 170 then do
+    when bid = 171 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_diag(a)
     end
-    when bid = 171 then do
+    when bid = 172 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       if ob_x[a % 2] \= 2 then return raise_exc(36, "diag requires an array of at least two dimensions")
@@ -17882,20 +18352,20 @@ bcall_np: procedure = .int
       if b = 0 then return 0
       return np_reduce(b, 1, 0, 0)
     end
-    when bid = 173 | bid = 174 | bid = 175 then do
+    when bid = 174 | bid = 175 | bid = 176 then do
       if na < 2 then return nargs_err("ufunc", na, 2, 2)
-      if bid = 173 then w = 21
-      else if bid = 174 then w = 22
+      if bid = 174 then w = 21
+      else if bid = 175 then w = 22
       else w = 7
       return np_binop(w, ast[base + 1], ast[base + 2])
     end
-    when bid = 176 then do
+    when bid = 177 then do
       if na < 3 then return nargs_err("clip", na, 3, 3)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_clip(a, ast[base + 2], ast[base + 3])
     end
-    when bid = 179 then do
+    when bid = 180 then do
       if na < 2 then return nargs_err("allclose", na, 2, 4)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
@@ -17912,7 +18382,7 @@ bcall_np: procedure = .int
       if unw > 0 then return 0
       return np_allclose(a, b, rtl, atl)
     end
-    when bid = 180 then do
+    when bid = 181 then do
       if na < 2 then return nargs_err("array_equal", na, 2, 2)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
@@ -17920,12 +18390,12 @@ bcall_np: procedure = .int
       if b = 0 then return 0
       return np_array_equal(a, b)
     end
-    when bid = 181 then do
+    when bid = 182 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_median(a)
     end
-    when bid = 184 then do
+    when bid = 185 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       w = 0
@@ -17937,37 +18407,1922 @@ bcall_np: procedure = .int
       if ob_x[r % 2] = 0 then return np_scalar(r, 0)
       return r
     end
-    when bid = 192 then do
+    when bid = 193 then do
       if na < 2 then return nargs_err("reshape", na, 2, 2)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       if np_dims(base, 2, na - 1) = 0 then return 0
       return np_reshape(a)
     end
-    when bid = 193 then do
+    when bid = 194 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_flat(a)
     end
-    when bid = 185 | bid = 186 | bid = 187 | bid = 188 | bid = 189 | bid = 190 | bid = 191 | bid = 172 | bid = 177 | bid = 178 | bid = 182 | bid = 183 then do
+    when bid = 186 | bid = 187 | bid = 188 | bid = 189 | bid = 190 | bid = 191 | bid = 192 | bid = 173 | bid = 178 | bid = 179 | bid = 183 | bid = 184 then do
       if na < 1 then return nargs_err("reduction", na, 1, 2)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
-      if bid = 185 then w = 1
-      else if bid = 186 then w = 2
-      else if bid = 187 then w = 3
-      else if bid = 188 then w = 4
-      else if bid = 189 then w = 5
-      else if bid = 190 then w = 6
-      else if bid = 191 then w = 7
-      else if bid = 172 then w = 8
-      else if bid = 177 then w = 9
-      else if bid = 178 then w = 10
-      else if bid = 182 then w = 11
+      if bid = 186 then w = 1
+      else if bid = 187 then w = 2
+      else if bid = 188 then w = 3
+      else if bid = 189 then w = 4
+      else if bid = 190 then w = 5
+      else if bid = 191 then w = 6
+      else if bid = 192 then w = 7
+      else if bid = 173 then w = 8
+      else if bid = 178 then w = 9
+      else if bid = 179 then w = 10
+      else if bid = 183 then w = 11
       else w = 12
       return np_red_call(a, w, base, na, nk, 2)
     end
     otherwise nop
   end
   return raise_exc(38, "unsupported numpy function")
+
+/* ---------------------------------------------------------------------
+   bytes and bytearray (kind K_BYTES: ob_s holds one character per byte, code 0 .. 255;
+   ob_y = 1 for a bytearray), encodings, int.to_bytes / from_bytes
+   --------------------------------------------------------------------- */
+mkbytes: procedure = .int
+  arg s = .string
+  nob = nob + 1
+  ob_k[nob] = 31
+  ob_s[nob] = s
+  return nob * 2
+
+mkbytearr: procedure = .int
+  arg s = .string
+  nob = nob + 1
+  ob_k[nob] = 31
+  ob_s[nob] = s
+  ob_y[nob] = 1
+  return nob * 2
+
+/* a bytes-like object of the same type as o */
+bytes_like: procedure = .int
+  arg o = .int, s = .string
+  if ob_y[o % 2] = 1 then return mkbytearr(s)
+  return mkbytes(s)
+
+bytes_rep: procedure = .int
+  arg o = .int, n = .int
+  if n < 0 then n = 0
+  return bytes_like(o, copies(ob_s[o % 2], n))
+
+hex2: procedure = .string
+  arg v = .int
+  return lower(right(d2x(v), 2, "0"))
+
+bytes_repr: procedure = .string
+  arg s = .string
+  q = .string
+  r = .string
+  i = .int
+  n = .int
+  c = .string
+  v = .int
+  q = "'"
+  if pos("'", s) > 0 & pos('"', s) = 0 then q = '"'
+  r = "b" || q
+  n = length(s)
+  do i = 1 to n
+    c = substr(s, i, 1)
+    v = c2d(c)
+    if c == q | c == "\" then r = r || "\" || c
+    else if v = 10 then r = r || "\n"
+    else if v = 9 then r = r || "\t"
+    else if v = 13 then r = r || "\r"
+    else if v < 32 | v >= 127 then r = r || "\x" || hex2(v)
+    else r = r || c
+  end
+  return r || q
+
+/* normalise an encoding name: "utf-8", "ascii", "latin-1" or "" when unknown */
+enc_name: procedure = .string
+  arg e = .string
+  l = .string
+  l = lower(changestr("_", e, "-"))
+  if l == "utf-8" | l == "utf8" | l == "u8" | l == "utf" then return "utf-8"
+  if l == "ascii" | l == "us-ascii" | l == "646" then return "ascii"
+  if l == "latin-1" | l == "latin1" | l == "iso-8859-1" | l == "iso8859-1" | l == "l1" | l == "latin" | l == "cp1252" | l == "windows-1252" then return "latin-1"
+  return ""
+
+/* the encoding argument (positional idx or keyword) as a normalised name; "" with an exception set when unknown */
+enc_arg: procedure = .string
+  arg base = .int, na = .int, nk = .int, idx = .int
+  v = .int
+  e = .string
+  v = 0
+  if na >= idx then v = ast[base + idx]
+  if kwarg(base, na, nk, "encoding") \= 0 then v = kwarg(base, na, nk, "encoding")
+  if v = 0 then return "utf-8"
+  if kind_of(v) \= 6 then do
+    call raise_exc 38, "encode() argument 'encoding' must be str, not " || type_name(v)
+    return ""
+  end
+  e = enc_name(ob_s[v % 2])
+  if e == "" then do
+    call raise_exc 33, "unknown encoding: " || ob_s[v % 2]
+    return ""
+  end
+  return e
+
+err_arg: procedure = .string
+  arg base = .int, na = .int, nk = .int, idx = .int
+  v = .int
+  v = 0
+  if na >= idx then v = ast[base + idx]
+  if kwarg(base, na, nk, "errors") \= 0 then v = kwarg(base, na, nk, "errors")
+  if v = 0 then return "strict"
+  if kind_of(v) \= 6 then return "strict"
+  return ob_s[v % 2]
+
+/* characters (codepoints) to bytes; returns the byte string, or "" with an exception set */
+str_encode: procedure = .string
+  arg s = .string, enc = .string, errs = .string
+  r = .string
+  i = .int
+  n = .int
+  c = .int
+  ch = .string
+  bad = .int
+  n = length(s)
+  r = ""
+  do i = 1 to n
+    ch = substr(s, i, 1)
+    c = c2d(ch)
+    bad = 0
+    if c < 128 then r = r || ch
+    else if enc == "utf-8" then do
+      if c < 2048 then r = r || d2c(192 + c % 64) || d2c(128 + c // 64)
+      else if c < 65536 then r = r || d2c(224 + c % 4096) || d2c(128 + (c % 64) // 64) || d2c(128 + c // 64)
+      else r = r || d2c(240 + c % 262144) || d2c(128 + (c % 4096) // 64) || d2c(128 + (c % 64) // 64) || d2c(128 + c // 64)
+    end
+    else if enc == "latin-1" & c < 256 then r = r || ch
+    else bad = 1
+    if bad = 1 then do
+      if errs == "ignore" then nop
+      else if errs == "replace" then r = r || "?"
+      else if errs == "xmlcharrefreplace" then r = r || "&#" || c || ";"
+      else if errs == "backslashreplace" then do
+        if c < 256 then r = r || "\x" || hex2(c)
+        else if c < 65536 then r = r || "\u" || right(lower(d2x(c)), 4, "0")
+        else r = r || "\U" || right(lower(d2x(c)), 8, "0")
+      end
+      else do
+        if c < 256 then ch = "\x" || hex2(c)
+        else if c < 65536 then ch = "\u" || right(lower(d2x(c)), 4, "0")
+        else ch = "\U" || right(lower(d2x(c)), 8, "0")
+        if enc == "ascii" then call raise_exc 80, "'ascii' codec can't encode character '" || ch || "' in position " || (i - 1) || ": ordinal not in range(128)"
+        else call raise_exc 80, "'latin-1' codec can't encode character '" || ch || "' in position " || (i - 1) || ": ordinal not in range(256)"
+        return ""
+      end
+    end
+  end
+  return r
+
+/* bytes to characters; "" with an exception set on a strict error */
+str_decode: procedure = .string
+  arg s = .string, enc = .string, errs = .string
+  r = .string
+  i = .int
+  n = .int
+  b = .int
+  need = .int
+  cp = .int
+  j = .int
+  cb = .int
+  why = .string
+  bad = .int
+  lo = .int
+  hi = .int
+  n = length(s)
+  r = ""
+  i = 1
+  do while i <= n
+    b = c2d(substr(s, i, 1))
+    if b < 128 then do
+      r = r || d2c(b)
+      i = i + 1
+      iterate
+    end
+    if enc == "latin-1" then do
+      r = r || d2c(b)
+      i = i + 1
+      iterate
+    end
+    bad = 0
+    why = ""
+    need = 0
+    cp = 0
+    if enc == "ascii" then do
+      bad = 1
+      why = "ordinal not in range(128)"
+    end
+    else if b >= 194 & b <= 223 then do
+      need = 1
+      cp = b - 192
+    end
+    else if b >= 224 & b <= 239 then do
+      need = 2
+      cp = b - 224
+    end
+    else if b >= 240 & b <= 244 then do
+      need = 3
+      cp = b - 240
+    end
+    else do
+      bad = 1
+      why = "invalid start byte"
+    end
+    j = 1
+    if bad = 0 then do
+      lo = 128
+      hi = 191
+      if b = 224 then lo = 160
+      if b = 237 then hi = 159
+      if b = 240 then lo = 144
+      if b = 244 then hi = 143
+      do while j <= need
+        if i + j > n then do
+          bad = 2
+          why = "unexpected end of data"
+          leave
+        end
+        cb = c2d(substr(s, i + j, 1))
+        if cb < lo | cb > hi then do
+          bad = 1
+          why = "invalid continuation byte"
+          leave
+        end
+        lo = 128
+        hi = 191
+        cp = cp * 64 + (cb - 128)
+        j = j + 1
+      end
+    end
+    if bad = 0 then do
+      r = r || d2c(cp)
+      i = i + need + 1
+      iterate
+    end
+    if errs == "strict" then do
+      if bad = 2 & j > 1 then call raise_exc 79, "'" || enc || "' codec can't decode bytes in position " || (i - 1) || "-" || (n - 1) || ": " || why
+      else call raise_exc 79, "'" || enc || "' codec can't decode byte 0x" || hex2(b) || " in position " || (i - 1) || ": " || why
+      return ""
+    end
+    if errs == "replace" then r = r || d2c(65533)
+    else if errs == "backslashreplace" then r = r || "\x" || hex2(b)
+    else if errs == "surrogateescape" then r = r || d2c(56320 + b)
+    if bad = 2 then i = n + 1
+    else i = i + 1
+  end
+  return r
+
+/* bytes of an iterable of ints; "" with an exception set on error */
+bytes_from_iter: procedure = .string
+  arg x = .int
+  l = .int
+  i = .int
+  v = .int
+  r = .string
+  l = iter_list(x)
+  if l = 0 then return ""
+  r = ""
+  do i = 0 to ob_n[l % 2] - 1
+    v = sl[ob_p[l % 2] + i]
+    if numkind(v) \= 1 then do
+      call raise_exc 38, "'" || type_name(v) || "' object cannot be interpreted as an integer"
+      return ""
+    end
+    if ival(v) < 0 | ival(v) > 255 then do
+      call raise_exc 36, "bytes must be in range(0, 256)"
+      return ""
+    end
+    r = r || d2c(ival(v))
+  end
+  return r
+
+/* bytes(...) / bytearray(...) */
+ctor_bytes: procedure = .int
+  arg isba = .int, base = .int, na = .int, nk = .int
+  x = .int
+  s = .string
+  enc = .string
+  nm = .string
+  nm = "bytes"
+  if isba = 1 then nm = "bytearray"
+  if na = 0 & nk = 0 then s = ""
+  else do
+    x = 0
+    if na >= 1 then x = ast[base + 1]
+    if x = 0 then x = kwarg(base, na, nk, "source")
+    if x = 0 then s = ""
+    else if kind_of(x) = 6 then do
+      if na < 2 & kwarg(base, na, nk, "encoding") = 0 then return raise_exc(38, "string argument without an encoding")
+      enc = enc_arg(base, na, nk, 2)
+      if unw > 0 then return 0
+      s = str_encode(ob_s[x % 2], enc, err_arg(base, na, nk, 3))
+      if unw > 0 then return 0
+    end
+    else if kind_of(x) = 31 then s = ob_s[x % 2]
+    else if numkind(x) = 1 then do
+      if ival(x) < 0 then return raise_exc(36, "negative count")
+      s = copies(d2c(0), ival(x))
+    end
+    else if numkind(x) = 2 then return raise_exc(31, "cannot fit 'int' into an index-sized integer")
+    else if numkind(x) = 3 | kind_of(x) = 32 then return raise_exc(38, "cannot convert '" || type_name(x) || "' object to " || nm)
+    else do
+      s = bytes_from_iter(x)
+      if unw > 0 then return 0
+    end
+  end
+  if isba = 1 then return mkbytearr(s)
+  return mkbytes(s)
+
+/* hex string of s with an optional separator */
+bytes_hex: procedure = .string
+  arg s = .string, sep = .string
+  r = .string
+  i = .int
+  n = .int
+  r = ""
+  n = length(s)
+  do i = 1 to n
+    if i > 1 then r = r || sep
+    r = r || hex2(c2d(substr(s, i, 1)))
+  end
+  return r
+
+/* bytes.fromhex(s) */
+bytes_fromhex: procedure = .int
+  arg isba = .int, base = .int, na = .int
+  h = .string
+  r = .string
+  i = .int
+  n = .int
+  c = .string
+  d1 = .int
+  d2 = .int
+  if na \= 1 then return nargs_err("fromhex", na, 1, 1)
+  if kind_of(ast[base + 1]) \= 6 then return raise_exc(38, "fromhex() argument must be str, not " || type_name(ast[base + 1]))
+  h = ob_s[ast[base + 1] % 2]
+  n = length(h)
+  r = ""
+  i = 1
+  do while i <= n
+    c = substr(h, i, 1)
+    if is_ws(c) = 1 then do
+      i = i + 1
+      iterate
+    end
+    d1 = hexval(c)
+    d2 = -1
+    if i < n then d2 = hexval(substr(h, i + 1, 1))
+    if d1 < 0 | d2 < 0 then do
+      if d1 >= 0 then i = i + 1
+      return raise_exc(36, "non-hexadecimal number found in fromhex() arg at position " || (i - 1))
+    end
+    r = r || d2c(d1 * 16 + d2)
+    i = i + 2
+  end
+  if isba = 1 then return mkbytearr(r)
+  return mkbytes(r)
+
+hexval: procedure = .int
+  arg c = .string
+  v = .int
+  if isdigit(c) = 1 then return c as .int
+  v = c2d(lower(c))
+  if v >= 97 & v <= 102 then return v - 87
+  return -1
+
+/* the needle argument of find / count / startswith ...: a byte string, or "" with an exception */
+bytes_needle: procedure = .string
+  arg x = .int
+  if kind_of(x) = 31 then return ob_s[x % 2]
+  if numkind(x) = 1 then do
+    if ival(x) < 0 | ival(x) > 255 then do
+      call raise_exc 36, "byte must be in range(0, 256)"
+      return ""
+    end
+    return d2c(ival(x))
+  end
+  call raise_exc 38, "a bytes-like object is required, not '" || type_name(x) || "'"
+  return ""
+
+/* turn a list of str objects (from the str splitters) into bytes objects of the type of o */
+bytes_list: procedure = .int
+  arg l = .int, o = .int
+  i = .int
+  do i = 0 to ob_n[l % 2] - 1
+    sl[ob_p[l % 2] + i] = bytes_like(o, ob_s[sl[ob_p[l % 2] + i] % 2])
+  end
+  return l
+
+meth_bytes: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  s = .string
+  a = .string
+  t = .string
+  n = .int
+  i = .int
+  j = .int
+  p = .int
+  m = .int
+  v = .int
+  l = .int
+  w = .int
+  st = .int
+  en = .int
+  f = .string
+  ba = .int
+  enc = .string
+  c = .int
+  s = ob_s[o % 2]
+  ba = ob_y[o % 2]
+  select
+    when nid = 22 then do
+      enc = enc_arg(base, na, nk, 1)
+      if unw > 0 then return 0
+      t = str_decode(s, enc, err_arg(base, na, nk, 2))
+      if unw > 0 then return 0
+      return mkstr(t)
+    end
+    when nid = 43 then do
+      a = ""
+      if na >= 1 then do
+        if kind_of(ast[base + 1]) = 6 then a = ob_s[ast[base + 1] % 2]
+        else if kind_of(ast[base + 1]) = 31 then a = ob_s[ast[base + 1] % 2]
+      end
+      if kwarg(base, na, nk, "sep") \= 0 then a = ob_s[kwarg(base, na, nk, "sep") % 2]
+      return mkstr(bytes_hex(s, a))
+    end
+    when nid = 66 then do
+      if na \= 1 then return nargs_err("join", na, 1, 1)
+      l = iter_list(ast[base + 1])
+      if l = 0 then return 0
+      n = ob_n[l % 2]
+      t = ""
+      do i = 0 to n - 1
+        v = sl[ob_p[l % 2] + i]
+        if kind_of(v) \= 31 then return raise_exc(38, "sequence item " || i || ": expected a bytes-like object, " || type_name(v) || " found")
+        if i > 0 then t = t || s
+        t = t || ob_s[v % 2]
+      end
+      return bytes_like(o, t)
+    end
+    when nid = 126 then return bytes_like(o, upper(s))
+    when nid = 69 then return bytes_like(o, lower(s))
+    when nid = 11 then return bytes_like(o, upper(left(s, 1)) || lower(substr(s, 2)))
+    when nid = 116 then return bytes_like(o, str_swapcase(s))
+    when nid = 119 then return bytes_like(o, str_title(s))
+    when nid = 114 | nid = 70 | nid = 100 then do
+      a = ""
+      if na >= 1 then do
+        if ast[base + 1] \= 2 then do
+          a = bytes_needle(ast[base + 1])
+          if unw > 0 then return 0
+        end
+      end
+      m = 3
+      if nid = 70 then m = 1
+      if nid = 100 then m = 2
+      return bytes_like(o, str_strip(s, a, m))
+    end
+    when nid = 107 | nid = 99 then do
+      a = ""
+      w = 0
+      m = -1
+      if na >= 1 then do
+        if ast[base + 1] \= 2 then do
+          a = bytes_needle(ast[base + 1])
+          if unw > 0 then return 0
+          w = 1
+          if a == "" then return raise_exc(36, "empty separator")
+        end
+      end
+      if na >= 2 then m = ival(ast[base + 2])
+      if kwarg(base, na, nk, "maxsplit") \= 0 then m = ival(kwarg(base, na, nk, "maxsplit"))
+      if kwarg(base, na, nk, "sep") \= 0 then do
+        if kwarg(base, na, nk, "sep") \= 2 then do
+          a = bytes_needle(kwarg(base, na, nk, "sep"))
+          if unw > 0 then return 0
+          w = 1
+        end
+      end
+      if nid = 107 then do
+        if w = 0 then return bytes_list(split_ws(s, m), o)
+        return bytes_list(split_sep(s, a, m), o)
+      end
+      if w = 0 then return bytes_list(rsplit_ws(s, m), o)
+      return bytes_list(rsplit_sep(s, a, m), o)
+    end
+    when nid = 91 then do
+      if na < 2 then return nargs_err("replace", na, 2, 3)
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      t = bytes_needle(ast[base + 2])
+      if unw > 0 then return 0
+      m = -1
+      if na >= 3 then m = ival(ast[base + 3])
+      return bytes_like(o, str_replace(s, a, t, m))
+    end
+    when nid = 34 | nid = 94 | nid = 45 | nid = 95 | nid = 20 then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      if slice_args(length(s), base, na, 2) = 0 then return 0
+      st = sl_a
+      en = sl_n
+      if st > en | st > length(s) then do
+        if nid = 20 then return mkint(0)
+        if nid = 34 | nid = 94 then return mkint(-1)
+        return raise_exc(36, "subsection not found")
+      end
+      t = substr(s, st + 1, en - st)
+      if nid = 20 then do
+        if a == "" then return mkint(length(t) + 1)
+        return mkint(countstr(a, t))
+      end
+      if a == "" then do
+        if nid = 94 | nid = 95 then return mkint(en)
+        return mkint(st)
+      end
+      if nid = 34 | nid = 45 then p = pos(a, t)
+      else p = lastpos(a, t)
+      if p = 0 then do
+        if nid = 34 | nid = 94 then return mkint(-1)
+        return raise_exc(36, "subsection not found")
+      end
+      return mkint(p - 1 + st)
+    end
+    when nid = 110 | nid = 30 then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
+      if slice_args(length(s), base, na, 2) = 0 then return 0
+      st = sl_a
+      en = sl_n
+      if st > en then return 6
+      t = substr(s, st + 1, en - st)
+      v = ast[base + 1]
+      if kind_of(v) = 8 then l = ob_n[v % 2]
+      else l = 1
+      do j = 0 to l - 1
+        if kind_of(v) = 8 then a = bytes_needle(sl[ob_p[v % 2] + j])
+        else a = bytes_needle(v)
+        if unw > 0 then return 0
+        n = length(a)
+        if n <= length(t) then do
+          if nid = 110 then do
+            if left(t, n) == a then return 4
+          end
+          else do
+            if n = 0 then return 4
+            if right(t, n) == a then return 4
+          end
+        end
+      end
+      return 6
+    end
+    when nid = 50 then return mkbool(by_isclass(s, 1))
+    when nid = 53 then return mkbool(by_isclass(s, 2))
+    when nid = 49 then return mkbool(by_isclass(s, 3))
+    when nid = 58 then return mkbool(by_isclass(s, 4))
+    when nid = 62 then do
+      if upper(s) == s & lower(s) \== s then return 4
+      return 6
+    end
+    when nid = 56 then do
+      if lower(s) == s & upper(s) \== lower(s) then return 4
+      return 6
+    end
+    when nid = 51 then do
+      do i = 1 to length(s)
+        if c2d(substr(s, i, 1)) >= 128 then return 6
+      end
+      return 4
+    end
+    when nid = 13 | nid = 68 | nid = 96 then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 2)
+      if chk_int(ast[base + 1]) = 0 then return 0
+      w = ival(ast[base + 1])
+      f = " "
+      if na >= 2 then do
+        f = bytes_needle(ast[base + 2])
+        if unw > 0 then return 0
+        if length(f) \= 1 then return raise_exc(38, nid_name[nid] || "() argument 2 must be a byte string of length 1")
+      end
+      n = length(s)
+      if w <= n then return bytes_like(o, s)
+      m = w - n
+      if nid = 68 then return bytes_like(o, s || copies(f, m))
+      if nid = 96 then return bytes_like(o, copies(f, m) || s)
+      i = m % 2 + (m // 2) * (w // 2)
+      return bytes_like(o, copies(f, i) || s || copies(f, m - i))
+    end
+    when nid = 132 then do
+      if chk_int(ast[base + 1]) = 0 then return 0
+      w = ival(ast[base + 1])
+      n = length(s)
+      if w <= n then return bytes_like(o, s)
+      if left(s, 1) == "-" | left(s, 1) == "+" then return bytes_like(o, left(s, 1) || copies("0", w - n) || substr(s, 2))
+      return bytes_like(o, copies("0", w - n) || s)
+    end
+    when nid = 78 | nid = 98 then do
+      if na \= 1 then return nargs_err(nid_name[nid], na, 1, 1)
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      if a == "" then return raise_exc(36, "empty separator")
+      if nid = 78 then p = pos(a, s)
+      else p = lastpos(a, s)
+      v = mktuple(3)
+      if p = 0 then do
+        if nid = 78 then do
+          sl[ob_p[v % 2]] = bytes_like(o, s)
+          sl[ob_p[v % 2] + 1] = bytes_like(o, "")
+          sl[ob_p[v % 2] + 2] = bytes_like(o, "")
+        end
+        else do
+          sl[ob_p[v % 2]] = bytes_like(o, "")
+          sl[ob_p[v % 2] + 1] = bytes_like(o, "")
+          sl[ob_p[v % 2] + 2] = bytes_like(o, s)
+        end
+        return v
+      end
+      sl[ob_p[v % 2]] = bytes_like(o, left(s, p - 1))
+      sl[ob_p[v % 2] + 1] = bytes_like(o, a)
+      sl[ob_p[v % 2] + 2] = bytes_like(o, substr(s, p + length(a)))
+      return v
+    end
+    when nid = 108 then do
+      l = mklist(8)
+      m = 0
+      if na >= 1 then m = truthy(ast[base + 1])
+      n = length(s)
+      i = 1
+      do while i <= n
+        j = i
+        do while j <= n & substr(s, j, 1) \== '0a'x & substr(s, j, 1) \== '0d'x
+          j = j + 1
+        end
+        p = j
+        if j <= n then do
+          if substr(s, j, 1) == '0d'x & substr(s, j + 1, 1) == '0a'x then j = j + 2
+          else j = j + 1
+        end
+        if m = 1 then call list_append l, bytes_like(o, substr(s, i, j - i))
+        else call list_append l, bytes_like(o, substr(s, i, p - i))
+        i = j
+      end
+      return l
+    end
+    when nid = 89 then do
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      if length(a) <= length(s) & length(a) > 0 then do
+        if left(s, length(a)) == a then return bytes_like(o, substr(s, length(a) + 1))
+      end
+      return bytes_like(o, s)
+    end
+    when nid = 90 then do
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      if length(a) <= length(s) & length(a) > 0 then do
+        if right(s, length(a)) == a then return bytes_like(o, left(s, length(s) - length(a)))
+      end
+      return bytes_like(o, s)
+    end
+    when nid = 19 & ba = 1 then return mkbytearr(s)
+    when nid = 4 & ba = 1 then do
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      ob_s[o % 2] = s || a
+      return 2
+    end
+    when nid = 32 & ba = 1 then do
+      if kind_of(ast[base + 1]) = 31 then a = ob_s[ast[base + 1] % 2]
+      else do
+        a = bytes_from_iter(ast[base + 1])
+        if unw > 0 then return 0
+      end
+      ob_s[o % 2] = s || a
+      return 2
+    end
+    when nid = 46 & ba = 1 then do
+      if chk_int(ast[base + 1]) = 0 then return 0
+      a = bytes_needle(ast[base + 2])
+      if unw > 0 then return 0
+      i = ival(ast[base + 1])
+      n = length(s)
+      if i < 0 then i = i + n
+      if i < 0 then i = 0
+      if i > n then i = n
+      ob_s[o % 2] = left(s, i) || a || substr(s, i + 1)
+      return 2
+    end
+    when nid = 79 & ba = 1 then do
+      n = length(s)
+      if n = 0 then return raise_exc(34, "pop from empty bytearray")
+      i = n - 1
+      if na >= 1 then do
+        if chk_int(ast[base + 1]) = 0 then return 0
+        i = ival(ast[base + 1])
+        if i < 0 then i = i + n
+        if i < 0 | i >= n then return raise_exc(34, "pop index out of range")
+      end
+      c = c2d(substr(s, i + 1, 1))
+      ob_s[o % 2] = left(s, i) || substr(s, i + 2)
+      return mkint(c)
+    end
+    when nid = 88 & ba = 1 then do
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      p = pos(a, s)
+      if p = 0 then return raise_exc(36, "value not found in bytearray")
+      ob_s[o % 2] = left(s, p - 1) || substr(s, p + length(a))
+      return 2
+    end
+    when nid = 14 & ba = 1 then do
+      ob_s[o % 2] = ""
+      return 2
+    end
+    when nid = 93 & ba = 1 then do
+      t = ""
+      do i = length(s) to 1 by -1
+        t = t || substr(s, i, 1)
+      end
+      ob_s[o % 2] = t
+      return 2
+    end
+    otherwise nop
+  end
+  return meth_common(o, nid, base, na, nk)
+
+by_isclass: procedure = .int
+  arg s = .string, cls = .int
+  i = .int
+  n = .int
+  c = .string
+  a = .int
+  d = .int
+  n = length(s)
+  if n = 0 then return 0
+  do i = 1 to n
+    c = substr(s, i, 1)
+    a = 0
+    if c >>= "a" & c <<= "z" then a = 1
+    else if c >>= "A" & c <<= "Z" then a = 1
+    d = 0
+    if c >>= "0" & c <<= "9" then d = 1
+    if cls = 1 & a = 0 then return 0
+    if cls = 2 & d = 0 then return 0
+    if cls = 3 & a = 0 & d = 0 then return 0
+    if cls = 4 & (c2d(c) >= 128 | is_ws(c) = 0) then return 0
+  end
+  return 1
+
+/* index into a bytes object: an int, or a bytes slice handled by the caller */
+bytes_geti: procedure = .int
+  arg o = .int, ix = .int
+  s = .string
+  i = .int
+  n = .int
+  s = ob_s[o % 2]
+  if ix // 2 = 0 & ob_k[ix % 2] \= 2 then return raise_exc(38, "byte indices must be integers or slices, not " || type_name(ix))
+  i = idx_int(ix)
+  n = length(s)
+  if i < 0 then i = i + n
+  if i < 0 | i >= n then do
+    if ob_y[o % 2] = 1 then return raise_exc(34, "bytearray index out of range")
+    return raise_exc(34, "index out of range")
+  end
+  return mkint(c2d(substr(s, i + 1, 1)))
+
+bytes_slice: procedure = .int
+  arg o = .int, lo = .int, hi = .int, st = .int
+  s = .string
+  r = .int
+  res = .string
+  p = .int
+  i = .int
+  s = ob_s[o % 2]
+  r = slice_calc(length(s), lo, hi, st)
+  if r = 0 then return 0
+  if sl_b = 1 then return bytes_like(o, substr(s, sl_a + 1, sl_n))
+  res = ""
+  p = sl_a
+  do i = 1 to sl_n
+    res = res || substr(s, p + 1, 1)
+    p = p + sl_b
+  end
+  return bytes_like(o, res)
+
+/* bytearray item / slice assignment */
+bytes_seti: procedure = .void
+  arg o = .int, ix = .int, v = .int
+  s = .string
+  i = .int
+  n = .int
+  r = .int
+  t = .string
+  src = .string
+  s = ob_s[o % 2]
+  if ob_y[o % 2] \= 1 then do
+    r = raise_exc(38, "'bytes' object does not support item assignment")
+    return
+  end
+  if ix // 2 = 0 & ob_k[ix % 2] = 21 then do
+    if kind_of(v) = 31 then src = ob_s[v % 2]
+    else do
+      src = bytes_from_iter(v)
+      if unw > 0 then return
+    end
+    r = slice_calc(length(s), ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    if r = 0 then return
+    if sl_b = 1 then do
+      ob_s[o % 2] = left(s, sl_a) || src || substr(s, sl_a + sl_n + 1)
+      return
+    end
+    if length(src) \= sl_n then do
+      r = raise_exc(36, "attempt to assign bytes of size " || length(src) || " to extended slice of size " || sl_n)
+      return
+    end
+    i = sl_a
+    do n = 1 to sl_n
+      s = left(s, i) || substr(src, n, 1) || substr(s, i + 2)
+      i = i + sl_b
+    end
+    ob_s[o % 2] = s
+    return
+  end
+  if numkind(v) \= 1 then do
+    r = raise_exc(38, "'" || type_name(v) || "' object cannot be interpreted as an integer")
+    return
+  end
+  if ival(v) < 0 | ival(v) > 255 then do
+    r = raise_exc(36, "byte must be in range(0, 256)")
+    return
+  end
+  i = idx_int(ix)
+  n = length(s)
+  if i < 0 then i = i + n
+  if i < 0 | i >= n then do
+    r = raise_exc(34, "bytearray assignment index out of range")
+    return
+  end
+  ob_s[o % 2] = left(s, i) || d2c(ival(v)) || substr(s, i + 2)
+  return
+
+bytes_deli: procedure = .void
+  arg o = .int, ix = .int
+  s = .string
+  i = .int
+  n = .int
+  r = .int
+  s = ob_s[o % 2]
+  if ob_y[o % 2] \= 1 then do
+    r = raise_exc(38, "'bytes' object doesn't support item deletion")
+    return
+  end
+  if ix // 2 = 0 & ob_k[ix % 2] = 21 then do
+    r = slice_calc(length(s), ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    if r = 0 then return
+    if sl_b = 1 then do
+      ob_s[o % 2] = left(s, sl_a) || substr(s, sl_a + sl_n + 1)
+      return
+    end
+    do n = 1 to sl_n
+      i = sl_a + (n - 1) * sl_b
+      s = left(s, i) || "@@" || substr(s, i + 2)
+    end
+    ob_s[o % 2] = changestr("@@", s, "")
+    return
+  end
+  i = idx_int(ix)
+  n = length(s)
+  if i < 0 then i = i + n
+  if i < 0 | i >= n then do
+    r = raise_exc(34, "bytearray index out of range")
+    return
+  end
+  ob_s[o % 2] = left(s, i) || substr(s, i + 2)
+  return
+
+bytes_contains: procedure = .int
+  arg c = .int, x = .int
+  a = .string
+  a = bytes_needle(x)
+  if unw > 0 then return 0
+  if pos(a, ob_s[c % 2]) > 0 | a == "" then return 1
+  return 0
+
+/* ---- int.to_bytes / int.from_bytes ---- */
+int_to_bytes: procedure = .int
+  arg o = .int, base = .int, na = .int, nk = .int
+  nlen = .int
+  order = .string
+  v = .int
+  s = .string
+  neg = .int
+  r = .string
+  i = .int
+  a = .int
+  q = .string
+  m = .string
+  signed = .int
+  nlen = 1
+  order = "big"
+  signed = 0
+  if na >= 1 then v = ast[base + 1]
+  else v = kwarg(base, na, nk, "length")
+  if v \= 0 then do
+    if chk_int(v) = 0 then return 0
+    nlen = ival(v)
+  end
+  v = 0
+  if na >= 2 then v = ast[base + 2]
+  if kwarg(base, na, nk, "byteorder") \= 0 then v = kwarg(base, na, nk, "byteorder")
+  if v \= 0 then order = ob_s[v % 2]
+  if kwarg(base, na, nk, "signed") \= 0 then signed = truthy(kwarg(base, na, nk, "signed"))
+  if order \== "big" & order \== "little" then return raise_exc(36, "byteorder must be either 'little' or 'big'")
+  if nlen < 0 then return raise_exc(36, "length argument must be non-negative")
+  s = num_str(o)
+  neg = 0
+  if left(s, 1) == "-" then do
+    neg = 1
+    s = substr(s, 2)
+    if signed = 0 then return raise_exc(31, "can't convert negative int to unsigned")
+    s = ssub(big_pow("256", nlen), s)
+    if left(s, 1) == "-" then return raise_exc(31, "int too big to convert")
+  end
+  r = ""
+  do i = 1 to nlen
+    call sdivmod s, "256"
+    a = sr as .int
+    s = sq
+    r = d2c(a) || r
+  end
+  if s \== "0" then return raise_exc(31, "int too big to convert")
+  if signed = 1 & neg = 0 & nlen > 0 then do
+    if c2d(left(r, 1)) >= 128 then return raise_exc(31, "int too big to convert")
+  end
+  if signed = 1 & neg = 1 & nlen > 0 then do
+    if c2d(left(r, 1)) < 128 then return raise_exc(31, "int too big to convert")
+  end
+  if order == "little" then do
+    q = ""
+    do i = length(r) to 1 by -1
+      q = q || substr(r, i, 1)
+    end
+    r = q
+  end
+  return mkbytes(r)
+
+int_from_bytes: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  x = .int
+  s = .string
+  order = .string
+  v = .int
+  signed = .int
+  acc = .string
+  i = .int
+  n = .int
+  b = .int
+  small = .int
+  order = "big"
+  signed = 0
+  x = 0
+  if na >= 1 then x = ast[base + 1]
+  if x = 0 then x = kwarg(base, na, nk, "bytes")
+  if x = 0 then return nargs_err("from_bytes", na, 1, 3)
+  if kind_of(x) = 31 then s = ob_s[x % 2]
+  else do
+    s = bytes_from_iter(x)
+    if unw > 0 then return 0
+  end
+  v = 0
+  if na >= 2 then v = ast[base + 2]
+  if kwarg(base, na, nk, "byteorder") \= 0 then v = kwarg(base, na, nk, "byteorder")
+  if v \= 0 then order = ob_s[v % 2]
+  if kwarg(base, na, nk, "signed") \= 0 then signed = truthy(kwarg(base, na, nk, "signed"))
+  if order \== "big" & order \== "little" then return raise_exc(36, "byteorder must be either 'little' or 'big'")
+  n = length(s)
+  if order == "little" then do
+    acc = ""
+    do i = n to 1 by -1
+      acc = acc || substr(s, i, 1)
+    end
+    s = acc
+  end
+  if n = 0 then return mkint(0)
+  small = 0
+  if n <= 7 then small = 1
+  if small = 1 then do
+    b = 0
+    do i = 1 to n
+      b = b * 256 + c2d(substr(s, i, 1))
+    end
+    if signed = 1 & c2d(left(s, 1)) >= 128 then b = b - 256 ** n
+    return mkint(b)
+  end
+  acc = "0"
+  do i = 1 to n
+    acc = sadd(smul(acc, "256"), c2d(substr(s, i, 1)) as .string)
+  end
+  if signed = 1 & c2d(left(s, 1)) >= 128 then acc = ssub(acc, big_pow("256", n))
+  return big_norm(acc)
+
+/* ---------------------------------------------------------------------
+   complex numbers (kind K_COMPLEX: ob_f = real part, ob_g = imaginary part)
+   Results of the c_xxx helpers are left in cr_r / cr_i.
+   --------------------------------------------------------------------- */
+mkcplx: procedure = .int
+  arg re = .float, im = .float
+  nob = nob + 1
+  ob_k[nob] = 32
+  ob_f[nob] = re
+  ob_g[nob] = im
+  return nob * 2
+
+/* real and imaginary part of a number into cx_re / cx_im (first) or cx_re2 / cx_im2 (second) */
+cplx_get: procedure = .void
+  arg x = .int
+  if kind_of(x) = 32 then do
+    cx_re = ob_f[x % 2]
+    cx_im = ob_g[x % 2]
+  end
+  else do
+    cx_re = tofloat(x)
+    cx_im = 0.0
+  end
+  return
+
+cplx_get2: procedure = .void
+  arg x = .int
+  if kind_of(x) = 32 then do
+    cx_re2 = ob_f[x % 2]
+    cx_im2 = ob_g[x % 2]
+  end
+  else do
+    cx_re2 = tofloat(x)
+    cx_im2 = 0.0
+  end
+  return
+
+c_mul: procedure = .void
+  arg ar = .float, ai = .float, br = .float, bi = .float
+  cr_r = ar * br - ai * bi
+  cr_i = ar * bi + ai * br
+  return
+
+/* a / b; 0 on division by zero */
+c_quot: procedure = .int
+  arg ar = .float, ai = .float, br = .float, bi = .float
+  abr = .float
+  abi = .float
+  ratio = .float
+  denom = .float
+  abr = rxfloat..fabs(br)
+  abi = rxfloat..fabs(bi)
+  if abr >= abi then do
+    if abr = 0.0 then return 0
+    ratio = bi / br
+    denom = br + bi * ratio
+    cr_r = (ar + ai * ratio) / denom
+    cr_i = (ai - ar * ratio) / denom
+    return 1
+  end
+  if abi >= abr then do
+    ratio = br / bi
+    denom = br * ratio + bi
+    cr_r = (ar * ratio + ai) / denom
+    cr_i = (ai * ratio - ar) / denom
+    return 1
+  end
+  cr_r = f_nan()
+  cr_i = f_nan()
+  return 1
+
+/* x ** n for 0 < n <= 100 by binary exponentiation (as CPython) */
+c_powu: procedure = .void
+  arg ar = .float, ai = .float, n = .int
+  rr = .float
+  ri = .float
+  pr = .float
+  pi = .float
+  mask = .int
+  rr = 1.0
+  ri = 0.0
+  pr = ar
+  pi = ai
+  mask = 1
+  do while n >= mask
+    if ((n % mask) // 2) = 1 then do
+      call c_mul rr, ri, pr, pi
+      rr = cr_r
+      ri = cr_i
+    end
+    mask = mask * 2
+    call c_mul pr, pi, pr, pi
+    pr = cr_r
+    pi = cr_i
+  end
+  cr_r = rr
+  cr_i = ri
+  return
+
+/* a ** b; 0 when 0 is raised to a negative or complex power */
+c_pow: procedure = .int
+  arg ar = .float, ai = .float, br = .float, bi = .float
+  vabs = .float
+  ln = .float
+  at = .float
+  phase = .float
+  n = .int
+  if bi = 0.0 & br = rxfloat..floor(br) & rxfloat..fabs(br) <= 100.0 then do
+    n = rxfloat..trunc(br) as .int
+    if n > 0 then do
+      call c_powu ar, ai, n
+      return 1
+    end
+    if n = 0 then do
+      call c_powu ar, ai, 0
+      return c_quot(1.0, 0.0, cr_r + 0.0, cr_i + 0.0)
+    end
+    call c_powu ar, ai, 0 - n
+    return c_quot(1.0, 0.0, cr_r + 0.0, cr_i + 0.0)
+  end
+  if br = 0.0 & bi = 0.0 then do
+    cr_r = 1.0
+    cr_i = 0.0
+    return 1
+  end
+  if ar = 0.0 & ai = 0.0 then do
+    cr_r = 0.0
+    cr_i = 0.0
+    if bi \= 0.0 | br < 0.0 then return 0
+    return 1
+  end
+  vabs = rxfloat..hypot(ar, ai)
+  ln = rxfloat..pow(vabs, br)
+  at = rxfloat..atan2(ai, ar)
+  phase = at * br
+  if bi \= 0.0 then do
+    ln = ln / rxfloat..exp(at * bi)
+    phase = phase + bi * rxfloat..log(vabs)
+  end
+  cr_r = ln * rxfloat..cos(phase)
+  cr_i = ln * rxfloat..sin(phase)
+  return 1
+
+cplx_arith: procedure = .int
+  arg op = .int, x = .int, y = .int
+  ar = .float
+  ai = .float
+  br = .float
+  bi = .float
+  call cplx_get x
+  call cplx_get2 y
+  ar = cx_re
+  ai = cx_im
+  br = cx_re2
+  bi = cx_im2
+  select
+    when op = 1 then return mkcplx(ar + br, ai + bi)
+    when op = 2 then return mkcplx(ar - br, ai - bi)
+    when op = 3 then do
+      call c_mul ar, ai, br, bi
+      return mkcplx(cr_r, cr_i)
+    end
+    when op = 4 then do
+      if c_quot(ar, ai, br, bi) = 0 then return raise_exc(30, "complex division by zero")
+      return mkcplx(cr_r, cr_i)
+    end
+    when op = 7 then do
+      if c_pow(ar, ai, br, bi) = 0 then return raise_exc(30, "0.0 to a negative or complex power")
+      return mkcplx(cr_r, cr_i)
+    end
+    otherwise return err_binop(op_sym(op), x, y)
+  end
+  return 0
+
+cplx_unary: procedure = .int
+  arg op = .int, x = .int
+  if op = 1 then return mkcplx(fneg(ob_f[x % 2]), fneg(ob_g[x % 2]))
+  if op = 2 then return x
+  return raise_exc(38, "bad operand type for unary ~: 'complex'")
+
+cplx_abs: procedure = .int
+  arg x = .int
+  return mkfloat(rxfloat..hypot(ob_f[x % 2], ob_g[x % 2]))
+
+/* equality of x and y where at least one is complex */
+cplx_eq: procedure = .int
+  arg x = .int, y = .int
+  if kind_of(x) \= 32 & numkind(x) = 0 then return 0
+  if kind_of(y) \= 32 & numkind(y) = 0 then return 0
+  call cplx_get x
+  call cplx_get2 y
+  if cx_re = cx_re2 & cx_im = cx_im2 then return 1
+  return 0
+
+/* repr of a float part without a trailing .0 */
+cplx_part: procedure = .string
+  arg f = .float
+  s = .string
+  s = float_repr(f)
+  if right(s, 2) == ".0" then s = left(s, length(s) - 2)
+  return s
+
+cplx_repr: procedure = .string
+  arg re = .float, im = .float
+  sg2 = .string
+  it = .string
+  if re = 0.0 & fl_negzero(re) = 0 then return cplx_part(im) || "j"
+  if im < 0.0 | fl_negzero(im) = 1 then do
+    sg2 = "-"
+    it = cplx_part(fneg(im))
+  end
+  else do
+    sg2 = "+"
+    it = cplx_part(im)
+  end
+  return "(" || cplx_part(re) || sg2 || it || "j)"
+
+/* format(z, spec) */
+format_complex: procedure = .string
+  arg v = .int, spec = .string
+  fill = .string
+  align = .string
+  sgn = .string
+  alt = .string
+  width = .int
+  prec = .int
+  ty = .string
+  i = .int
+  n = .int
+  c = .string
+  re = .float
+  im = .float
+  rs = .string
+  ims = .string
+  s2 = .string
+  parens = .int
+  skipre = .int
+  sp = .string
+  fill = ""
+  align = ""
+  sgn = ""
+  alt = ""
+  width = 0
+  prec = -1
+  ty = ""
+  i = 1
+  n = length(spec)
+  if n >= 2 & pos(substr(spec, 2, 1), "<>^=") > 0 then do
+    fill = substr(spec, 1, 1)
+    align = substr(spec, 2, 1)
+    i = 3
+  end
+  else if n >= 1 & pos(substr(spec, 1, 1), "<>^=") > 0 then do
+    align = substr(spec, 1, 1)
+    i = 2
+  end
+  c = substr(spec, i, 1)
+  if c == "+" | c == "-" | c == " " then do
+    sgn = c
+    i = i + 1
+  end
+  if substr(spec, i, 1) == "#" then do
+    alt = "#"
+    i = i + 1
+  end
+  if substr(spec, i, 1) == "0" then i = i + 1
+  do while i <= n & isdigit(substr(spec, i, 1)) = 1
+    width = width * 10 + (substr(spec, i, 1) as .int)
+    i = i + 1
+  end
+  if substr(spec, i, 1) == "." then do
+    i = i + 1
+    prec = 0
+    do while i <= n & isdigit(substr(spec, i, 1)) = 1
+      prec = prec * 10 + (substr(spec, i, 1) as .int)
+      i = i + 1
+    end
+  end
+  if i <= n then ty = substr(spec, i, 1)
+  if i < n then do
+    call raise_exc 36, "Invalid format specifier"
+    return ""
+  end
+  if align == "=" then do
+    call raise_exc 36, "'=' alignment flag is not allowed in complex format specifier"
+    return ""
+  end
+  if ty \== "" & pos(ty, "eEfFgGn") = 0 then do
+    call raise_exc 36, "Unknown format code '" || ty || "' for object of type 'complex'"
+    return ""
+  end
+  re = ob_f[v % 2]
+  im = ob_g[v % 2]
+  parens = 0
+  skipre = 0
+  if ty == "" then do
+    if re = 0.0 & fl_negzero(re) = 0 then skipre = 1
+    else parens = 1
+  end
+  if ty == "" & prec < 0 then do
+    /* like repr, without the trailing .0 */
+    if skipre = 0 then do
+      if sgn == "+" & re >= 0.0 then rs = "+" || cplx_part(re)
+      else if sgn == " " & re >= 0.0 then rs = " " || cplx_part(re)
+      else rs = cplx_part(re)
+    end
+    else rs = ""
+    if im < 0.0 | fl_negzero(im) = 1 then ims = "-" || cplx_part(fneg(im))
+    else if skipre = 0 | sgn == "+" then ims = "+" || cplx_part(im)
+    else if sgn == " " then ims = " " || cplx_part(im)
+    else ims = cplx_part(im)
+  end
+  else do
+    sp = "." || prec
+    if prec < 0 then sp = ""
+    if ty == "" then s2 = "g"
+    else s2 = ty
+    if skipre = 0 then rs = format_value(mkfloat(re), sgn || alt || sp || s2)
+    else rs = ""
+    if unw > 0 then return ""
+    if skipre = 0 then ims = format_value(mkfloat(im), "+" || alt || sp || s2)
+    else ims = format_value(mkfloat(im), sgn || alt || sp || s2)
+    if unw > 0 then return ""
+  end
+  s2 = rs || ims || "j"
+  if parens = 1 then s2 = "(" || s2 || ")"
+  if align == "" then align = ">"
+  return fmt_pad("", s2, fill, align, width)
+
+/* complex("1+2j") */
+cplx_parse: procedure = .int
+  arg s0 = .string
+  s = .string
+  n = .int
+  i = .int
+  c = .string
+  p = .int
+  rs = .string
+  ims = .string
+  re = .float
+  im = .float
+  v = .int
+  hasj = .int
+  s = strip(s0)
+  if left(s, 1) == "(" & right(s, 1) == ")" then s = strip(substr(s, 2, length(s) - 2))
+  n = length(s)
+  if n = 0 then return raise_exc(36, "complex() arg is a malformed string")
+  re = 0.0
+  im = 0.0
+  hasj = 0
+  if lower(right(s, 1)) == "j" then hasj = 1
+  if hasj = 0 then do
+    v = parse_float_str(s)
+    if v = 0 then do
+      unw = 0
+      return raise_exc(36, "complex() arg is a malformed string")
+    end
+    return mkcplx(ob_f[v % 2], 0.0)
+  end
+  s = left(s, n - 1)
+  n = n - 1
+  /* split at the last + or - that is not at the start and does not follow an exponent letter */
+  p = 0
+  do i = n to 2 by -1
+    c = substr(s, i, 1)
+    if c == "+" | c == "-" then do
+      if lower(substr(s, i - 1, 1)) \== "e" then do
+        p = i
+        leave
+      end
+    end
+  end
+  if p = 0 then do
+    rs = ""
+    ims = s
+  end
+  else do
+    rs = left(s, p - 1)
+    ims = substr(s, p)
+  end
+  if ims == "" | ims == "+" then ims = "1"
+  else if ims == "-" then ims = "-1"
+  if rs \== "" then do
+    v = parse_float_str(rs)
+    if v = 0 then do
+      unw = 0
+      return raise_exc(36, "complex() arg is a malformed string")
+    end
+    re = ob_f[v % 2]
+  end
+  v = parse_float_str(ims)
+  if v = 0 then do
+    unw = 0
+    return raise_exc(36, "complex() arg is a malformed string")
+  end
+  im = ob_f[v % 2]
+  return mkcplx(re, im)
+
+/* complex(...) */
+ctor_complex: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  a = .int
+  b = .int
+  ar = .float
+  ai = .float
+  br = .float
+  bi = .float
+  m = .int
+  a = 0
+  b = 0
+  if na >= 1 then a = ast[base + 1]
+  if na >= 2 then b = ast[base + 2]
+  if kwarg(base, na, nk, "real") \= 0 then a = kwarg(base, na, nk, "real")
+  if kwarg(base, na, nk, "imag") \= 0 then b = kwarg(base, na, nk, "imag")
+  if na > 2 then return nargs_err("complex", na, 0, 2)
+  if a = 0 & b = 0 then return mkcplx(0.0, 0.0)
+  if a \= 0 then do
+    if kind_of(a) = 6 then do
+      if b \= 0 then return raise_exc(38, "complex() can't take second arg if first is a string")
+      return cplx_parse(ob_s[a % 2])
+    end
+    if kind_of(a) \= 32 & numkind(a) = 0 then do
+      m = ovr(a, nameid("__complex__"))
+      if m > 0 then return call1(m, a)
+      return raise_exc(38, "complex() first argument must be a string or a number, not '" || type_name(a) || "'")
+    end
+  end
+  if b \= 0 then do
+    if kind_of(b) = 6 then return raise_exc(38, "complex() second arg can't be a string")
+    if kind_of(b) \= 32 & numkind(b) = 0 then return raise_exc(38, "complex() second argument must be a number, not '" || type_name(b) || "'")
+  end
+  if b = 0 then do
+    if kind_of(a) = 32 then return a
+    return mkcplx(tofloat(a), 0.0)
+  end
+  if kind_of(b) \= 32 then do
+    if a = 0 then return mkcplx(0.0, tofloat(b))
+    if kind_of(a) \= 32 then return mkcplx(tofloat(a), tofloat(b))
+  end
+  ar = 0.0
+  ai = 0.0
+  if a \= 0 then do
+    call cplx_get a
+    ar = cx_re
+    ai = cx_im
+  end
+  call cplx_get b
+  br = cx_re
+  bi = cx_im
+  /* a + b*1j */
+  return mkcplx(ar - bi, ai + br)
+
+meth_complex: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  if nid = 18 then return mkcplx(ob_f[o % 2], fneg(ob_g[o % 2]))
+  return meth_common(o, nid, base, na, nk)
+
+/* ---- elementary functions on a complex number (re, im) -> cr_r, cr_i (as CPython's cmath / C99) ---- */
+c_sqrt: procedure = .void
+  arg re = .float, im = .float
+  ar = .float
+  ai = .float
+  s = .float
+  d = .float
+  if re = 0.0 & im = 0.0 then do
+    cr_r = 0.0
+    cr_i = im
+    return
+  end
+  ar = rxfloat..fabs(re) / 8.0
+  ai = rxfloat..fabs(im)
+  s = 2.0 * rxfloat..sqrt(ar + rxfloat..hypot(ar, ai / 8.0))
+  d = ai / (2.0 * s)
+  if re >= 0.0 then do
+    cr_r = s
+    cr_i = d
+    if im < 0.0 | fl_negzero(im) = 1 then cr_i = fneg(d)
+  end
+  else do
+    cr_r = d
+    cr_i = s
+    if im < 0.0 | fl_negzero(im) = 1 then cr_i = fneg(s)
+  end
+  return
+
+c_exp: procedure = .void
+  arg re = .float, im = .float
+  l = .float
+  if im = 0.0 then do
+    cr_r = rxfloat..exp(re)
+    cr_i = im
+    return
+  end
+  l = rxfloat..exp(re)
+  cr_r = l * rxfloat..cos(im)
+  cr_i = l * rxfloat..sin(im)
+  return
+
+c_log: procedure = .void
+  arg re = .float, im = .float
+  cr_r = rxfloat..log(rxfloat..hypot(re, im))
+  cr_i = rxfloat..atan2(im, re)
+  return
+
+/* ---- bridge to pylib numpy/_cplx.py (complex128 arrays are implemented there) ---- */
+is_cx: procedure = .int
+  arg v = .int
+  k = .int
+  if v // 2 \= 0 then return 0
+  k = ob_k[v % 2]
+  if k = 32 then return 1
+  if k = 17 then do
+    if cl_name[ob_c[v % 2]] == "_CArr" then return 1
+  end
+  return 0
+
+cx_func: procedure = .int
+  arg fname = .string
+  m = .int
+  m = import_mod("numpy._cplx")
+  if m = 0 then return 0
+  return getattr_obj(m, nameid(fname), 0)
+
+cx_call1: procedure = .int
+  arg fname = .string, a = .int
+  f = .int
+  f = cx_func(fname)
+  if f = 0 then return 0
+  return call1(f, a)
+
+cx_dispatch: procedure = .int
+  arg bid = .int, base = .int, na = .int, nk = .int
+  f = .int
+  t = .int
+  d = .int
+  j = .int
+  f = cx_func("_dispatch")
+  if f = 0 then return 0
+  t = tup_from_ast(base + 1, base + na)
+  d = dict_new(9)
+  do j = 1 to nk
+    call dict_put d, "s" || asn[base + na + j], mkstr(asn[base + na + j]), ast[base + na + j]
+  end
+  return call3(f, mkstr(bi_name[bid]), t, d)
+
+/* ---------------------------------------------------------------------
+   User subclasses of built-in types, __new__
+
+   An instance of class Sub(list) is an ordinary native list object (K_LIST) whose ob_c field holds
+   the class id of Sub.  Instance attributes live in a K_INST "holder" object (stem xa).  The
+   interpreter operations ask nsov(x, name) for a user-defined override before the native action.
+   --------------------------------------------------------------------- */
+
+/* class id when x is a native object that is an instance of a user subclass, else 0 */
+nsub: procedure = .int
+  arg x = .int
+  k = .int
+  if x // 2 \= 0 then return 0
+  k = ob_k[x % 2]
+  if k >= 6 & k <= 10 then return ob_c[x % 2]
+  if k = 5 | k = 4 | k = 31 then return ob_c[x % 2]
+  return 0
+
+/* the user-defined method nid of a subclass instance (0 if none or when explicitly bypassed) */
+nsov: procedure = .int
+  arg x = .int, nid = .int
+  c = .int
+  c = nsub(x)
+  if c = 0 then return 0
+  if nat_skip = x then do
+    nat_skip = 0
+    return 0
+  end
+  return cls_find(c, nid)
+
+/* class id of a K_INST or a native subclass instance, else 0 */
+ocls: procedure = .int
+  arg x = .int
+  if x // 2 \= 0 then return 0
+  if ob_k[x % 2] = 17 then return ob_c[x % 2]
+  return nsub(x)
+
+/* like nsov for K_INST and native subclass instances */
+ovr: procedure = .int
+  arg x = .int, nid = .int
+  c = .int
+  c = ocls(x)
+  if c = 0 then return 0
+  if nat_skip = x then do
+    nat_skip = 0
+    return 0
+  end
+  return cls_find(c, nid)
+
+nat_holder: procedure = .int
+  arg x = .int
+  v = .string
+  v = nat_at["h" || x]
+  if v == "" then return 0
+  return v as .int
+
+nat_holder_make: procedure = .int
+  arg x = .int
+  h = .int
+  h = nat_holder(x)
+  if h = 0 then do
+    h = inst_new(ob_c[x % 2])
+    nat_at["h" || x] = h as .string
+  end
+  return h
+
+/* attribute of a subclass instance found in its own attributes or its class; 0 when absent */
+nat_getattr: procedure = .int
+  arg o = .int, c = .int, nid = .int
+  h = .int
+  v = .int
+  h = nat_holder(o)
+  if h > 0 then do
+    v = inst_get(h, nid)
+    if v \= 0 then return v
+  end
+  v = cls_find(c, nid)
+  if v > 0 then return bind_attr(v, o, c)
+  if nid = 139 then return cl_obj[c]
+  if nid = 143 then return inst_dict(nat_holder_make(o))
+  return 0
+
+nat_setattr: procedure = .void
+  arg o = .int, c = .int, nid = .int, v = .int, raw = .int
+  p = .int
+  r = .int
+  p = cls_find(c, nid)
+  if p > 0 then do
+    if kind_of(p) = 22 then do
+      if ob_y[p % 2] = 0 then do
+        r = raise_exc(41, "can't set attribute '" || nid_name[nid] || "'")
+        return
+      end
+      r = call2(ob_y[p % 2], o, v)
+      return
+    end
+  end
+  if raw = 0 then do
+    p = cls_find(c, 195)
+    if p > 0 then do
+      r = call3(p, o, mkstr(nid_name[nid]), v)
+      return
+    end
+  end
+  call inst_set nat_holder_make(o), nid, v
+  return
+
+/* an empty mutable native object of built-in type bt, an instance of class c */
+nat_empty: procedure = .int
+  arg bt = .int, c = .int
+  o = .int
+  if bt = 7 then o = mklist(4)
+  else if bt = 9 then o = dict_new(9)
+  else if bt = 10 then o = dict_new(10)
+  else if bt = 84 then o = mkbytearr("")
+  else o = mklist(4)
+  ob_c[o % 2] = c
+  return o
+
+/* a copy of the plain native value v (built-in type bt) as an instance of class c */
+nat_wrap: procedure = .int
+  arg v = .int, bt = .int, c = .int
+  o = .int
+  i = .int
+  if bt = 8 then do
+    o = newobj(8)
+    ob_p[o % 2] = ob_p[v % 2]
+    ob_n[o % 2] = ob_n[v % 2]
+    ob_x[o % 2] = ob_x[v % 2]
+  end
+  else if bt = 6 then o = mkstr(ob_s[v % 2])
+  else if bt = 3 then o = mkbig(num_str(v))
+  else if bt = 4 then o = mkfloat(tofloat(v))
+  else if bt = 83 then o = mkbytes(ob_s[v % 2])
+  else if bt = 84 then o = mkbytearr(ob_s[v % 2])
+  else if bt = 7 then do
+    o = mklist(ob_n[v % 2])
+    call list_extend_from o, v
+  end
+  else if bt = 9 | bt = 10 then do
+    o = dict_new(ob_k[v % 2])
+    call dict_update o, v
+    ob_y[o % 2] = ob_y[v % 2]
+  end
+  else return v
+  ob_c[o % 2] = c
+  return o
+
+/* fill the empty mutable object o from constructor arguments (list(x), dict(x, **kw), set(x)) */
+nat_fill: procedure = .int
+  arg o = .int, bt = .int, base = .int, na = .int, nk = .int
+  tmp = .int
+  tmp = bcall_type(bt, base, na, nk)
+  if tmp = 0 then return 0
+  if bt = 7 then call list_extend_from o, tmp
+  else if bt = 84 then ob_s[o % 2] = ob_s[tmp % 2]
+  else call dict_update o, tmp
+  return 1
+
+/* call the user-defined __init__ init with the receiver o and the call arguments; 0 on error */
+call_init: procedure = .int
+  arg init = .int, o = .int, base = .int, na = .int, nk = .int
+  r = .int
+  call ast_insert base, na + nk, o
+  r = docall(init, base, na + 1, nk)
+  if r = 0 then return 0
+  if r \= 2 then return raise_exc(38, "__init__() should return None, not '" || type_name(r) || "'")
+  return 1
+
+/* instantiate a class that derives from a built-in container / value type */
+inst_native: procedure = .int
+  arg c = .int, base = .int, na = .int, nk = .int
+  bt = .int
+  init = .int
+  userinit = .int
+  o = .int
+  v = .int
+  bt = cl_bt[c]
+  init = cls_find(c, 160)
+  userinit = 0
+  if init > 0 then do
+    if kind_of(init) = 12 then userinit = 1
+  end
+  if bt = 7 | bt = 9 | bt = 10 | bt = 84 then do
+    o = nat_empty(bt, c)
+    if userinit = 1 then do
+      if call_init(init, o, base, na, nk) = 0 then return 0
+    end
+    else if na + nk > 0 then do
+      if nat_fill(o, bt, base, na, nk) = 0 then return 0
+    end
+    return o
+  end
+  v = bcall_type(bt, base, na, nk)
+  if v = 0 then return 0
+  o = nat_wrap(v, bt, c)
+  if userinit = 1 then do
+    if call_init(init, o, base, na, nk) = 0 then return 0
+  end
+  return o
+
+/* class c has a user-defined __new__ nw: new = nw(cls, *args); then __init__ when it is an instance */
+inst_with_new: procedure = .int
+  arg c = .int, nw = .int, base = .int, na = .int, nk = .int
+  r = .int
+  init = .int
+  call ast_insert base, na + nk, cl_obj[c]
+  r = docall(nw, base, na + 1, nk)
+  if r = 0 then return 0
+  if cls_issub(cls_of(r), c) = 0 then return r
+  init = cls_find(c, 160)
+  if init > 0 then do
+    if kind_of(init) = 12 then do
+      ast[base + 1] = r
+      if docall_init(init, base, na + 1, nk) = 0 then return 0
+    end
+  end
+  return r
+
+docall_init: procedure = .int
+  arg init = .int, base = .int, na = .int, nk = .int
+  r = .int
+  r = docall(init, base, na, nk)
+  if r = 0 then return 0
+  if r \= 2 then return raise_exc(38, "__init__() should return None, not '" || type_name(r) || "'")
+  return 1
+
+/* X.__new__(cls, args...) for the built-in type bc: ast[base+1] = cls */
+cls_new: procedure = .int
+  arg bc = .int, base = .int, na = .int, nk = .int
+  tc = .int
+  v = .int
+  o = .int
+  if na < 1 then return raise_exc(38, cl_name[bc] || ".__new__(): not enough arguments")
+  if kind_of(ast[base + 1]) \= 16 then return raise_exc(38, cl_name[bc] || ".__new__(X): X is not a type object (" || type_name(ast[base + 1]) || ")")
+  tc = ob_x[ast[base + 1] % 2]
+  if cls_issub(tc, bc) = 0 then return raise_exc(38, cl_name[bc] || ".__new__(" || cl_name[tc] || "): " || cl_name[tc] || " is not a subtype of " || cl_name[bc])
+  if bc = 1 | (cl_flags[bc] // 4) >= 2 then do
+    if cl_bt[tc] > 0 then return nat_empty(cl_bt[tc], tc)
+    o = inst_new(tc)
+    if (cl_flags[tc] // 4) >= 2 then call inst_set o, 8, tup_from_ast(base + 2, base + na)
+    return o
+  end
+  if bc = 7 | bc = 9 | bc = 10 | bc = 84 then do
+    o = nat_empty(bc, tc)
+    if bc = 10 & na > 1 then do
+      if nat_fill(o, bc, base + 1, na - 1, nk) = 0 then return 0
+    end
+    return o
+  end
+  v = bcall_type(bc, base + 1, na - 1, nk)
+  if v = 0 then return 0
+  if tc = bc then return v
+  return nat_wrap(v, bc, tc)
+
+/* the built-in base class that follows the defining class of super object o in the linearisation */
+super_base: procedure = .int
+  arg o = .int
+  selfv = .int
+  dcls = .int
+  start = .int
+  i = .int
+  p = .int
+  k = .int
+  selfv = ob_x[o % 2]
+  dcls = ob_x[ob_y[o % 2] % 2]
+  if kind_of(selfv) = 16 then start = ob_x[selfv % 2]
+  else start = cls_of(selfv)
+  p = cl_mn[start]
+  do i = 0 to cl_mn[start] - 1
+    if mro_a[cl_ms[start] + i] = dcls then do
+      p = i
+      leave
+    end
+  end
+  do i = p + 1 to cl_mn[start] - 1
+    k = mro_a[cl_ms[start] + i]
+    if cl_flags[k] // 2 = 1 then return k
+  end
+  return 1
+
+/* iterator for the result of a user-defined __iter__ */
+iter_wrap: procedure = .int
+  arg r = .int
+  if r = 0 then return 0
+  if kind_of(r) = 19 | kind_of(r) = 20 then return r
+  if kind_of(r) = 17 then do
+    if cls_find(ob_c[r % 2], 177) > 0 then return mkiter(7, r, 0)
+  end
+  if kind_of(r) = 7 | kind_of(r) = 8 then return mkiter(1, r, 0)
+  return raise_exc(38, "iter() returned non-iterator of type '" || type_name(r) || "'")
+
+/* the plain int for an instance of an int subclass (small values are stored as K_BIG), else x */
+unsub: procedure = .int
+  arg x = .int
+  if x // 2 \= 0 then return x
+  if ob_k[x % 2] = 4 then do
+    if ob_c[x % 2] > 0 then return big_norm(ob_s[x % 2])
+  end
+  return x
+
+/* ---------------------------------------------------------------------
+   _sock(op, h, a, b): thin access to the rxsocket library for pylib/socket.py
+   --------------------------------------------------------------------- */
+sock_call: procedure = .int
+  arg base = .int, na = .int
+  op = .int
+  h = .int
+  r = .int
+  s = .string
+  bin = .binary
+  if na < 2 then return raise_exc(38, "_sock() needs an operation and a handle")
+  op = ival(ast[base + 1])
+  h = ival(ast[base + 2])
+  select
+    when op = 1 then return mkint(socketcreate())
+    when op = 2 then return mkint(socketclose(h))
+    when op = 3 then return mkint(socketconnect(h, ob_s[ast[base + 3] % 2], ival(ast[base + 4])))
+    when op = 4 then return mkint(socketbind(h, ob_s[ast[base + 3] % 2], ival(ast[base + 4])))
+    when op = 5 then return mkint(socketlisten(h, ival(ast[base + 3])))
+    when op = 6 then return mkint(socketaccept(h))
+    when op = 7 then do
+      s = ob_s[ast[base + 3] % 2]
+      if length(s) = 0 then return mkint(0)
+      bin = x2bin(c2x(s))
+      return mkint(socketsendb(h, bin))
+    end
+    when op = 8 then do
+      bin = socketrecvb(h, ival(ast[base + 3]))
+      s = bin2x(bin)
+      if length(s) = 0 then return mkbytes("")
+      return mkbytes(x2c(s))
+    end
+    when op = 9 then return mkint(sockettimeout(h, ival(ast[base + 3])))
+    when op = 10 then return mkint(socketstatus(h))
+    when op = 11 then return mkstr(socketerror(h))
+    when op = 12 then return mkstr(socketpeer(h))
+    when op = 13 then return mkstr(socketlocal(h))
+    when op = 14 then return mkint(socketshutdown(h, ival(ast[base + 3])))
+    when op = 15 then return mkint(socketblocking(h, ival(ast[base + 3])))
+    when op = 16 then return mkint(socketnodelay(h, ival(ast[base + 3])))
+    when op = 17 then return mkint(socketpending(h))
+    otherwise nop
+  end
+  return 2
 

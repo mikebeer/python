@@ -98,8 +98,9 @@ format_value: procedure = .string
   hasprec = .int
   if spec == "" then return str_of(v)
   k = kind_of(v)
-  if k = K_INST then do
-    m = cls_find(ob_c[v % 2], M___FORMAT__)
+  if k = K_COMPLEX then return format_complex(v, spec)
+  if ocls(v) > 0 then do
+    m = ovr(v, M___FORMAT__)
     if m > 0 then do
       r = call2(m, v, mkstr(spec))
       if r = 0 then return ""

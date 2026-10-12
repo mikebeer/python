@@ -44,7 +44,9 @@ static Value mkbuiltin(const char *name, BFn fn)
 static void def_bi(Class *c, const char *name, BFn fn)
 {
     Value b = mkbuiltin(name, fn);
-    if (c && (c == cls_str || c == cls_list || c == cls_tuple || c == cls_dict || c == cls_set))
+    if (c && (c == cls_str || c == cls_list || c == cls_tuple || c == cls_dict || c == cls_set ||
+              c == cls_int || c == cls_float || c == cls_bytes || c == cls_bytearray ||
+              c == cls_complex || c == cls_frozenset))
         ((Builtin *)b.u.o)->selfpay = 1;
     if (c) amap_set(&c->ns, intern_c(name), b);
     else set_global(intern_c(name), b);
@@ -165,6 +167,10 @@ BI(bi_repr)
 BI(bi_str)
 {
     if (x->n == 0) return mkstr("", 0);
+    if ((x->n > 1 || x->nk > 0) && (A(0).t == T_BYTES || A(0).t == T_BARR)) {
+        Value *m = class_find(class_of(A(0)), intern_c("decode"));
+        if (m) return call_value(*m, x->n, x->a, x->nk, x->kw);
+    }
     return py_str(A(0));
 }
 BI(bi_bool)
@@ -180,6 +186,9 @@ BI(bi_int)
     v = A(0);
     if (x->n > 1) bv = A(1);
     if (bv.t != T_UNSET) base = (int)to_index(bv);
+    if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET && !class_find(AS_INST(v)->cls, S_int) &&
+        !class_find(AS_INST(v)->cls, S_index))
+        v = AS_INST(v)->pay;
     if (v.t == T_STR) {
         Value r;
         if (!parse_int(AS_STR(v)->s, AS_STR(v)->len, bv.t == T_UNSET ? 10 : base, &r)) {
@@ -210,6 +219,9 @@ BI(bi_float)
     Value v;
     if (x->n == 0) return mkfloat(0.0);
     v = A(0);
+    if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET && !class_find(AS_INST(v)->cls, S_float))
+        v = AS_INST(v)->pay;
+    if (v.t == T_BYTES) v = mkstr(AS_STR(v)->s, AS_STR(v)->len);
     if (v.t == T_FLOAT) return v;
     if (is_intv(v)) return mkfloat(int_todouble(v));
     if (v.t == T_STR) {
@@ -236,6 +248,7 @@ BI(bi_abs)
     if (v.t == T_INT || v.t == T_BOOL) return mkint(v.u.i < 0 ? -v.u.i : v.u.i);
     if (v.t == T_FLOAT) return mkfloat(fabs(v.u.d));
     if (v.t == T_BIG) return int_sign(v) < 0 ? int_neg(v) : v;
+    if (v.t == T_COMPLEX) return mkfloat(n_hypot(AS_CPLX(v)->re, AS_CPLX(v)->im));
     if (v.t == T_INST) {
         Value *m = class_find(AS_INST(v)->cls, S_abs);
         if (m) return call1(*m, v);
@@ -249,6 +262,9 @@ BI(bi_round)
     need(x, 1, 2, "round");
     v = A(0);
     nd = x->n > 1 ? A(1) : kwget(x, "ndigits");
+    if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET &&
+        !class_find(AS_INST(v)->cls, intern_c("__round__")))
+        v = AS_INST(v)->pay;
     if (is_intv(v)) {
         if (nd.t == T_UNSET || nd.t == T_NONE || to_index(nd) >= 0)
             return v.t == T_BOOL ? mkint(v.u.i) : v;
@@ -365,8 +381,11 @@ BI(bi_ord)
     Str *s;
     unsigned long c;
     need(x, 1, 1, "ord");
-    if (A(0).t == T_BYTES && AS_STR(A(0))->len == 1)
-        return mkint((unsigned char)AS_STR(A(0))->s[0]);
+    {
+        const char *bp;
+        long bn;
+        if (bytes_get(A(0), &bp, &bn) && bn == 1) return mkint((unsigned char)bp[0]);
+    }
     s = astr(A(0), "ord() argument");
     if (s->len == 1) return mkint((unsigned char)s->s[0]);
     c = (unsigned char)s->s[0];
@@ -992,6 +1011,12 @@ BI(exc_init)
     if (x->n < 1 || A(0).t != T_INST)
         throw_new(cls_TypeError, "descriptor '__init__' requires an exception");
     amap_set(&AS_INST(A(0))->a, S_args, mktuple_from(x->a + 1, x->n - 1));
+    if (class_isa(AS_INST(A(0))->cls, cls_OSError)) {
+        int two = x->n >= 3 && A(1).t == T_INT;
+        amap_set(&AS_INST(A(0))->a, intern_c("errno"), two ? A(1) : NONE_V);
+        amap_set(&AS_INST(A(0))->a, intern_c("strerror"), two ? A(2) : NONE_V);
+        amap_set(&AS_INST(A(0))->a, intern_c("filename"), two && x->n >= 4 ? A(3) : NONE_V);
+    }
     return NONE_V;
 }
 BI(exc_str)
@@ -2126,7 +2151,7 @@ BI(nat_new)
     iv = mkobj(in, T_INST);
     VPUSH(iv);
     if (c->paycls) {
-        if (c->paycls == cls_tuple || c->paycls == cls_str)
+        if (pay_takes_args(c->paycls))
             in->pay = pay_ctor(c->paycls, x->n - 1, x->a + 1, x->nk, x->kw);
         else
             in->pay = pay_ctor(c->paycls, 0, NULL, 0, NULL);
@@ -2148,6 +2173,24 @@ BI(nat_lt) { need(x, 2, 2, "__lt__"); return mkbool(rich_cmp(C_LT, A(0), unpay(A
 BI(nat_le) { need(x, 2, 2, "__le__"); return mkbool(rich_cmp(C_LE, A(0), unpay(A(1)))); }
 BI(nat_gt) { need(x, 2, 2, "__gt__"); return mkbool(rich_cmp(C_GT, A(0), unpay(A(1)))); }
 BI(nat_ge) { need(x, 2, 2, "__ge__"); return mkbool(rich_cmp(C_GE, A(0), unpay(A(1)))); }
+/* set subclass repr: ClassName({...}), ClassName() when empty (no selfpay: needs the class) */
+BI(nat_set_repr)
+{
+    Value self = A(0), pay = unpay(self), r;
+    Buf b;
+    Str *rs;
+    if (self.t != T_INST || (pay.t != T_SET && pay.t != T_BARR)) return py_repr(pay);
+    r = py_repr(pay);
+    rs = AS_STR(r);
+    buf_init(&b);
+    buf_add(&b, AS_INST(self)->cls->name->s);
+    buf_addc(&b, '(');
+    if (pay.t == T_BARR) buf_addn(&b, rs->s + 10, rs->len - 11);   /* inside bytearray(...) */
+    else if (AS_DICT(pay)->n > 0) buf_addn(&b, rs->s, rs->len);
+    buf_addc(&b, ')');
+    r = buf_value(&b);
+    return r;
+}
 BI(nat_hash) { return mkint((long)py_hash(A(0))); }
 BI(nat_add) { need(x, 2, 2, "__add__"); return binop(B_ADD, A(0), unpay(A(1))); }
 BI(nat_mul) { need(x, 2, 2, "__mul__"); return binop(B_MUL, A(0), A(1)); }
@@ -2299,205 +2342,3 @@ BI(ellipsis_repr)
     return mkcstr("Ellipsis");
 }
 
-/* ---- bytes ------------------------------------------------------------ */
-BI(bi_bytes)
-{
-    Value v;
-    Buf b;
-    long i;
-    if (x->n == 0) return mkbytes("", 0);
-    v = A(0);
-    if (v.t == T_BYTES) return v;
-    if (v.t == T_STR) {
-        Args a2;
-        Value av[2];
-        if (x->n < 2) throw_new(cls_TypeError, "string argument without an encoding");
-        av[0] = v; av[1] = A(1);
-        a2.n = 2; a2.a = av; a2.nk = 0; a2.kw = NULL;
-        return s_encode(&a2);
-    }
-    buf_init(&b);
-    if (v.t == T_INT) {
-        if (v.u.i < 0) { buf_free(&b); throw_new(cls_ValueError, "negative count"); }
-        for (i = 0; i < v.u.i; i++) buf_addc(&b, 0);
-    } else {
-        Value it, y;
-        it = get_iter(v);
-        VPUSH(it);
-        while (iter_next(it, &y)) {
-            if (y.t != T_INT && y.t != T_BOOL) { buf_free(&b);
-                throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
-                    type_name(y));
-            }
-            if (y.u.i < 0 || y.u.i > 255) { buf_free(&b);
-                throw_new(cls_ValueError, "bytes must be in range(0, 256)");
-            }
-            buf_addc(&b, (int)y.u.i);
-        }
-        vsp--;
-    }
-    v = mkbytes(b.s, b.n);
-    buf_free(&b);
-    return v;
-}
-static Str *abytes(Value v)
-{
-    if (v.t != T_BYTES)
-        throw_new(cls_TypeError, "descriptor requires a 'bytes' object but received '%.40s'",
-        type_name(v));
-    return AS_STR(v);
-}
-BI(b_decode)
-{
-    Str *s = abytes(A(0));
-    Value ev = x->n > 1 ? A(1) : kwget(x, "encoding");
-    Value errv = x->n > 2 ? A(2) : kwget(x, "errors");
-    const char *enc = "utf-8", *err = "strict";
-    Buf b;
-    long i;
-    if (ev.t == T_STR) enc = AS_STR(ev)->s;
-    if (errv.t == T_STR) err = AS_STR(errv)->s;
-    if (strcmp(enc, "latin-1") == 0 || strcmp(enc, "latin1") == 0 || strcmp(enc, "iso-8859-1") == 0)
-        {
-        buf_init(&b);
-        for (i = 0; i < s->len; i++) put_utf8(&b, (unsigned char)s->s[i]);
-        { Value r = buf_value(&b); return r; }
-    }
-    if (strcmp(enc, "ascii") == 0 || strcmp(enc, "us-ascii") == 0) {
-        for (i = 0; i < s->len; i++)
-            if ((unsigned char)s->s[i] >= 128 && strcmp(err, "ignore") != 0
-                && strcmp(err, "replace") != 0)
-                throw_new(cls_ValueError,
-                    "'ascii' codec can't decode byte 0x%02x in position %ld: ordinal not in "
-                    "range(128)",
-                          (unsigned char)s->s[i], i);
-    }
-    return mkstr(s->s, s->len);
-}
-BI(b_hex)
-{
-    Str *s = abytes(A(0));
-    Buf b;
-    long i;
-    char t[4];
-    buf_init(&b);
-    for (i = 0; i < s->len; i++) { sprintf(t, "%02x", (unsigned char)s->s[i]); buf_add(&b, t); }
-    return buf_value(&b);
-}
-BI(b_fromhex)
-{
-    Str *s;
-    Buf b;
-    long i;
-    int hi = -1;
-    need(x, 1, 2, "fromhex");
-    s = astr(A(x->n - 1), "fromhex() argument");
-    buf_init(&b);
-    for (i = 0; i < s->len; i++) {
-        int c = (unsigned char)s->s[i], d;
-        if (c == ' ') continue;
-        if (!ch_hex[c]) { buf_free(&b);
-            throw_new(cls_ValueError,
-                "non-hexadecimal number found in fromhex() arg at position %ld", i);
-        }
-        d = digit_val(c);
-        if (hi < 0) hi = d; else { buf_addc(&b, hi * 16 + d); hi = -1; }
-    }
-    if (hi >= 0) { buf_free(&b);
-        throw_new(cls_ValueError, "non-hexadecimal number found in fromhex() arg at position %ld",
-            s->len);
-    }
-    { Value r = mkbytes(b.s, b.n); buf_free(&b); return r; }
-}
-static Value b2s_back(Value r)
-{
-    if (r.t == T_STR) return mkbytes(AS_STR(r)->s, AS_STR(r)->len);
-    if (r.t == T_LIST || r.t == T_TUPLE) {
-        long i;
-        for (i = 0; i < AS_LIST(r)->n; i++)
-            if (AS_LIST(r)->a[i].t == T_STR)
-                AS_LIST(r)->a[i] = mkbytes(AS_STR(AS_LIST(r)->a[i])->s,
-                    AS_STR(AS_LIST(r)->a[i])->len);
-    }
-    return r;
-}
-/* run a str method on bytes arguments (bytes become temporary str values) */
-static Value via_str(Args *x, BFn fn)
-{
-    Value *av = (Value *)xmalloc(sizeof(Value) * (size_t)(x->n + 1));
-    Args a2;
-    Value r;
-    int i;
-    for (i = 0; i < x->n; i++) {
-        if (x->a[i].t == T_BYTES) av[i] = mkstr(AS_STR(x->a[i])->s, AS_STR(x->a[i])->len);
-        else if (x->a[i].t == T_LIST || x->a[i].t == T_TUPLE) {
-            Value l = iter_to_list(x->a[i]);
-            long k;
-            for (k = 0; k < AS_LIST(l)->n; k++)
-                if (AS_LIST(l)->a[k].t == T_BYTES)
-                    AS_LIST(l)->a[k] = mkstr(AS_STR(AS_LIST(l)->a[k])->s,
-                        AS_STR(AS_LIST(l)->a[k])->len);
-            av[i] = l;
-        } else av[i] = x->a[i];
-    }
-    a2.n = x->n; a2.a = av; a2.nk = x->nk; a2.kw = x->kw;
-    for (i = 0; i < x->n; i++) VPUSH(av[i]);
-    r = fn(&a2);
-    vsp -= x->n;
-    free(av);
-    return b2s_back(r);
-}
-#define BVIA(name, fn) BI(name) { return via_str(x, fn); }
-BVIA(b_upper, s_upper) BVIA(b_lower, s_lower) BVIA(b_strip, s_strip) BVIA(b_lstrip, s_lstrip)
-BVIA(b_rstrip, s_rstrip) BVIA(b_split, s_split) BVIA(b_join, s_join) BVIA(b_replace, s_replace)
-BVIA(b_find, s_find) BVIA(b_count, s_count) BVIA(b_startswith, s_startswith)
-BVIA(b_endswith, s_endswith) BVIA(b_rfind, s_rfind) BVIA(b_index, s_index)
-BVIA(b_splitlines, s_splitlines) BVIA(b_isdigit, s_isdigit) BVIA(b_isalpha, s_isalpha)
-BI(i_to_bytes)
-{
-    Value v = A(0), kv;
-    long n, i;
-    int big = 1, sg = 0;
-    Buf b;
-    need(x, 1, 3, "to_bytes");
-    n = x->n > 1 ? to_index(A(1)) : (kv = kwget(x, "length"), kv.t == T_UNSET ? 1 : to_index(kv));
-    kv = x->n > 2 ? A(2) : kwget(x, "byteorder");
-    if (kv.t == T_STR && strcmp(AS_STR(kv)->s, "little") == 0) big = 0;
-    kv = kwget(x, "signed");
-    if (kv.t != T_UNSET && py_truthy(kv)) sg = 1;
-    if (int_sign(v) < 0) {
-        if (!sg) throw_new(cls_OverflowError, "can't convert negative int to unsigned");
-        v = int_add(int_pow(mkint(256), n), v);
-    }
-    buf_init(&b);
-    for (i = 0; i < n; i++) buf_addc(&b, 0);
-    for (i = 0; i < n; i++) {
-        Value q, r;
-        int_divmod(v, mkint(256), &q, &r);
-        b.s[big ? n - 1 - i : i] = (char)r.u.i;
-        v = q;
-    }
-    if (int_sign(v) != 0) { buf_free(&b); throw_new(cls_OverflowError, "int too big to convert"); }
-    { Value r = mkbytes(b.s, b.n); buf_free(&b); return r; }
-}
-BI(i_from_bytes)
-{
-    Value src = A(0), kv, r = mkint(0);
-    Str *s;
-    long i;
-    int big = 1, sg = 0;
-    need(x, 1, 2, "from_bytes");
-    if (src.t != T_BYTES) src = bi_bytes(x);
-    s = AS_STR(src);
-    kv = x->n > 1 ? A(1) : kwget(x, "byteorder");
-    if (kv.t == T_STR && strcmp(AS_STR(kv)->s, "little") == 0) big = 0;
-    kv = kwget(x, "signed");
-    if (kv.t != T_UNSET && py_truthy(kv)) sg = 1;
-    for (i = 0; i < s->len; i++) {
-        unsigned char c = (unsigned char)s->s[big ? i : s->len - 1 - i];
-        r = int_add(int_mul(r, mkint(256)), mkint(c));
-    }
-    if (sg && s->len > 0 && ((unsigned char)s->s[big ? 0 : s->len - 1] & 128))
-        r = int_sub(r, int_pow(mkint(256), s->len));
-    return r;
-}

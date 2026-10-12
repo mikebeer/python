@@ -24,12 +24,85 @@ class NAType:
 NA = NAType()
 
 
+_NAT_NAN = ('year month day hour minute second microsecond nanosecond dayofweek day_of_week dayofyear day_of_year '
+            'quarter days_in_month daysinmonth week weekofyear days seconds microseconds nanoseconds value '
+            'is_month_start is_month_end is_quarter_start is_quarter_end is_year_start is_year_end '
+            'is_leap_year').split()
+_NAT_NANF = 'weekday isoweekday toordinal timestamp total_seconds'.split()
+_NAT_SELF = ('normalize floor ceil round replace tz_localize tz_convert to_pydatetime to_pytimedelta date time '
+             'combine as_unit astimezone fromisoformat').split()
+_NAT_STR = {'day_name': 'NaT', 'month_name': 'NaT', 'isoformat': 'NaT', 'strftime': 'NaT', 'ctime': 'NaT'}
+
+
 class NaTType:
     def __repr__(self):
         return 'NaT'
 
+    def __str__(self):
+        return 'NaT'
+
     def __hash__(self):
         return 54321
+
+    def __eq__(self, o):
+        return False
+
+    def __ne__(self, o):
+        return True
+
+    def __lt__(self, o):
+        return False
+
+    def __le__(self, o):
+        return False
+
+    def __gt__(self, o):
+        return False
+
+    def __ge__(self, o):
+        return False
+
+    def __bool__(self):
+        return True
+
+    def __add__(self, o):
+        return self
+
+    __radd__ = __add__
+
+    def __sub__(self, o):
+        return self
+
+    __rsub__ = __sub__
+
+    def __mul__(self, o):
+        return self
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, o):
+        if isinstance(o, (int, float)):
+            return self
+        return nan
+
+    def __neg__(self):
+        return self
+
+    def __abs__(self):
+        return self
+
+    def __getattr__(self, name):
+        if name in _NAT_NAN:
+            return nan
+        if name in _NAT_NANF:
+            return lambda *a, **k: nan
+        if name in _NAT_SELF:
+            return lambda *a, **k: self
+        if name in _NAT_STR:
+            return lambda *a, **k: self if name != 'isoformat' else 'NaT'
+        if name == 'tz' or name == 'tzinfo':
+            return None
+        raise AttributeError("'NaTType' object has no attribute '%s'" % name)
 
 
 NaT = NaTType()
@@ -151,7 +224,9 @@ def norm_dtype(dt):
         if d in ('object', 'o'):
             return 'object'
         if d.startswith('datetime64'):
-            return 'datetime64[us]'
+            return d if '[' in d else 'datetime64[us]'
+        if d.startswith('timedelta64'):
+            return d if '[' in d else 'timedelta64[us]'
         if d == 'category':
             return 'object'
         return dt
@@ -159,6 +234,22 @@ def norm_dtype(dt):
     if nm is not None:
         return norm_dtype(nm)
     return str(dt)
+
+
+def _is_datelike_type(t):
+    if t is float or t is int or t is str or t is bool:
+        return False
+    n = getattr(t, '__name__', '')
+    if n in ('datetime', 'Timestamp', 'timedelta', 'Timedelta'):
+        return True
+    for b in ('datetime', 'timedelta'):
+        try:
+            import datetime as _d
+            if issubclass(t, getattr(_d, b)):
+                return True
+        except TypeError:
+            pass
+    return False
 
 
 def infer(vals):
@@ -173,8 +264,20 @@ def infer(vals):
     if NAType in ts:
         has_none = True
         ts.discard(NAType)
+    if NaTType in ts:
+        ts.discard(NaTType)
+        if len(ts) == 0:
+            return [NaT if (x is None or x is NA) else x for x in vals], 'datetime64[s]'
+        has_none = True
     if len(ts) == 0:
         return vals, 'object'
+    for t in ts:
+        if _is_datelike_type(t):
+            from . import tslib
+            r = tslib.infer_datelike(vals)
+            if r is not None:
+                return r
+            return vals, 'object'
     if len(ts) == 1:
         t = list(ts)[0]
         if t is int and not has_none:
@@ -203,28 +306,6 @@ def infer(vals):
             if has_none:
                 vals = [nan if (x is None or x is NA) else x for x in vals]
             return vals, 'str'
-    if float in ts:
-        ts2 = set(ts)
-        ts2.discard(float)
-        if len(ts2) == 1:
-            nm = getattr(list(ts2)[0], '__name__', '')
-            if nm in ('datetime', 'Timestamp', 'timedelta', 'Timedelta'):
-                ok = True
-                for x in vals:
-                    if type(x) is float and x == x:
-                        ok = False
-                if ok:
-                    return [nan if (x is None or x is NA) else x for x in vals], ('datetime64[us]' if nm in ('datetime', 'Timestamp') else 'timedelta64[us]')
-    if len(ts) == 1:
-        nm = getattr(list(ts)[0], '__name__', '')
-        if nm == 'datetime' or nm == 'Timestamp':
-            if has_none:
-                vals = [nan if (x is None or x is NA) else x for x in vals]
-            return vals, 'datetime64[us]'
-        if nm == 'timedelta' or nm == 'Timedelta':
-            if has_none:
-                vals = [nan if (x is None or x is NA) else x for x in vals]
-            return vals, 'timedelta64[us]'
     return vals, 'object'
 
 
@@ -343,7 +424,15 @@ class Index:
 
     def _new(self, v, name=None):
         r = Index(v, name=name)
+        if r._dt.startswith('datetime') or r._dt.startswith('timedelta'):
+            return r._as_dtindex()
         return r
+
+    def _as_dtindex(self):
+        from .dtindex import DatetimeIndex, TimedeltaIndex
+        if self._dt.startswith('datetime'):
+            return DatetimeIndex(self._v, name=self.name, _dt=self._dt, _raw=True)
+        return TimedeltaIndex(self._v, name=self.name, _dt=self._dt, _raw=True)
 
     def __len__(self):
         return len(self._v)
@@ -677,20 +766,8 @@ class Index:
     def __getattr__(self, name):
         if name.startswith('_'):
             raise AttributeError(name)
-        if self._dt.startswith('datetime'):
-            from .strs import DatetimeMethods
-            m = DatetimeMethods(Index._ser(self))
-            if name in ('year', 'month', 'day', 'hour', 'minute', 'second', 'dayofweek', 'weekday', 'dayofyear',
-                        'quarter', 'date', 'time'):
-                r = getattr(m, name)
-                return Index(r._v, name=self.name)
-            if name in ('strftime', 'day_name', 'month_name', 'normalize', 'floor', 'is_month_end', 'is_month_start'):
-                f = getattr(m, name)
-
-                def g(*a, **k):
-                    r = f(*a, **k)
-                    return Index(r._v, name=self.name)
-                return g
+        if self._dt.startswith('datetime') or self._dt.startswith('timedelta'):
+            return getattr(self._as_dtindex(), name)
         raise AttributeError("'Index' object has no attribute '%s'" % name)
 
     @staticmethod
@@ -700,11 +777,8 @@ class Index:
 
     def __repr__(self):
         v = self._v
-        if self._dt.startswith('datetime'):
-            from .fmt import dt_strings
-            body = ', '.join([repr(x) for x in dt_strings(v)])
-            fr = getattr(self, '_freq', None)
-            return 'DatetimeIndex([' + body + "], dtype='datetime64[us]', " + ('freq=%r' % fr if fr is not None else 'freq=None') + ')'
+        if self._dt.startswith('datetime') or self._dt.startswith('timedelta'):
+            return repr(self._as_dtindex())
         if len(v) > 100:
             body = ', '.join([repr(x) for x in v[:10]]) + ', ..., ' + ', '.join([repr(x) for x in v[-10:]])
         else:
@@ -726,6 +800,14 @@ class Index:
     @property
     def T(self):
         return self
+
+
+def mkindex(vals, name=None):
+    """Index of the right class (DatetimeIndex / TimedeltaIndex for datetime-like values)"""
+    r = Index(vals, name=name)
+    if r._dt.startswith('datetime') or r._dt.startswith('timedelta'):
+        return r._as_dtindex()
+    return r
 
 
 def _irepr(x):

@@ -16,6 +16,11 @@ bmeth: procedure = .int
     when k = K_GEN | k = K_ITER then return meth_gen(o, nid, base, na, nk)
     when k = K_FILE then return meth_file(o, nid, base, na, nk)
     when k = K_ARRAY then return meth_arr(o, nid, base, na, nk)
+    when k = K_BYTES then return meth_bytes(o, nid, base, na, nk)
+    when k = K_COMPLEX then return meth_complex(o, nid, base, na, nk)
+    when k = K_CLASS then do
+      if nid = M___NEW__ then return cls_new(ob_x[o % 2], base, na, nk)
+    end
     when k = K_PROP then do
       if nid = M_SETTER | nid = M_GETTER then do
         k = newobj(K_PROP)
@@ -34,15 +39,30 @@ bmeth: procedure = .int
 bmeth_unbound: procedure = .int
   arg c = .int, nid = .int, base = .int, na = .int, nk = .int
   if c = C_DICT & nid = M_FROMKEYS then return dict_fromkeys(base, na)
-  if c = C_OBJECT & nid = M___NEW__ & na >= 1 then do
-    if kind_of(ast[base + 1]) = K_CLASS then return inst_new(ob_x[ast[base + 1] % 2])
+  if nid = M___NEW__ then return cls_new(c, base, na, nk)
+  if nid = M_FROMHEX & (c = C_BYTES | c = C_BYTEARRAY) then do
+    if c = C_BYTEARRAY then return bytes_fromhex(1, base, na)
+    return bytes_fromhex(0, base, na)
   end
+  if nid = M_FROM_BYTES & c = C_INT then return int_from_bytes(base, na, nk)
+  if nid = M_FROMKEYS & c \= C_DICT then return raise_exc(C_ATTRIBUTEERROR, "type object '" || cl_name[c] || "' has no attribute 'fromkeys'")
   if na < 1 then return raise_exc(C_TYPEERROR, "descriptor '" || nid_name[nid] || "' of '" || cl_name[c] || "' object needs an argument")
   return bmeth(ast[base + 1], nid, base + 1, na - 1, nk)
 
 meth_common: procedure = .int
   arg o = .int, nid = .int, base = .int, na = .int, nk = .int
   r = .int
+  if nsub(o) = 0 then return meth_common0(o, nid, base, na, nk)
+  nat_skip = o
+  r = meth_common0(o, nid, base, na, nk)
+  nat_skip = 0
+  return r
+
+meth_common0: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  r = .int
+  rs = .string
+  if nid = M___INIT__ & kind_of(o) \= K_INST then return NONE_OOP
   if kind_of(o) = K_INST then do
     select
       when nid = M___SETATTR__ & na = 2 then do
@@ -113,14 +133,14 @@ meth_common: procedure = .int
     end
     when nid = M___LEN__ then return bi_len(o)
     when nid = M___STR__ then do
-      r = str_of(o)
+      rs = str_of(o)
       if unw > 0 then return 0
-      return mkstr(r)
+      return mkstr(rs)
     end
     when nid = M___REPR__ then do
-      r = repr_of(o)
+      rs = repr_of(o)
       if unw > 0 then return 0
-      return mkstr(r)
+      return mkstr(rs)
     end
     when nid = M___ITER__ then return iter_new(o)
     when nid = M___NEXT__ then do
@@ -704,7 +724,14 @@ meth_str: procedure = .int
       end
       return l
     end
-    when nid = M_ENCODE | nid = M_DECODE then return o
+    when nid = M_ENCODE then do
+      a = enc_arg(base, na, nk, 1)
+      if unw > 0 then return 0
+      t = str_encode(s, a, err_arg(base, na, nk, 2))
+      if unw > 0 then return 0
+      return mkbytes(t)
+    end
+    when nid = M_DECODE then return o
     when nid = M_REMOVEPREFIX then do
       a = ob_s[ast[base + 1] % 2]
       if length(a) <= length(s) then do
@@ -767,6 +794,15 @@ meth_list: procedure = .int
   t = .int
   ix = o % 2
   select
+    when nid = M___INIT__ then do
+      ob_n[ix] = 0
+      if na >= 1 then do
+        l = iter_list(ast[base + 1])
+        if l = 0 then return 0
+        call list_extend_from o, l
+      end
+      return NONE_OOP
+    end
     when nid = M_APPEND then do
       if na \= 1 then return nargs_err("append", na, 1, 1)
       call list_append o, ast[base + 1]
@@ -992,6 +1028,16 @@ meth_dict: procedure = .int
   a = .int
   d = ob_x[o % 2]
   select
+    when nid = M___INIT__ then do
+      call dict_clear d
+      if na >= 1 then do
+        if dict_fill(o, ast[base + 1]) = 0 then return 0
+      end
+      do j = 1 to nk
+        call dset o, mkstr(asn[base + na + j]), ast[base + na + j]
+      end
+      return NONE_OOP
+    end
     when nid = M_GET then do
       if na < 1 | na > 2 then return nargs_err("get", na, 1, 2)
       e = dict_find(d, hashkey(ast[base + 1]))
@@ -1095,6 +1141,17 @@ meth_set: procedure = .int
   ok = .int
   d = ob_x[o % 2]
   select
+    when nid = M___INIT__ then do
+      call dict_clear d
+      if na >= 1 then do
+        l = iter_list(ast[base + 1])
+        if l = 0 then return 0
+        do i = 0 to ob_n[l % 2] - 1
+          call dset o, sl[ob_p[l % 2] + i], TRUE_OOP
+        end
+      end
+      return NONE_OOP
+    end
     when nid = M_ADD then do
       if na \= 1 then return nargs_err("add", na, 1, 1)
       call dset o, ast[base + 1], TRUE_OOP
@@ -1200,6 +1257,7 @@ meth_num: procedure = .int
     return FALSE_OOP
   end
   if nid = M_CONJUGATE then return o
+  if nid = M_TO_BYTES & kind_of(o) \= K_FLOAT then return int_to_bytes(o, base, na, nk)
   if nid = M_ROUND & kind_of(o) = K_FLOAT then do
     if na = 0 then return o
     return mkfloat(np_round1(ob_f[o % 2], ival(ast[base + 1])))

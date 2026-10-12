@@ -277,7 +277,7 @@ ev: procedure = .int
     ix = ev(ix, fb)
     if ix = 0 then return 0
     if ix // 2 \= 0 & o // 2 = 0 then do
-      if ob_k[o % 2] = K_LIST then do
+      if ob_k[o % 2] = K_LIST & ob_c[o % 2] = 0 then do
         i = (ix - 1) % 2
         if i >= 0 & i < ob_n[o % 2] then return sl[ob_p[o % 2] + i]
       end
@@ -488,18 +488,18 @@ cmp_general: procedure = .int
     if (kind_of(l) = K_ARRAY | kind_of(r) = K_ARRAY) & kind_of(l) \= K_INST & kind_of(r) \= K_INST then return np_binop(30 + op, l, r)
   end
   if op = CMP_EQ | op = CMP_NE then do
-    if kind_of(l) = K_INST then do
-      if op = CMP_EQ then m = cls_find(ob_c[l % 2], M___EQ__)
-      else m = cls_find(ob_c[l % 2], M___NE__)
+    if ocls(l) > 0 then do
+      if op = CMP_EQ then m = ovr(l, M___EQ__)
+      else m = ovr(l, M___NE__)
       if m > 0 then do
         v = call2(m, l, r)
         if v = 0 then return 0
         if v \= NOTIMPL_OOP then return v
       end
     end
-    if kind_of(r) = K_INST then do
-      if op = CMP_EQ then m = cls_find(ob_c[r % 2], M___EQ__)
-      else m = cls_find(ob_c[r % 2], M___NE__)
+    if ocls(r) > 0 then do
+      if op = CMP_EQ then m = ovr(r, M___EQ__)
+      else m = ovr(r, M___NE__)
       if m > 0 then do
         v = call2(m, r, l)
         if v = 0 then return 0
@@ -627,6 +627,22 @@ aug_op_apply: procedure = .int
   if k = K_DICT & op = O_BITOR & kind_of(v) = K_DICT then do
     call dict_update cur, v
     return cur
+  end
+  if k = K_BYTES then do
+    if ob_y[cur % 2] = 1 then do
+      if op = O_ADD then do
+        if kind_of(v) = K_BYTES then ob_s[cur % 2] = ob_s[cur % 2] || ob_s[v % 2]
+        else do
+          l = arith(op, cur, v)
+          return l
+        end
+        return cur
+      end
+      if op = O_MUL & numkind(v) = 1 then do
+        ob_s[cur % 2] = copies(ob_s[cur % 2], ival(v))
+        return cur
+      end
+    end
   end
   if k = K_ARRAY then do
     l = arith(op, cur, v)
@@ -1057,6 +1073,7 @@ exec_class: procedure = .void
   if n_c[n] > 0 then do
     bo = ev(n_c[n], fb)
     if bo = 0 then return
+    bl_n = 0
     do i = 0 to ob_n[bo % 2] - 1
       b = sl[ob_p[bo % 2] + i]
       if kind_of(b) \= K_CLASS then do

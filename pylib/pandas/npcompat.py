@@ -20,9 +20,9 @@ _PLAIN = ('array asarray asanyarray where concatenate hstack vstack stack column
 
 def _cv(a):
     if isinstance(a, Series):
-        return a.values if a._dt in ('int64', 'float64', 'bool') else a._v
+        return a.values if a._dt in ('int64', 'float64', 'bool', 'int32') else a._v
     if isinstance(a, Index):
-        return a.values if a._dt in ('int64', 'float64', 'bool') else a._v
+        return a.values if a._dt in ('int64', 'float64', 'bool', 'int32') else a._v
     if isinstance(a, DataFrame):
         return a.to_numpy()
     if isinstance(a, (list, tuple)):

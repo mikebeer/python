@@ -92,6 +92,28 @@ def cosine(M, sym=True):
     return _gen(M, sym, lambda n, m: math.sin(math.pi / m * (n + 0.5)))
 
 
+def tukey(M, alpha=0.5, sym=True):
+    if M == 0:
+        return np.array([])
+    if M == 1:
+        return np.ones(1)
+    if alpha <= 0:
+        return np.ones(M)
+    if alpha >= 1.0:
+        return hann(M, sym=sym)
+    M2, trunc = _extend(M, sym)
+    width = int(math.floor(alpha * (M2 - 1) / 2.0))
+    w = []
+    for n in range(M2):
+        if n <= width:
+            w.append(0.5 * (1 + math.cos(math.pi * (-1 + 2.0 * n / alpha / (M2 - 1)))))
+        elif n < M2 - width - 1:
+            w.append(1.0)
+        else:
+            w.append(0.5 * (1 + math.cos(math.pi * (-2.0 / alpha + 1 + 2.0 * n / alpha / (M2 - 1)))))
+    return np.array(_truncate(w, trunc))
+
+
 def get_window(window, Nx, fftbins=True):
     sym = not fftbins
     if isinstance(window, tuple):
@@ -102,7 +124,7 @@ def get_window(window, Nx, fftbins=True):
         args = ()
     fn = {"hann": hann, "hanning": hann, "hamming": hamming, "blackman": blackman, "bartlett": bartlett,
           "boxcar": boxcar, "rectangular": boxcar, "ones": boxcar, "triang": triang, "gaussian": gaussian,
-          "kaiser": kaiser, "cosine": cosine}.get(name)
+          "kaiser": kaiser, "cosine": cosine, "tukey": tukey}.get(name)
     if fn is None:
         raise ValueError("Unknown window type.")
     if fn is boxcar:

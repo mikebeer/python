@@ -104,6 +104,71 @@ class Rolling:
     aggregate = agg
 
 
+class RollingTime(Rolling):
+    """rolling windows defined by a time offset on a datetime index"""
+
+    def __init__(self, obj, window, min_periods=None, center=False, closed=None):
+        from . import tslib
+        self.obj = obj
+        self.wus = tslib._tick_us(window)
+        self.window = window
+        self.min_periods = 1 if min_periods is None else min_periods
+        self.center = center
+        self.closed = closed if closed is not None else 'right'
+
+    def _bounds(self, s):
+        iv = s._idx._v
+        if not s._idx._dt.startswith('datetime'):
+            raise ValueError('window must be an integer 0 or greater')
+        us = [x._epoch_us() for x in iv]
+        n = len(us)
+        w = self.wus
+        out = []
+        lo = 0
+        for i in range(n):
+            t = us[i]
+            if self.closed in ('right', 'both'):
+                while lo < n and (us[lo] <= t - w):
+                    lo += 1
+                hi = i + 1
+            else:
+                while lo < n and (us[lo] < t - w):
+                    lo += 1
+                hi = i
+            if self.closed in ('left', 'neither'):
+                while lo < n and us[lo] <= t - w and self.closed == 'neither':
+                    lo += 1
+            out.append((lo, hi))
+        return out
+
+    def _series(self, s, f):
+        v = s._v
+        n = len(v)
+        res = [nan] * n
+        b = self._bounds(s)
+        for i in range(n):
+            lo, hi = b[i]
+            nn = [x for x in v[lo:hi] if not (x is None or x != x)]
+            if len(nn) < self.min_periods or len(nn) == 0:
+                continue
+            res[i] = f(nn)
+        return s._new(res, 'float64')
+
+    def count(self, **kw):
+        def one(s):
+            v = s._v
+            b = self._bounds(s)
+            res = []
+            for i in range(len(v)):
+                lo, hi = b[i]
+                res.append(float(len([x for x in v[lo:hi] if x == x])))
+            return s._new(res, 'float64')
+        o = self.obj
+        if isinstance(o, Series):
+            return one(o)
+        return o._mapcols(one, True)
+
+
 class Expanding(Rolling):
     def __init__(self, obj, min_periods=1):
         self.obj = obj

@@ -16,6 +16,11 @@ ival: procedure = .int
   arg x = .int
   if x // 2 \= 0 then return (x - 1) % 2
   if x = TRUE_OOP then return 1
+  if ob_k[x % 2] = K_BIG then do
+    if ob_c[x % 2] > 0 then do
+      if length(ob_s[x % 2]) <= 18 then return ob_s[x % 2] as .int
+    end
+  end
   return 0
 
 mkstr: procedure = .int
@@ -298,7 +303,7 @@ set_btype: procedure = .void
   cl_bt[c] = 0
   do i = 1 to cl_mn[c] - 1
     k = mro_a[cl_ms[c] + i - 1]
-    if k = C_DICT | k = C_LIST | k = C_TUPLE | k = C_SET | k = C_STR | k = C_INT | k = C_FLOAT then do
+    if k = C_DICT | k = C_LIST | k = C_TUPLE | k = C_SET | k = C_STR | k = C_INT | k = C_FLOAT | k = C_BYTES | k = C_BYTEARRAY then do
       cl_bt[c] = k
       return
     end
@@ -368,6 +373,10 @@ cls_of: procedure = .int
   if k >= K_STR & k <= K_SET then do
     if ob_c[x % 2] > 0 then return ob_c[x % 2]
   end
+  if k = K_FLOAT | k = K_BIG | k = K_BYTES then do
+    if ob_c[x % 2] > 0 then return ob_c[x % 2]
+  end
+  if k = K_BYTES & ob_y[x % 2] = 1 then return C_BYTEARRAY
   if k = K_DVIEW then return C_DICT_KEYS + ob_n[x % 2] - 1
   return kcls[k]
 
@@ -518,7 +527,18 @@ truthy: procedure = .int
       if ob_f[x % 2] = 0.0 then return 0
       return 1
     end
-    when k = K_BIG then return 1
+    when k = K_BIG then do
+      if ob_s[x % 2] == "0" then return 0
+      return 1
+    end
+    when k = K_BYTES then do
+      if length(ob_s[x % 2]) > 0 then return 1
+      return 0
+    end
+    when k = K_COMPLEX then do
+      if ob_f[x % 2] \= 0.0 | ob_g[x % 2] \= 0.0 then return 1
+      return 0
+    end
     when k = K_ARRAY then do
       if ob_n[x % 2] = 1 then return truthy(np_scalar(x, 0))
       if ob_n[x % 2] = 0 then return 0
@@ -652,6 +672,11 @@ hashkey: procedure = .string
       return "i0"
     end
     when k = K_NONE then return "N"
+    when k = K_BYTES then return "b" || ob_s[x % 2]
+    when k = K_COMPLEX then do
+      if ob_g[x % 2] = 0.0 then return hashkey(mkfloat(ob_f[x % 2]))
+      return "c" || float_repr(ob_f[x % 2]) || "," || float_repr(ob_g[x % 2])
+    end
     when k = K_BIG then return "i" || ob_s[x % 2]
     when k = K_FLOAT then do
       f = ob_f[x % 2]

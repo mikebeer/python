@@ -1,0 +1,993 @@
+/* ---------------------------------------------------------------------
+   bytes and bytearray (kind K_BYTES: ob_s holds one character per byte, code 0 .. 255;
+   ob_y = 1 for a bytearray), encodings, int.to_bytes / from_bytes
+   --------------------------------------------------------------------- */
+mkbytes: procedure = .int
+  arg s = .string
+  nob = nob + 1
+  ob_k[nob] = K_BYTES
+  ob_s[nob] = s
+  return nob * 2
+
+mkbytearr: procedure = .int
+  arg s = .string
+  nob = nob + 1
+  ob_k[nob] = K_BYTES
+  ob_s[nob] = s
+  ob_y[nob] = 1
+  return nob * 2
+
+/* a bytes-like object of the same type as o */
+bytes_like: procedure = .int
+  arg o = .int, s = .string
+  if ob_y[o % 2] = 1 then return mkbytearr(s)
+  return mkbytes(s)
+
+bytes_rep: procedure = .int
+  arg o = .int, n = .int
+  if n < 0 then n = 0
+  return bytes_like(o, copies(ob_s[o % 2], n))
+
+hex2: procedure = .string
+  arg v = .int
+  return lower(right(d2x(v), 2, "0"))
+
+bytes_repr: procedure = .string
+  arg s = .string
+  q = .string
+  r = .string
+  i = .int
+  n = .int
+  c = .string
+  v = .int
+  q = "'"
+  if pos("'", s) > 0 & pos('"', s) = 0 then q = '"'
+  r = "b" || q
+  n = length(s)
+  do i = 1 to n
+    c = substr(s, i, 1)
+    v = c2d(c)
+    if c == q | c == "\" then r = r || "\" || c
+    else if v = 10 then r = r || "\n"
+    else if v = 9 then r = r || "\t"
+    else if v = 13 then r = r || "\r"
+    else if v < 32 | v >= 127 then r = r || "\x" || hex2(v)
+    else r = r || c
+  end
+  return r || q
+
+/* normalise an encoding name: "utf-8", "ascii", "latin-1" or "" when unknown */
+enc_name: procedure = .string
+  arg e = .string
+  l = .string
+  l = lower(changestr("_", e, "-"))
+  if l == "utf-8" | l == "utf8" | l == "u8" | l == "utf" then return "utf-8"
+  if l == "ascii" | l == "us-ascii" | l == "646" then return "ascii"
+  if l == "latin-1" | l == "latin1" | l == "iso-8859-1" | l == "iso8859-1" | l == "l1" | l == "latin" | l == "cp1252" | l == "windows-1252" then return "latin-1"
+  return ""
+
+/* the encoding argument (positional idx or keyword) as a normalised name; "" with an exception set when unknown */
+enc_arg: procedure = .string
+  arg base = .int, na = .int, nk = .int, idx = .int
+  v = .int
+  e = .string
+  v = 0
+  if na >= idx then v = ast[base + idx]
+  if kwarg(base, na, nk, "encoding") \= 0 then v = kwarg(base, na, nk, "encoding")
+  if v = 0 then return "utf-8"
+  if kind_of(v) \= K_STR then do
+    call raise_exc C_TYPEERROR, "encode() argument 'encoding' must be str, not " || type_name(v)
+    return ""
+  end
+  e = enc_name(ob_s[v % 2])
+  if e == "" then do
+    call raise_exc C_LOOKUPERROR, "unknown encoding: " || ob_s[v % 2]
+    return ""
+  end
+  return e
+
+err_arg: procedure = .string
+  arg base = .int, na = .int, nk = .int, idx = .int
+  v = .int
+  v = 0
+  if na >= idx then v = ast[base + idx]
+  if kwarg(base, na, nk, "errors") \= 0 then v = kwarg(base, na, nk, "errors")
+  if v = 0 then return "strict"
+  if kind_of(v) \= K_STR then return "strict"
+  return ob_s[v % 2]
+
+/* characters (codepoints) to bytes; returns the byte string, or "" with an exception set */
+str_encode: procedure = .string
+  arg s = .string, enc = .string, errs = .string
+  r = .string
+  i = .int
+  n = .int
+  c = .int
+  ch = .string
+  bad = .int
+  n = length(s)
+  r = ""
+  do i = 1 to n
+    ch = substr(s, i, 1)
+    c = c2d(ch)
+    bad = 0
+    if c < 128 then r = r || ch
+    else if enc == "utf-8" then do
+      if c < 2048 then r = r || d2c(192 + c % 64) || d2c(128 + c // 64)
+      else if c < 65536 then r = r || d2c(224 + c % 4096) || d2c(128 + (c % 64) // 64) || d2c(128 + c // 64)
+      else r = r || d2c(240 + c % 262144) || d2c(128 + (c % 4096) // 64) || d2c(128 + (c % 64) // 64) || d2c(128 + c // 64)
+    end
+    else if enc == "latin-1" & c < 256 then r = r || ch
+    else bad = 1
+    if bad = 1 then do
+      if errs == "ignore" then nop
+      else if errs == "replace" then r = r || "?"
+      else if errs == "xmlcharrefreplace" then r = r || "&#" || c || ";"
+      else if errs == "backslashreplace" then do
+        if c < 256 then r = r || "\x" || hex2(c)
+        else if c < 65536 then r = r || "\u" || right(lower(d2x(c)), 4, "0")
+        else r = r || "\U" || right(lower(d2x(c)), 8, "0")
+      end
+      else do
+        if c < 256 then ch = "\x" || hex2(c)
+        else if c < 65536 then ch = "\u" || right(lower(d2x(c)), 4, "0")
+        else ch = "\U" || right(lower(d2x(c)), 8, "0")
+        if enc == "ascii" then call raise_exc C_UNICODEENCODEERROR, "'ascii' codec can't encode character '" || ch || "' in position " || (i - 1) || ": ordinal not in range(128)"
+        else call raise_exc C_UNICODEENCODEERROR, "'latin-1' codec can't encode character '" || ch || "' in position " || (i - 1) || ": ordinal not in range(256)"
+        return ""
+      end
+    end
+  end
+  return r
+
+/* bytes to characters; "" with an exception set on a strict error */
+str_decode: procedure = .string
+  arg s = .string, enc = .string, errs = .string
+  r = .string
+  i = .int
+  n = .int
+  b = .int
+  need = .int
+  cp = .int
+  j = .int
+  cb = .int
+  why = .string
+  bad = .int
+  lo = .int
+  hi = .int
+  n = length(s)
+  r = ""
+  i = 1
+  do while i <= n
+    b = c2d(substr(s, i, 1))
+    if b < 128 then do
+      r = r || d2c(b)
+      i = i + 1
+      iterate
+    end
+    if enc == "latin-1" then do
+      r = r || d2c(b)
+      i = i + 1
+      iterate
+    end
+    bad = 0
+    why = ""
+    need = 0
+    cp = 0
+    if enc == "ascii" then do
+      bad = 1
+      why = "ordinal not in range(128)"
+    end
+    else if b >= 194 & b <= 223 then do
+      need = 1
+      cp = b - 192
+    end
+    else if b >= 224 & b <= 239 then do
+      need = 2
+      cp = b - 224
+    end
+    else if b >= 240 & b <= 244 then do
+      need = 3
+      cp = b - 240
+    end
+    else do
+      bad = 1
+      why = "invalid start byte"
+    end
+    j = 1
+    if bad = 0 then do
+      lo = 128
+      hi = 191
+      if b = 224 then lo = 160
+      if b = 237 then hi = 159
+      if b = 240 then lo = 144
+      if b = 244 then hi = 143
+      do while j <= need
+        if i + j > n then do
+          bad = 2
+          why = "unexpected end of data"
+          leave
+        end
+        cb = c2d(substr(s, i + j, 1))
+        if cb < lo | cb > hi then do
+          bad = 1
+          why = "invalid continuation byte"
+          leave
+        end
+        lo = 128
+        hi = 191
+        cp = cp * 64 + (cb - 128)
+        j = j + 1
+      end
+    end
+    if bad = 0 then do
+      r = r || d2c(cp)
+      i = i + need + 1
+      iterate
+    end
+    if errs == "strict" then do
+      if bad = 2 & j > 1 then call raise_exc C_UNICODEDECODEERROR, "'" || enc || "' codec can't decode bytes in position " || (i - 1) || "-" || (n - 1) || ": " || why
+      else call raise_exc C_UNICODEDECODEERROR, "'" || enc || "' codec can't decode byte 0x" || hex2(b) || " in position " || (i - 1) || ": " || why
+      return ""
+    end
+    if errs == "replace" then r = r || d2c(65533)
+    else if errs == "backslashreplace" then r = r || "\x" || hex2(b)
+    else if errs == "surrogateescape" then r = r || d2c(56320 + b)
+    if bad = 2 then i = n + 1
+    else i = i + 1
+  end
+  return r
+
+/* bytes of an iterable of ints; "" with an exception set on error */
+bytes_from_iter: procedure = .string
+  arg x = .int
+  l = .int
+  i = .int
+  v = .int
+  r = .string
+  l = iter_list(x)
+  if l = 0 then return ""
+  r = ""
+  do i = 0 to ob_n[l % 2] - 1
+    v = sl[ob_p[l % 2] + i]
+    if numkind(v) \= 1 then do
+      call raise_exc C_TYPEERROR, "'" || type_name(v) || "' object cannot be interpreted as an integer"
+      return ""
+    end
+    if ival(v) < 0 | ival(v) > 255 then do
+      call raise_exc C_VALUEERROR, "bytes must be in range(0, 256)"
+      return ""
+    end
+    r = r || d2c(ival(v))
+  end
+  return r
+
+/* bytes(...) / bytearray(...) */
+ctor_bytes: procedure = .int
+  arg isba = .int, base = .int, na = .int, nk = .int
+  x = .int
+  s = .string
+  enc = .string
+  nm = .string
+  nm = "bytes"
+  if isba = 1 then nm = "bytearray"
+  if na = 0 & nk = 0 then s = ""
+  else do
+    x = 0
+    if na >= 1 then x = ast[base + 1]
+    if x = 0 then x = kwarg(base, na, nk, "source")
+    if x = 0 then s = ""
+    else if kind_of(x) = K_STR then do
+      if na < 2 & kwarg(base, na, nk, "encoding") = 0 then return raise_exc(C_TYPEERROR, "string argument without an encoding")
+      enc = enc_arg(base, na, nk, 2)
+      if unw > 0 then return 0
+      s = str_encode(ob_s[x % 2], enc, err_arg(base, na, nk, 3))
+      if unw > 0 then return 0
+    end
+    else if kind_of(x) = K_BYTES then s = ob_s[x % 2]
+    else if numkind(x) = 1 then do
+      if ival(x) < 0 then return raise_exc(C_VALUEERROR, "negative count")
+      s = copies(d2c(0), ival(x))
+    end
+    else if numkind(x) = 2 then return raise_exc(C_OVERFLOWERROR, "cannot fit 'int' into an index-sized integer")
+    else if numkind(x) = 3 | kind_of(x) = K_COMPLEX then return raise_exc(C_TYPEERROR, "cannot convert '" || type_name(x) || "' object to " || nm)
+    else do
+      s = bytes_from_iter(x)
+      if unw > 0 then return 0
+    end
+  end
+  if isba = 1 then return mkbytearr(s)
+  return mkbytes(s)
+
+/* hex string of s with an optional separator */
+bytes_hex: procedure = .string
+  arg s = .string, sep = .string
+  r = .string
+  i = .int
+  n = .int
+  r = ""
+  n = length(s)
+  do i = 1 to n
+    if i > 1 then r = r || sep
+    r = r || hex2(c2d(substr(s, i, 1)))
+  end
+  return r
+
+/* bytes.fromhex(s) */
+bytes_fromhex: procedure = .int
+  arg isba = .int, base = .int, na = .int
+  h = .string
+  r = .string
+  i = .int
+  n = .int
+  c = .string
+  d1 = .int
+  d2 = .int
+  if na \= 1 then return nargs_err("fromhex", na, 1, 1)
+  if kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "fromhex() argument must be str, not " || type_name(ast[base + 1]))
+  h = ob_s[ast[base + 1] % 2]
+  n = length(h)
+  r = ""
+  i = 1
+  do while i <= n
+    c = substr(h, i, 1)
+    if is_ws(c) = 1 then do
+      i = i + 1
+      iterate
+    end
+    d1 = hexval(c)
+    d2 = -1
+    if i < n then d2 = hexval(substr(h, i + 1, 1))
+    if d1 < 0 | d2 < 0 then do
+      if d1 >= 0 then i = i + 1
+      return raise_exc(C_VALUEERROR, "non-hexadecimal number found in fromhex() arg at position " || (i - 1))
+    end
+    r = r || d2c(d1 * 16 + d2)
+    i = i + 2
+  end
+  if isba = 1 then return mkbytearr(r)
+  return mkbytes(r)
+
+hexval: procedure = .int
+  arg c = .string
+  v = .int
+  if isdigit(c) = 1 then return c as .int
+  v = c2d(lower(c))
+  if v >= 97 & v <= 102 then return v - 87
+  return -1
+
+/* the needle argument of find / count / startswith ...: a byte string, or "" with an exception */
+bytes_needle: procedure = .string
+  arg x = .int
+  if kind_of(x) = K_BYTES then return ob_s[x % 2]
+  if numkind(x) = 1 then do
+    if ival(x) < 0 | ival(x) > 255 then do
+      call raise_exc C_VALUEERROR, "byte must be in range(0, 256)"
+      return ""
+    end
+    return d2c(ival(x))
+  end
+  call raise_exc C_TYPEERROR, "a bytes-like object is required, not '" || type_name(x) || "'"
+  return ""
+
+/* turn a list of str objects (from the str splitters) into bytes objects of the type of o */
+bytes_list: procedure = .int
+  arg l = .int, o = .int
+  i = .int
+  do i = 0 to ob_n[l % 2] - 1
+    sl[ob_p[l % 2] + i] = bytes_like(o, ob_s[sl[ob_p[l % 2] + i] % 2])
+  end
+  return l
+
+meth_bytes: procedure = .int
+  arg o = .int, nid = .int, base = .int, na = .int, nk = .int
+  s = .string
+  a = .string
+  t = .string
+  n = .int
+  i = .int
+  j = .int
+  p = .int
+  m = .int
+  v = .int
+  l = .int
+  w = .int
+  st = .int
+  en = .int
+  f = .string
+  ba = .int
+  enc = .string
+  c = .int
+  s = ob_s[o % 2]
+  ba = ob_y[o % 2]
+  select
+    when nid = M_DECODE then do
+      enc = enc_arg(base, na, nk, 1)
+      if unw > 0 then return 0
+      t = str_decode(s, enc, err_arg(base, na, nk, 2))
+      if unw > 0 then return 0
+      return mkstr(t)
+    end
+    when nid = M_HEX then do
+      a = ""
+      if na >= 1 then do
+        if kind_of(ast[base + 1]) = K_STR then a = ob_s[ast[base + 1] % 2]
+        else if kind_of(ast[base + 1]) = K_BYTES then a = ob_s[ast[base + 1] % 2]
+      end
+      if kwarg(base, na, nk, "sep") \= 0 then a = ob_s[kwarg(base, na, nk, "sep") % 2]
+      return mkstr(bytes_hex(s, a))
+    end
+    when nid = M_JOIN then do
+      if na \= 1 then return nargs_err("join", na, 1, 1)
+      l = iter_list(ast[base + 1])
+      if l = 0 then return 0
+      n = ob_n[l % 2]
+      t = ""
+      do i = 0 to n - 1
+        v = sl[ob_p[l % 2] + i]
+        if kind_of(v) \= K_BYTES then return raise_exc(C_TYPEERROR, "sequence item " || i || ": expected a bytes-like object, " || type_name(v) || " found")
+        if i > 0 then t = t || s
+        t = t || ob_s[v % 2]
+      end
+      return bytes_like(o, t)
+    end
+    when nid = M_UPPER then return bytes_like(o, upper(s))
+    when nid = M_LOWER then return bytes_like(o, lower(s))
+    when nid = M_CAPITALIZE then return bytes_like(o, upper(left(s, 1)) || lower(substr(s, 2)))
+    when nid = M_SWAPCASE then return bytes_like(o, str_swapcase(s))
+    when nid = M_TITLE then return bytes_like(o, str_title(s))
+    when nid = M_STRIP | nid = M_LSTRIP | nid = M_RSTRIP then do
+      a = ""
+      if na >= 1 then do
+        if ast[base + 1] \= NONE_OOP then do
+          a = bytes_needle(ast[base + 1])
+          if unw > 0 then return 0
+        end
+      end
+      m = 3
+      if nid = M_LSTRIP then m = 1
+      if nid = M_RSTRIP then m = 2
+      return bytes_like(o, str_strip(s, a, m))
+    end
+    when nid = M_SPLIT | nid = M_RSPLIT then do
+      a = ""
+      w = 0
+      m = -1
+      if na >= 1 then do
+        if ast[base + 1] \= NONE_OOP then do
+          a = bytes_needle(ast[base + 1])
+          if unw > 0 then return 0
+          w = 1
+          if a == "" then return raise_exc(C_VALUEERROR, "empty separator")
+        end
+      end
+      if na >= 2 then m = ival(ast[base + 2])
+      if kwarg(base, na, nk, "maxsplit") \= 0 then m = ival(kwarg(base, na, nk, "maxsplit"))
+      if kwarg(base, na, nk, "sep") \= 0 then do
+        if kwarg(base, na, nk, "sep") \= NONE_OOP then do
+          a = bytes_needle(kwarg(base, na, nk, "sep"))
+          if unw > 0 then return 0
+          w = 1
+        end
+      end
+      if nid = M_SPLIT then do
+        if w = 0 then return bytes_list(split_ws(s, m), o)
+        return bytes_list(split_sep(s, a, m), o)
+      end
+      if w = 0 then return bytes_list(rsplit_ws(s, m), o)
+      return bytes_list(rsplit_sep(s, a, m), o)
+    end
+    when nid = M_REPLACE then do
+      if na < 2 then return nargs_err("replace", na, 2, 3)
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      t = bytes_needle(ast[base + 2])
+      if unw > 0 then return 0
+      m = -1
+      if na >= 3 then m = ival(ast[base + 3])
+      return bytes_like(o, str_replace(s, a, t, m))
+    end
+    when nid = M_FIND | nid = M_RFIND | nid = M_INDEX | nid = M_RINDEX | nid = M_COUNT then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      if slice_args(length(s), base, na, 2) = 0 then return 0
+      st = sl_a
+      en = sl_n
+      if st > en | st > length(s) then do
+        if nid = M_COUNT then return mkint(0)
+        if nid = M_FIND | nid = M_RFIND then return mkint(-1)
+        return raise_exc(C_VALUEERROR, "subsection not found")
+      end
+      t = substr(s, st + 1, en - st)
+      if nid = M_COUNT then do
+        if a == "" then return mkint(length(t) + 1)
+        return mkint(countstr(a, t))
+      end
+      if a == "" then do
+        if nid = M_RFIND | nid = M_RINDEX then return mkint(en)
+        return mkint(st)
+      end
+      if nid = M_FIND | nid = M_INDEX then p = pos(a, t)
+      else p = lastpos(a, t)
+      if p = 0 then do
+        if nid = M_FIND | nid = M_RFIND then return mkint(-1)
+        return raise_exc(C_VALUEERROR, "subsection not found")
+      end
+      return mkint(p - 1 + st)
+    end
+    when nid = M_STARTSWITH | nid = M_ENDSWITH then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 3)
+      if slice_args(length(s), base, na, 2) = 0 then return 0
+      st = sl_a
+      en = sl_n
+      if st > en then return FALSE_OOP
+      t = substr(s, st + 1, en - st)
+      v = ast[base + 1]
+      if kind_of(v) = K_TUPLE then l = ob_n[v % 2]
+      else l = 1
+      do j = 0 to l - 1
+        if kind_of(v) = K_TUPLE then a = bytes_needle(sl[ob_p[v % 2] + j])
+        else a = bytes_needle(v)
+        if unw > 0 then return 0
+        n = length(a)
+        if n <= length(t) then do
+          if nid = M_STARTSWITH then do
+            if left(t, n) == a then return TRUE_OOP
+          end
+          else do
+            if n = 0 then return TRUE_OOP
+            if right(t, n) == a then return TRUE_OOP
+          end
+        end
+      end
+      return FALSE_OOP
+    end
+    when nid = M_ISALPHA then return mkbool(by_isclass(s, 1))
+    when nid = M_ISDIGIT then return mkbool(by_isclass(s, 2))
+    when nid = M_ISALNUM then return mkbool(by_isclass(s, 3))
+    when nid = M_ISSPACE then return mkbool(by_isclass(s, 4))
+    when nid = M_ISUPPER then do
+      if upper(s) == s & lower(s) \== s then return TRUE_OOP
+      return FALSE_OOP
+    end
+    when nid = M_ISLOWER then do
+      if lower(s) == s & upper(s) \== lower(s) then return TRUE_OOP
+      return FALSE_OOP
+    end
+    when nid = M_ISASCII then do
+      do i = 1 to length(s)
+        if c2d(substr(s, i, 1)) >= 128 then return FALSE_OOP
+      end
+      return TRUE_OOP
+    end
+    when nid = M_CENTER | nid = M_LJUST | nid = M_RJUST then do
+      if na < 1 then return nargs_err(nid_name[nid], na, 1, 2)
+      if chk_int(ast[base + 1]) = 0 then return 0
+      w = ival(ast[base + 1])
+      f = " "
+      if na >= 2 then do
+        f = bytes_needle(ast[base + 2])
+        if unw > 0 then return 0
+        if length(f) \= 1 then return raise_exc(C_TYPEERROR, nid_name[nid] || "() argument 2 must be a byte string of length 1")
+      end
+      n = length(s)
+      if w <= n then return bytes_like(o, s)
+      m = w - n
+      if nid = M_LJUST then return bytes_like(o, s || copies(f, m))
+      if nid = M_RJUST then return bytes_like(o, copies(f, m) || s)
+      i = m % 2 + (m // 2) * (w // 2)
+      return bytes_like(o, copies(f, i) || s || copies(f, m - i))
+    end
+    when nid = M_ZFILL then do
+      if chk_int(ast[base + 1]) = 0 then return 0
+      w = ival(ast[base + 1])
+      n = length(s)
+      if w <= n then return bytes_like(o, s)
+      if left(s, 1) == "-" | left(s, 1) == "+" then return bytes_like(o, left(s, 1) || copies("0", w - n) || substr(s, 2))
+      return bytes_like(o, copies("0", w - n) || s)
+    end
+    when nid = M_PARTITION | nid = M_RPARTITION then do
+      if na \= 1 then return nargs_err(nid_name[nid], na, 1, 1)
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      if a == "" then return raise_exc(C_VALUEERROR, "empty separator")
+      if nid = M_PARTITION then p = pos(a, s)
+      else p = lastpos(a, s)
+      v = mktuple(3)
+      if p = 0 then do
+        if nid = M_PARTITION then do
+          sl[ob_p[v % 2]] = bytes_like(o, s)
+          sl[ob_p[v % 2] + 1] = bytes_like(o, "")
+          sl[ob_p[v % 2] + 2] = bytes_like(o, "")
+        end
+        else do
+          sl[ob_p[v % 2]] = bytes_like(o, "")
+          sl[ob_p[v % 2] + 1] = bytes_like(o, "")
+          sl[ob_p[v % 2] + 2] = bytes_like(o, s)
+        end
+        return v
+      end
+      sl[ob_p[v % 2]] = bytes_like(o, left(s, p - 1))
+      sl[ob_p[v % 2] + 1] = bytes_like(o, a)
+      sl[ob_p[v % 2] + 2] = bytes_like(o, substr(s, p + length(a)))
+      return v
+    end
+    when nid = M_SPLITLINES then do
+      l = mklist(8)
+      m = 0
+      if na >= 1 then m = truthy(ast[base + 1])
+      n = length(s)
+      i = 1
+      do while i <= n
+        j = i
+        do while j <= n & substr(s, j, 1) \== '0a'x & substr(s, j, 1) \== '0d'x
+          j = j + 1
+        end
+        p = j
+        if j <= n then do
+          if substr(s, j, 1) == '0d'x & substr(s, j + 1, 1) == '0a'x then j = j + 2
+          else j = j + 1
+        end
+        if m = 1 then call list_append l, bytes_like(o, substr(s, i, j - i))
+        else call list_append l, bytes_like(o, substr(s, i, p - i))
+        i = j
+      end
+      return l
+    end
+    when nid = M_REMOVEPREFIX then do
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      if length(a) <= length(s) & length(a) > 0 then do
+        if left(s, length(a)) == a then return bytes_like(o, substr(s, length(a) + 1))
+      end
+      return bytes_like(o, s)
+    end
+    when nid = M_REMOVESUFFIX then do
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      if length(a) <= length(s) & length(a) > 0 then do
+        if right(s, length(a)) == a then return bytes_like(o, left(s, length(s) - length(a)))
+      end
+      return bytes_like(o, s)
+    end
+    when nid = M_COPY & ba = 1 then return mkbytearr(s)
+    when nid = M_APPEND & ba = 1 then do
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      ob_s[o % 2] = s || a
+      return NONE_OOP
+    end
+    when nid = M_EXTEND & ba = 1 then do
+      if kind_of(ast[base + 1]) = K_BYTES then a = ob_s[ast[base + 1] % 2]
+      else do
+        a = bytes_from_iter(ast[base + 1])
+        if unw > 0 then return 0
+      end
+      ob_s[o % 2] = s || a
+      return NONE_OOP
+    end
+    when nid = M_INSERT & ba = 1 then do
+      if chk_int(ast[base + 1]) = 0 then return 0
+      a = bytes_needle(ast[base + 2])
+      if unw > 0 then return 0
+      i = ival(ast[base + 1])
+      n = length(s)
+      if i < 0 then i = i + n
+      if i < 0 then i = 0
+      if i > n then i = n
+      ob_s[o % 2] = left(s, i) || a || substr(s, i + 1)
+      return NONE_OOP
+    end
+    when nid = M_POP & ba = 1 then do
+      n = length(s)
+      if n = 0 then return raise_exc(C_INDEXERROR, "pop from empty bytearray")
+      i = n - 1
+      if na >= 1 then do
+        if chk_int(ast[base + 1]) = 0 then return 0
+        i = ival(ast[base + 1])
+        if i < 0 then i = i + n
+        if i < 0 | i >= n then return raise_exc(C_INDEXERROR, "pop index out of range")
+      end
+      c = c2d(substr(s, i + 1, 1))
+      ob_s[o % 2] = left(s, i) || substr(s, i + 2)
+      return mkint(c)
+    end
+    when nid = M_REMOVE & ba = 1 then do
+      a = bytes_needle(ast[base + 1])
+      if unw > 0 then return 0
+      p = pos(a, s)
+      if p = 0 then return raise_exc(C_VALUEERROR, "value not found in bytearray")
+      ob_s[o % 2] = left(s, p - 1) || substr(s, p + length(a))
+      return NONE_OOP
+    end
+    when nid = M_CLEAR & ba = 1 then do
+      ob_s[o % 2] = ""
+      return NONE_OOP
+    end
+    when nid = M_REVERSE & ba = 1 then do
+      t = ""
+      do i = length(s) to 1 by -1
+        t = t || substr(s, i, 1)
+      end
+      ob_s[o % 2] = t
+      return NONE_OOP
+    end
+    otherwise nop
+  end
+  return meth_common(o, nid, base, na, nk)
+
+by_isclass: procedure = .int
+  arg s = .string, cls = .int
+  i = .int
+  n = .int
+  c = .string
+  a = .int
+  d = .int
+  n = length(s)
+  if n = 0 then return 0
+  do i = 1 to n
+    c = substr(s, i, 1)
+    a = 0
+    if c >>= "a" & c <<= "z" then a = 1
+    else if c >>= "A" & c <<= "Z" then a = 1
+    d = 0
+    if c >>= "0" & c <<= "9" then d = 1
+    if cls = 1 & a = 0 then return 0
+    if cls = 2 & d = 0 then return 0
+    if cls = 3 & a = 0 & d = 0 then return 0
+    if cls = 4 & (c2d(c) >= 128 | is_ws(c) = 0) then return 0
+  end
+  return 1
+
+/* index into a bytes object: an int, or a bytes slice handled by the caller */
+bytes_geti: procedure = .int
+  arg o = .int, ix = .int
+  s = .string
+  i = .int
+  n = .int
+  s = ob_s[o % 2]
+  if ix // 2 = 0 & ob_k[ix % 2] \= K_BOOL then return raise_exc(C_TYPEERROR, "byte indices must be integers or slices, not " || type_name(ix))
+  i = idx_int(ix)
+  n = length(s)
+  if i < 0 then i = i + n
+  if i < 0 | i >= n then do
+    if ob_y[o % 2] = 1 then return raise_exc(C_INDEXERROR, "bytearray index out of range")
+    return raise_exc(C_INDEXERROR, "index out of range")
+  end
+  return mkint(c2d(substr(s, i + 1, 1)))
+
+bytes_slice: procedure = .int
+  arg o = .int, lo = .int, hi = .int, st = .int
+  s = .string
+  r = .int
+  res = .string
+  p = .int
+  i = .int
+  s = ob_s[o % 2]
+  r = slice_calc(length(s), lo, hi, st)
+  if r = 0 then return 0
+  if sl_b = 1 then return bytes_like(o, substr(s, sl_a + 1, sl_n))
+  res = ""
+  p = sl_a
+  do i = 1 to sl_n
+    res = res || substr(s, p + 1, 1)
+    p = p + sl_b
+  end
+  return bytes_like(o, res)
+
+/* bytearray item / slice assignment */
+bytes_seti: procedure = .void
+  arg o = .int, ix = .int, v = .int
+  s = .string
+  i = .int
+  n = .int
+  r = .int
+  t = .string
+  src = .string
+  s = ob_s[o % 2]
+  if ob_y[o % 2] \= 1 then do
+    r = raise_exc(C_TYPEERROR, "'bytes' object does not support item assignment")
+    return
+  end
+  if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then do
+    if kind_of(v) = K_BYTES then src = ob_s[v % 2]
+    else do
+      src = bytes_from_iter(v)
+      if unw > 0 then return
+    end
+    r = slice_calc(length(s), ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    if r = 0 then return
+    if sl_b = 1 then do
+      ob_s[o % 2] = left(s, sl_a) || src || substr(s, sl_a + sl_n + 1)
+      return
+    end
+    if length(src) \= sl_n then do
+      r = raise_exc(C_VALUEERROR, "attempt to assign bytes of size " || length(src) || " to extended slice of size " || sl_n)
+      return
+    end
+    i = sl_a
+    do n = 1 to sl_n
+      s = left(s, i) || substr(src, n, 1) || substr(s, i + 2)
+      i = i + sl_b
+    end
+    ob_s[o % 2] = s
+    return
+  end
+  if numkind(v) \= 1 then do
+    r = raise_exc(C_TYPEERROR, "'" || type_name(v) || "' object cannot be interpreted as an integer")
+    return
+  end
+  if ival(v) < 0 | ival(v) > 255 then do
+    r = raise_exc(C_VALUEERROR, "byte must be in range(0, 256)")
+    return
+  end
+  i = idx_int(ix)
+  n = length(s)
+  if i < 0 then i = i + n
+  if i < 0 | i >= n then do
+    r = raise_exc(C_INDEXERROR, "bytearray assignment index out of range")
+    return
+  end
+  ob_s[o % 2] = left(s, i) || d2c(ival(v)) || substr(s, i + 2)
+  return
+
+bytes_deli: procedure = .void
+  arg o = .int, ix = .int
+  s = .string
+  i = .int
+  n = .int
+  r = .int
+  s = ob_s[o % 2]
+  if ob_y[o % 2] \= 1 then do
+    r = raise_exc(C_TYPEERROR, "'bytes' object doesn't support item deletion")
+    return
+  end
+  if ix // 2 = 0 & ob_k[ix % 2] = K_SLICE then do
+    r = slice_calc(length(s), ob_n[ix % 2], ob_x[ix % 2], ob_y[ix % 2])
+    if r = 0 then return
+    if sl_b = 1 then do
+      ob_s[o % 2] = left(s, sl_a) || substr(s, sl_a + sl_n + 1)
+      return
+    end
+    do n = 1 to sl_n
+      i = sl_a + (n - 1) * sl_b
+      s = left(s, i) || "@@" || substr(s, i + 2)
+    end
+    ob_s[o % 2] = changestr("@@", s, "")
+    return
+  end
+  i = idx_int(ix)
+  n = length(s)
+  if i < 0 then i = i + n
+  if i < 0 | i >= n then do
+    r = raise_exc(C_INDEXERROR, "bytearray index out of range")
+    return
+  end
+  ob_s[o % 2] = left(s, i) || substr(s, i + 2)
+  return
+
+bytes_contains: procedure = .int
+  arg c = .int, x = .int
+  a = .string
+  a = bytes_needle(x)
+  if unw > 0 then return 0
+  if pos(a, ob_s[c % 2]) > 0 | a == "" then return 1
+  return 0
+
+/* ---- int.to_bytes / int.from_bytes ---- */
+int_to_bytes: procedure = .int
+  arg o = .int, base = .int, na = .int, nk = .int
+  nlen = .int
+  order = .string
+  v = .int
+  s = .string
+  neg = .int
+  r = .string
+  i = .int
+  a = .int
+  q = .string
+  m = .string
+  signed = .int
+  nlen = 1
+  order = "big"
+  signed = 0
+  if na >= 1 then v = ast[base + 1]
+  else v = kwarg(base, na, nk, "length")
+  if v \= 0 then do
+    if chk_int(v) = 0 then return 0
+    nlen = ival(v)
+  end
+  v = 0
+  if na >= 2 then v = ast[base + 2]
+  if kwarg(base, na, nk, "byteorder") \= 0 then v = kwarg(base, na, nk, "byteorder")
+  if v \= 0 then order = ob_s[v % 2]
+  if kwarg(base, na, nk, "signed") \= 0 then signed = truthy(kwarg(base, na, nk, "signed"))
+  if order \== "big" & order \== "little" then return raise_exc(C_VALUEERROR, "byteorder must be either 'little' or 'big'")
+  if nlen < 0 then return raise_exc(C_VALUEERROR, "length argument must be non-negative")
+  s = num_str(o)
+  neg = 0
+  if left(s, 1) == "-" then do
+    neg = 1
+    s = substr(s, 2)
+    if signed = 0 then return raise_exc(C_OVERFLOWERROR, "can't convert negative int to unsigned")
+    s = ssub(big_pow("256", nlen), s)
+    if left(s, 1) == "-" then return raise_exc(C_OVERFLOWERROR, "int too big to convert")
+  end
+  r = ""
+  do i = 1 to nlen
+    call sdivmod s, "256"
+    a = sr as .int
+    s = sq
+    r = d2c(a) || r
+  end
+  if s \== "0" then return raise_exc(C_OVERFLOWERROR, "int too big to convert")
+  if signed = 1 & neg = 0 & nlen > 0 then do
+    if c2d(left(r, 1)) >= 128 then return raise_exc(C_OVERFLOWERROR, "int too big to convert")
+  end
+  if signed = 1 & neg = 1 & nlen > 0 then do
+    if c2d(left(r, 1)) < 128 then return raise_exc(C_OVERFLOWERROR, "int too big to convert")
+  end
+  if order == "little" then do
+    q = ""
+    do i = length(r) to 1 by -1
+      q = q || substr(r, i, 1)
+    end
+    r = q
+  end
+  return mkbytes(r)
+
+int_from_bytes: procedure = .int
+  arg base = .int, na = .int, nk = .int
+  x = .int
+  s = .string
+  order = .string
+  v = .int
+  signed = .int
+  acc = .string
+  i = .int
+  n = .int
+  b = .int
+  small = .int
+  order = "big"
+  signed = 0
+  x = 0
+  if na >= 1 then x = ast[base + 1]
+  if x = 0 then x = kwarg(base, na, nk, "bytes")
+  if x = 0 then return nargs_err("from_bytes", na, 1, 3)
+  if kind_of(x) = K_BYTES then s = ob_s[x % 2]
+  else do
+    s = bytes_from_iter(x)
+    if unw > 0 then return 0
+  end
+  v = 0
+  if na >= 2 then v = ast[base + 2]
+  if kwarg(base, na, nk, "byteorder") \= 0 then v = kwarg(base, na, nk, "byteorder")
+  if v \= 0 then order = ob_s[v % 2]
+  if kwarg(base, na, nk, "signed") \= 0 then signed = truthy(kwarg(base, na, nk, "signed"))
+  if order \== "big" & order \== "little" then return raise_exc(C_VALUEERROR, "byteorder must be either 'little' or 'big'")
+  n = length(s)
+  if order == "little" then do
+    acc = ""
+    do i = n to 1 by -1
+      acc = acc || substr(s, i, 1)
+    end
+    s = acc
+  end
+  if n = 0 then return mkint(0)
+  small = 0
+  if n <= 7 then small = 1
+  if small = 1 then do
+    b = 0
+    do i = 1 to n
+      b = b * 256 + c2d(substr(s, i, 1))
+    end
+    if signed = 1 & c2d(left(s, 1)) >= 128 then b = b - 256 ** n
+    return mkint(b)
+  end
+  acc = "0"
+  do i = 1 to n
+    acc = sadd(smul(acc, "256"), c2d(substr(s, i, 1)) as .string)
+  end
+  if signed = 1 & c2d(left(s, 1)) >= 128 then acc = ssub(acc, big_pow("256", n))
+  return big_norm(acc)

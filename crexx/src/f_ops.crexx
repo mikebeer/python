@@ -263,7 +263,44 @@ arith: procedure = .int
   q = .int
   kx = kind_of(x)
   ky = kind_of(y)
+  if kx = K_COMPLEX | ky = K_COMPLEX then do
+    if (kx = K_COMPLEX | numkind(x) > 0) & (ky = K_COMPLEX | numkind(y) > 0) then return cplx_arith(op, x, y)
+  end
+  if x // 2 = 0 then do
+    if ob_c[x % 2] > 0 & op <= 13 then do
+      m = nsov(x, opd[op])
+      if m > 0 then do
+        r = call2(m, x, y)
+        if r \= NOTIMPL_OOP then return r
+        if unw > 0 then return 0
+      end
+    end
+  end
+  if y // 2 = 0 then do
+    if ob_c[y % 2] > 0 & op <= 13 then do
+      m = nsov(y, ropd[op])
+      if m > 0 then do
+        r = call2(m, y, x)
+        if r \= NOTIMPL_OOP then return r
+        if unw > 0 then return 0
+      end
+    end
+  end
+  if kx = K_BIG then do
+    if ob_c[x % 2] > 0 then do
+      x = big_norm(ob_s[x % 2])
+      kx = kind_of(x)
+    end
+  end
+  if ky = K_BIG then do
+    if ob_c[y % 2] > 0 then do
+      y = big_norm(ob_s[y % 2])
+      ky = kind_of(y)
+    end
+  end
   if numkind(x) > 0 & numkind(y) > 0 then return numarith(op, x, y)
+  if kx = K_ARRAY & ky = K_COMPLEX then return arith(op, cx_call1("_from_real", x), y)
+  if kx = K_COMPLEX & ky = K_ARRAY then return arith(op, x, cx_call1("_from_real", y))
   if (kx = K_ARRAY | ky = K_ARRAY) & kx \= K_INST & ky \= K_INST & kx \= K_STR then return np_binop(op, x, y)
   if kx = K_INST | ky = K_INST then do
     if kx = K_INST then do
@@ -302,6 +339,7 @@ arith: procedure = .int
   select
     when op = O_ADD then do
       if kx = K_STR & ky = K_STR then return mkstr(ob_s[x % 2] || ob_s[y % 2])
+      if kx = K_BYTES & ky = K_BYTES then return bytes_like(x, ob_s[x % 2] || ob_s[y % 2])
       if kx = K_LIST & ky = K_LIST then do
         o = mklist(ob_n[x % 2] + ob_n[y % 2])
         call list_extend_from o, x
@@ -321,6 +359,8 @@ arith: procedure = .int
       end
     end
     when op = O_MUL then do
+      if kx = K_BYTES & numkind(y) = 1 then return bytes_rep(x, ival(y))
+      if ky = K_BYTES & numkind(x) = 1 then return bytes_rep(y, ival(x))
       if (kx = K_STR | kx = K_LIST | kx = K_TUPLE) & numkind(y) = 1 then return seq_repeat(x, ival(y))
       if (ky = K_STR | ky = K_LIST | ky = K_TUPLE) & numkind(x) = 1 then return seq_repeat(y, ival(x))
     end
@@ -461,6 +501,7 @@ unary: procedure = .int
   r = .int
   m = .int
   if kind_of(x) = K_ARRAY then return np_unary(op, x)
+  if kind_of(x) = K_COMPLEX then return cplx_unary(op, x)
   k = numkind(x)
   if op = 1 then do
     if k = 1 then return mkint(0 - ival(x))
@@ -548,6 +589,11 @@ py_eq: procedure = .int
     return 0
   end
   if kx = K_STR & ky = K_STR then do
+    if ob_s[x % 2] == ob_s[y % 2] then return 1
+    return 0
+  end
+  if kx = K_COMPLEX | ky = K_COMPLEX then return cplx_eq(x, y)
+  if kx = K_BYTES & ky = K_BYTES then do
     if ob_s[x % 2] == ob_s[y % 2] then return 1
     return 0
   end
@@ -686,6 +732,14 @@ py_cmp: procedure = .int
     else if s1 == s2 then c = 0
     return cmp_res(op, c)
   end
+  if kx = K_BYTES & ky = K_BYTES then do
+    s1 = ob_s[x % 2]
+    s2 = ob_s[y % 2]
+    c = 1
+    if s1 << s2 then c = -1
+    else if s1 == s2 then c = 0
+    return cmp_res(op, c)
+  end
   if (kx = K_LIST & ky = K_LIST) | (kx = K_TUPLE & ky = K_TUPLE) then do
     n = ob_n[x % 2]
     n2 = ob_n[y % 2]
@@ -709,19 +763,19 @@ py_cmp: procedure = .int
   if kx = K_SET & ky = K_SET then do
     return set_cmp(op, x, y)
   end
-  if kx = K_INST | ky = K_INST then do
+  if ocls(x) > 0 | ocls(y) > 0 then do
     nid = cmpd[op]
     rnid = cmpr[op]
-    if kx = K_INST then do
-      m = cls_find(ob_c[x % 2], nid)
+    if ocls(x) > 0 then do
+      m = ovr(x, nid)
       if m > 0 then do
         r = call2(m, x, y)
         if r \= NOTIMPL_OOP then return r
         if unw > 0 then return 0
       end
     end
-    if ky = K_INST then do
-      m = cls_find(ob_c[y % 2], rnid)
+    if ocls(y) > 0 then do
+      m = ovr(y, rnid)
       if m > 0 then do
         r = call2(m, y, x)
         if r \= NOTIMPL_OOP then return r
@@ -781,7 +835,18 @@ py_contains: procedure = .int
   st = .int
   b = ob_x[c % 2]
   k = kind_of(c)
+  if c // 2 = 0 then do
+    if ob_c[c % 2] > 0 then do
+      m = nsov(c, M___CONTAINS__)
+      if m > 0 then do
+        r = call2(m, c, x)
+        if r = 0 then return 0
+        return truthy(r)
+      end
+    end
+  end
   select
+    when k = K_BYTES then return bytes_contains(c, x)
     when k = K_STR then do
       if kind_of(x) \= K_STR then do
         call raise_exc C_TYPEERROR, "'in <string>' requires string as left operand, not " || type_name(x)
@@ -902,7 +967,7 @@ repr_str: procedure = .string
     else if c == '0d'x then r = r || "\r"
     else do
       v = c2d(c)
-      if v < 32 | v = 127 then r = r || "\x" || right(d2x(v), 2, "0")
+      if v < 32 | v = 127 then r = r || "\x" || lower(right(d2x(v), 2, "0"))
       else r = r || c
     end
   end
@@ -922,8 +987,25 @@ repr_of: procedure = .string
   c = .int
   if x // 2 \= 0 then return ((x - 1) % 2) as .string
   k = ob_k[x % 2]
+  if ob_c[x % 2] > 0 then do
+    m = nsov(x, M___REPR__)
+    if m > 0 then do
+      r = call1(m, x)
+      if r = 0 then return ""
+      if kind_of(r) \= K_STR then do
+        call raise_exc C_TYPEERROR, "__repr__ returned non-string (type " || type_name(r) || ")"
+        return ""
+      end
+      return ob_s[r % 2]
+    end
+  end
   select
     when k = K_STR then return repr_str(ob_s[x % 2])
+    when k = K_BYTES then do
+      if ob_y[x % 2] = 1 then return "bytearray(" || bytes_repr(ob_s[x % 2]) || ")"
+      return bytes_repr(ob_s[x % 2])
+    end
+    when k = K_COMPLEX then return cplx_repr(ob_f[x % 2], ob_g[x % 2])
     when k = K_FLOAT then return float_repr(ob_f[x % 2])
     when k = K_BIG then return ob_s[x % 2]
     when k = K_BOOL then do
@@ -972,7 +1054,10 @@ repr_of: procedure = .string
       return s || "}"
     end
     when k = K_SET then do
-      if dd_n[ob_x[x % 2]] = 0 then return "set()"
+      if dd_n[ob_x[x % 2]] = 0 then do
+        if ob_c[x % 2] > 0 then return cl_name[ob_c[x % 2]] || "()"
+        return "set()"
+      end
       s = "{"
       first = 1
       e = dd_head[ob_x[x % 2]]
@@ -984,6 +1069,7 @@ repr_of: procedure = .string
         end
         e = de_next[e]
       end
+      if ob_c[x % 2] > 0 then return cl_name[ob_c[x % 2]] || "(" || s || "})"
       return s || "}"
     end
     when k = K_DVIEW then do
@@ -1062,6 +1148,9 @@ exc_str: procedure = .string
     if cls_issub(ob_c[x % 2], C_KEYERROR) = 1 then return repr_of(sl[ob_p[a % 2]])
     return str_of(sl[ob_p[a % 2]])
   end
+  if ob_n[a % 2] = 2 & cls_issub(ob_c[x % 2], C_OSERROR) = 1 then do
+    if sl[ob_p[a % 2]] // 2 = 1 then return "[Errno " || str_of(sl[ob_p[a % 2]]) || "] " || str_of(sl[ob_p[a % 2] + 1])
+  end
   return repr_of(a)
 
 str_of: procedure = .string
@@ -1071,6 +1160,18 @@ str_of: procedure = .string
   r = .int
   if x // 2 \= 0 then return ((x - 1) % 2) as .string
   k = ob_k[x % 2]
+  if ob_c[x % 2] > 0 then do
+    m = nsov(x, M___STR__)
+    if m > 0 then do
+      r = call1(m, x)
+      if r = 0 then return ""
+      if kind_of(r) \= K_STR then do
+        call raise_exc C_TYPEERROR, "__str__ returned non-string (type " || type_name(r) || ")"
+        return ""
+      end
+      return ob_s[r % 2]
+    end
+  end
   if k = K_STR then return ob_s[x % 2]
   if k = K_ARRAY then return np_str(x)
   if k = K_INST then do

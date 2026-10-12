@@ -23,6 +23,9 @@ chk_int: procedure = .int
   arg v = .int
   if numkind(v) = 1 then return 1
   if numkind(v) = 2 then do
+    if unsub(v) \= v then return 1
+  end
+  if numkind(v) = 2 then do
     call raise_exc C_OVERFLOWERROR, "Python int too large to convert to C long"
     return 0
   end
@@ -104,7 +107,7 @@ bi_print: procedure = .int
     if i > 1 then out = out || sep
     v = ast[base + i]
     if v // 2 = 0 then do
-      if ob_k[v % 2] = K_STR then do
+      if ob_k[v % 2] = K_STR & ob_c[v % 2] = 0 then do
         out = out || ob_s[v % 2]
         iterate
       end
@@ -133,8 +136,15 @@ bi_len: procedure = .int
   k = .int
   m = .int
   k = kind_of(x)
+  if x // 2 = 0 then do
+    if ob_c[x % 2] > 0 then do
+      m = nsov(x, M___LEN__)
+      if m > 0 then return call1(m, x)
+    end
+  end
   select
     when k = K_STR then return mkint(length(ob_s[x % 2]))
+    when k = K_BYTES then return mkint(length(ob_s[x % 2]))
     when k = K_LIST | k = K_TUPLE then return mkint(ob_n[x % 2])
     when k = K_DICT | k = K_SET then return mkint(dd_n[ob_x[x % 2]])
     when k = K_DVIEW then return mkint(dd_n[ob_x[ob_x[x % 2] % 2]])
@@ -167,10 +177,12 @@ bi_abs: procedure = .int
     when ob_k[x % 2] = K_FLOAT then return mkfloat(rxfloat..fabs(ob_f[x % 2]))
     when ob_k[x % 2] = K_BIG then do
       s = ob_s[x % 2]
-      if left(s, 1) == "-" then return mkbig(substr(s, 2))
+      if left(s, 1) == "-" then return big_norm(substr(s, 2))
+      if ob_c[x % 2] > 0 then return big_norm(s)
       return x
     end
     when ob_k[x % 2] = K_BOOL then return mkint(ival(x))
+    when ob_k[x % 2] = K_COMPLEX then return cplx_abs(x)
     when ob_k[x % 2] = K_ARRAY then return np_math1(BI_NUMPY_ABS, x)
     otherwise nop
   end
@@ -576,6 +588,11 @@ bi_ord: procedure = .int
   s = .string
   n = .int
   c = .int
+  if kind_of(x) = K_BYTES then do
+    s = ob_s[x % 2]
+    if length(s) \= 1 then return raise_exc(C_TYPEERROR, "ord() expected a character, but string of length " || length(s) || " found")
+    return mkint(c2d(s))
+  end
   if kind_of(x) \= K_STR then return raise_exc(C_TYPEERROR, "ord() expected string of length 1, but " || type_name(x) || " found")
   s = ob_s[x % 2]
   n = length(s)
@@ -759,14 +776,28 @@ bi_hash: procedure = .int
   i = .int
   if x // 2 \= 0 then return x
   k = ob_k[x % 2]
+  if ob_c[x % 2] > 0 then do
+    m = nsov(x, M___HASH__)
+    if m > 0 then return call1(m, x)
+  end
   select
     when k = K_STR then return mkint(strhash(ob_s[x % 2]))
+    when k = K_BYTES then return mkint(strhash(ob_s[x % 2]))
+    when k = K_COMPLEX then do
+      if ob_g[x % 2] = 0.0 then return bi_hash(mkfloat(ob_f[x % 2]))
+      r = bi_hash(mkfloat(ob_f[x % 2]))
+      h = bi_hash(mkfloat(ob_g[x % 2]))
+      return mkint(ival(r) + 1000003 * ival(h))
+    end
     when k = K_BOOL then return mkint(ival(x))
     when k = K_FLOAT then do
       if ob_f[x % 2] = rxfloat..floor(ob_f[x % 2]) & rxfloat..fabs(ob_f[x % 2]) < 900000000000000000.0 then return float_to_int(ob_f[x % 2])
       return mkint(strhash(float_repr(ob_f[x % 2])))
     end
-    when k = K_BIG then return mkint(strhash(ob_s[x % 2]))
+    when k = K_BIG then do
+      if ob_c[x % 2] > 0 then return bi_hash(big_norm(ob_s[x % 2]))
+      return mkint(strhash(ob_s[x % 2]))
+    end
     when k = K_TUPLE then do
       h = 3430008
       do i = 0 to ob_n[x % 2] - 1
@@ -1071,14 +1102,17 @@ ctor_int: procedure = .int
   end
   else if kwarg(base, na, nk, "base") \= 0 then bs = ival(kwarg(base, na, nk, "base"))
   else bs = -1
-  if kind_of(x) = K_STR then do
+  if kind_of(x) = K_STR | kind_of(x) = K_BYTES then do
     if bs = -1 then bs = 10
     return parse_int(ob_s[x % 2], bs)
   end
   if bs \= -1 then return raise_exc(C_TYPEERROR, "int() can't convert non-string with explicit base")
   select
     when numkind(x) = 1 then return mkint(ival(x))
-    when numkind(x) = 2 then return x
+    when numkind(x) = 2 then do
+      if ob_c[x % 2] = 0 then return x
+      return big_norm(ob_s[x % 2])
+    end
     when numkind(x) = 3 then do
       f = ob_f[x % 2]
       if f \= f then return raise_exc(C_VALUEERROR, "cannot convert float NaN to integer")
@@ -1100,7 +1134,7 @@ ctor_float: procedure = .int
   m = .int
   if na = 0 then return mkfloat(0.0)
   x = ast[base + 1]
-  if kind_of(x) = K_STR then return parse_float_str(ob_s[x % 2])
+  if kind_of(x) = K_STR | kind_of(x) = K_BYTES then return parse_float_str(ob_s[x % 2])
   if numkind(x) > 0 then return mkfloat(tofloat(x))
   if kind_of(x) = K_INST then do
     m = cls_find(ob_c[x % 2], M___FLOAT__)
@@ -1194,6 +1228,7 @@ bcall_type: procedure = .int
   x = .int
   l = .int
   o = .int
+  ss = .string
   select
     when c = C_SLICE then do
       if na < 1 | na > 3 then return nargs_err("slice", na, 1, 3)
@@ -1215,9 +1250,16 @@ bcall_type: procedure = .int
     when c = C_INT then return ctor_int(base, na, nk)
     when c = C_STR then do
       if na = 0 then return mkstr("")
-      if kind_of(ast[base + 1]) = K_STR then return ast[base + 1]
-      return mkstr(str_of(ast[base + 1]))
+      x = ast[base + 1]
+      if kind_of(x) = K_BYTES & (na >= 2 | nk > 0) then return meth_bytes(x, M_DECODE, base + 1, na - 1, nk)
+      if kind_of(x) = K_STR & ob_c[x % 2] = 0 then return x
+      ss = str_of(x)
+      if unw > 0 then return 0
+      return mkstr(ss)
     end
+    when c = C_BYTES then return ctor_bytes(0, base, na, nk)
+    when c = C_BYTEARRAY then return ctor_bytes(1, base, na, nk)
+    when c = C_COMPLEX then return ctor_complex(base, na, nk)
     when c = C_FLOAT then return ctor_float(base, na)
     when c = C_BOOL then do
       if na = 0 then return FALSE_OOP
@@ -1229,7 +1271,7 @@ bcall_type: procedure = .int
     end
     when c = C_TUPLE then do
       if na = 0 then return mktuple(0)
-      if kind_of(ast[base + 1]) = K_TUPLE then return ast[base + 1]
+      if kind_of(ast[base + 1]) = K_TUPLE & ob_c[ast[base + 1] % 2] = 0 then return ast[base + 1]
       l = iter_list(ast[base + 1])
       if l = 0 then return 0
       return tup_of_list(l)
@@ -1402,6 +1444,7 @@ bcall: procedure = .int
     when bid = BI__SECOND then do
       return sl[ob_p[ast[base + 1] % 2] + 1]
     end
+    when bid = BI__SOCK then return sock_call(base, na)
     when bid = BI__IDENTITY then do
       if na >= 1 then return ast[base + 1]
       return NONE_OOP

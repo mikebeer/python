@@ -81,5 +81,17 @@ UnicodeDecodeError UnicodeError 3 1
 UnicodeEncodeError UnicodeError 3 1
 IndentationError SyntaxError 3 1
 StopAsyncIteration Exception 3 1
+bytes object 1 1
+bytearray object 1 1
+complex object 1 1
+ConnectionError OSError 3 1
+ConnectionRefusedError ConnectionError 3 1
+ConnectionResetError ConnectionError 3 1
+ConnectionAbortedError ConnectionError 3 1
+BrokenPipeError ConnectionError 3 1
+BlockingIOError OSError 3 1
+InterruptedError OSError 3 1
+ProcessLookupError OSError 3 1
+ChildProcessError OSError 3 1
 ndarray object 1 0
 AxisError ValueError 3 0

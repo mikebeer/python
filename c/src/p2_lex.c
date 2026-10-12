@@ -2,7 +2,7 @@
    p2_lex.c   tokens, character tables, lexer with INDENT/DEDENT
    ========================================================================= */
 enum {
-    TK_EOF = 1000, TK_NEWLINE, TK_INDENT, TK_DEDENT, TK_NAME, TK_NUM, TK_FLOAT, TK_STR,
+    TK_EOF = 1000, TK_NEWLINE, TK_INDENT, TK_DEDENT, TK_NAME, TK_NUM, TK_FLOAT, TK_IMAG, TK_STR,
     TK_FSTR, TK_KW, TK_EQ, TK_NE, TK_LE, TK_GE, TK_POW, TK_FDIV, TK_LSH, TK_RSH,
     TK_ARROW, TK_ELLIPSIS, TK_AUG, TK_WALRUS
 };
@@ -266,7 +266,16 @@ static void lex_source(const char *src, long len)
             if (n > 390) syntax_error(line, "number too long");
             memcpy(tmp, src + st, (size_t)n);
             tmp[n] = 0;
-            if (isf) {
+            if (pos < len && (src[pos] == 'j' || src[pos] == 'J') &&
+                !(c == '0' && n > 1 && strchr("xXoObB", tmp[1]))) {
+                char tmp2[400];
+                int k, j = 0;
+                for (k = 0; tmp[k]; k++) if (tmp[k] != '_') tmp2[j++] = tmp[k];
+                tmp2[j] = 0;
+                pos++;
+                t = tok_new(TK_IMAG, line);
+                t->fval = strtod(tmp2, NULL);
+            } else if (isf) {
                 char tmp2[400];
                 int k, j = 0;
                 for (k = 0; tmp[k]; k++) if (tmp[k] != '_') tmp2[j++] = tmp[k];

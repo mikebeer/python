@@ -33,6 +33,8 @@ static Class *class_of(Value v)
     case T_SLICE: return cls_slice;
     case T_DVIEW: return cls_dview[((DView *)v.u.o)->what];
     case T_BYTES: return cls_bytes;
+    case T_BARR: return cls_bytearray;
+    case T_COMPLEX: return cls_complex;
     default: return cls_object;
     }
 }
@@ -100,6 +102,14 @@ static Value *class_find_after(Class *type, Class *after, Str *nm)
 static Value unpay(Value v)
 {
     return (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET) ? AS_INST(v)->pay : v;
+}
+/* bytes, bytearray or an instance of a subclass: the data pointer and length */
+static int bytes_get(Value v, const char **p, long *n)
+{
+    if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET) v = AS_INST(v)->pay;
+    if (v.t == T_BYTES) { *p = AS_STR(v)->s; *n = AS_STR(v)->len; return 1; }
+    if (v.t == T_BARR) { *p = AS_BARR(v)->s; *n = AS_BARR(v)->n; return 1; }
+    return 0;
 }
 static const char *type_name(Value v)
 {
@@ -188,6 +198,8 @@ static int py_truthy(Value v)
     case T_BOOL: case T_INT: return v.u.i != 0;
     case T_FLOAT: return v.u.d != 0;
     case T_STR: case T_BYTES: return AS_STR(v)->len != 0;
+    case T_BARR: return AS_BARR(v)->n != 0;
+    case T_COMPLEX: return AS_CPLX(v)->re != 0 || AS_CPLX(v)->im != 0;
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n != 0;
     case T_DICT: case T_SET: return AS_DICT(v)->n != 0;
     case T_RANGE: return range_len((Range *)v.u.o) != 0;
@@ -198,6 +210,9 @@ static int py_truthy(Value v)
         if (m) return py_truthy(call1(*m, v));
         m = class_find(AS_INST(v)->cls, S_len);
         if (m) return py_len(v) != 0;
+        if (AS_INST(v)->pay.t == T_INT || AS_INST(v)->pay.t == T_FLOAT ||
+            AS_INST(v)->pay.t == T_BIG || AS_INST(v)->pay.t == T_COMPLEX)
+            return py_truthy(AS_INST(v)->pay);
         return 1; }
     default: return 1;
     }
@@ -206,6 +221,7 @@ static long py_len(Value v)
 {
     switch (v.t) {
     case T_STR: case T_BYTES: return AS_STR(v)->len;
+    case T_BARR: return AS_BARR(v)->n;
     case T_LIST: case T_TUPLE: return AS_LIST(v)->n;
     case T_DICT: case T_SET: return AS_DICT(v)->n;
     case T_RANGE: return range_len((Range *)v.u.o);
@@ -235,11 +251,13 @@ static int is_num(Value v)
 }
 static double to_dbl(Value v)
 {
+    if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET) v = AS_INST(v)->pay;
     if (v.t == T_FLOAT) return v.u.d;
     return int_todouble(v);
 }
 static long need_long(Value v, const char *what)
 {
+    if (v.t == T_INST && AS_INST(v)->pay.t == T_INT) return AS_INST(v)->pay.u.i;
     if (v.t == T_INT || v.t == T_BOOL) return v.u.i;
     if (v.t == T_INST) {
         Value *m = class_find(AS_INST(v)->cls, S_index);
@@ -276,6 +294,13 @@ static Value dview_set(Value v)
 }
 
 /* ---- equality --------------------------------------------------------- */
+/* real and imaginary part of a complex or real number; 0 for anything else */
+static int cplx_parts(Value v, double *re, double *im)
+{
+    if (v.t == T_COMPLEX) { *re = AS_CPLX(v)->re; *im = AS_CPLX(v)->im; return 1; }
+    if (is_num(v)) { *re = to_dbl(v); *im = 0.0; return 1; }
+    return 0;
+}
 static int num_eq(Value a, Value b)
 {
     if (a.t == T_FLOAT || b.t == T_FLOAT) return to_dbl(a) == to_dbl(b);
@@ -284,6 +309,17 @@ static int num_eq(Value a, Value b)
 static int py_eq(Value a, Value b)
 {
     if (is_num(a) && is_num(b)) return num_eq(a, b);
+    if (a.t == T_COMPLEX || b.t == T_COMPLEX) {
+        double ar, ai, br, bi;
+        if (cplx_parts(a, &ar, &ai) && cplx_parts(b, &br, &bi)) return ar == br && ai == bi;
+        if (a.t != T_INST && b.t != T_INST) return 0;
+    }
+    if ((a.t == T_BYTES || a.t == T_BARR) && (b.t == T_BYTES || b.t == T_BARR)) {
+        const char *pa, *pb;
+        long na, nb;
+        bytes_get(a, &pa, &na); bytes_get(b, &pb, &nb);
+        return na == nb && memcmp(pa, pb, (size_t)na) == 0;
+    }
     if (a.t == T_DVIEW || b.t == T_DVIEW) {
         Value x = a, y = b;
         int r;
@@ -386,7 +422,11 @@ static unsigned long py_hash(Value v)
         long i;
         for (i = 0; i < l->n; i++) h = (h * 1000003UL) ^ py_hash(l->a[i]);
         return h; }
-    case T_LIST: case T_DICT: case T_SET:
+    case T_COMPLEX: {
+        unsigned long h = py_hash(mkfloat(AS_CPLX(v)->re));
+        if (AS_CPLX(v)->im != 0.0) h += 1000003UL * py_hash(mkfloat(AS_CPLX(v)->im));
+        return h; }
+    case T_LIST: case T_DICT: case T_SET: case T_BARR:
         throw_new(cls_TypeError, "unhashable type: '%.40s'", type_name(v));
         return 0;
     case T_INST: {
@@ -436,6 +476,17 @@ static int cmp3(Value a, Value b, int *ok)
             return x < y ? -1 : (x > y ? 1 : 0);
         }
         return int_cmp(a, b);
+    }
+    if ((a.t == T_BARR || b.t == T_BARR) && (a.t == T_BYTES || a.t == T_BARR) &&
+        (b.t == T_BYTES || b.t == T_BARR)) {
+        const char *pa, *pb;
+        long na, nb, n;
+        int c;
+        bytes_get(a, &pa, &na); bytes_get(b, &pb, &nb);
+        n = na < nb ? na : nb;
+        c = memcmp(pa, pb, (size_t)n);
+        if (c) return c < 0 ? -1 : 1;
+        return na < nb ? -1 : (na > nb ? 1 : 0);
     }
     if ((a.t == T_STR && b.t == T_STR) || (a.t == T_BYTES && b.t == T_BYTES)) {
         Str *x = AS_STR(a), *y = AS_STR(b);
@@ -582,6 +633,50 @@ static void repr_str_lit(Str *s, Buf *b)
     }
     buf_addc(b, q);
 }
+static void repr_bytes_lit(const char *s, long n, Buf *b)
+{
+    long i;
+    int q = '\'';
+    char tt[8];
+    if (memchr(s, '\'', (size_t)n) && !memchr(s, '"', (size_t)n)) q = '"';
+    buf_addc(b, 'b');
+    buf_addc(b, q);
+    for (i = 0; i < n; i++) {
+        int c = (unsigned char)s[i];
+        if (c == q || c == '\\') { buf_addc(b, '\\'); buf_addc(b, c); }
+        else if (c == '\n') buf_add(b, "\\n");
+        else if (c == '\t') buf_add(b, "\\t");
+        else if (c == '\r') buf_add(b, "\\r");
+        else if (c < 32 || c >= 127) { sprintf(tt, "\\x%02x", c); buf_add(b, tt); }
+        else buf_addc(b, c);
+    }
+    buf_addc(b, q);
+}
+/* one component of a complex repr: the float repr without a trailing ".0" */
+static void complex_part(double d, Buf *b)
+{
+    char t[64];
+    long n;
+    float_repr(d, t);
+    n = (long)strlen(t);
+    if (n > 2 && t[n - 1] == '0' && t[n - 2] == '.') t[n - 2] = 0;
+    buf_add(b, t);
+}
+static int signbit_d(double d)
+{
+    if (d < 0) return 1;
+    if (d == 0) return 1.0 / d < 0;
+    return 0;
+}
+static void complex_repr(double re, double im, Buf *b)
+{
+    int paren = !(re == 0.0 && !signbit_d(re));
+    if (paren) { buf_addc(b, '('); complex_part(re, b); }
+    if (im != im || !signbit_d(im)) { if (paren) buf_addc(b, '+'); complex_part(im, b); }
+    else { if (paren) { buf_addc(b, '-'); complex_part(-im, b); } else complex_part(im, b); }
+    buf_addc(b, 'j');
+    if (paren) buf_addc(b, ')');
+}
 static void exc_str_buf(Inst *in, Buf *b, int repr);
 static void repr_buf(Value v, Buf *b, int depth)
 {
@@ -595,24 +690,13 @@ static void repr_buf(Value v, Buf *b, int depth)
     case T_INT: case T_BIG: int_str(v, b); break;
     case T_FLOAT: float_repr(v.u.d, t); buf_add(b, t); break;
     case T_STR: repr_str_lit(AS_STR(v), b); break;
-    case T_BYTES: {
-        Str *bs = AS_STR(v);
-        int q = '\'';
-        char tt[8];
-        if (memchr(bs->s, '\'', (size_t)bs->len) && !memchr(bs->s, '"', (size_t)bs->len)) q = '"';
-        buf_addc(b, 'b');
-        buf_addc(b, q);
-        for (i = 0; i < bs->len; i++) {
-            int c = (unsigned char)bs->s[i];
-            if (c == q || c == '\\') { buf_addc(b, '\\'); buf_addc(b, c); }
-            else if (c == '\n') buf_add(b, "\\n");
-            else if (c == '\t') buf_add(b, "\\t");
-            else if (c == '\r') buf_add(b, "\\r");
-            else if (c < 32 || c >= 127) { sprintf(tt, "\\x%02x", c); buf_add(b, tt); }
-            else buf_addc(b, c);
-        }
-        buf_addc(b, q);
-        break; }
+    case T_BYTES: repr_bytes_lit(AS_STR(v)->s, AS_STR(v)->len, b); break;
+    case T_BARR:
+        buf_add(b, "bytearray(");
+        repr_bytes_lit(AS_BARR(v)->s, AS_BARR(v)->n, b);
+        buf_addc(b, ')');
+        break;
+    case T_COMPLEX: complex_repr(AS_CPLX(v)->re, AS_CPLX(v)->im, b); break;
     case T_LIST: case T_TUPLE: {
         List *l = AS_LIST(v);
         buf_addc(b, v.t == T_LIST ? '[' : '(');
@@ -759,6 +843,13 @@ static void exc_str_buf(Inst *in, Buf *b, int repr)
                 if (i) buf_add(b, ", ");
                 repr_buf(l->a[i], b, 1);
             }
+        } else if ((l->n == 2 || l->n == 3) && l->a[0].t == T_INT && class_isa(in->cls,
+            cls_OSError)) {
+            char t[40];
+            sprintf(t, "[Errno %ld] ", l->a[0].u.i);
+            buf_add(b, t);
+            str_buf(l->a[1], b);
+            if (l->n == 3) { buf_add(b, ": "); repr_buf(l->a[2], b, 1); }
         } else if (l->n == 1) {
             if (class_isa(in->cls, cls_KeyError)) repr_buf(l->a[0], b, 1);
             else str_buf(l->a[0], b);
@@ -1067,6 +1158,10 @@ static Value get_attr(Value o, Str *nm)
     default: break;
     }
     if (nm == S_class) return mkobj(class_of(o), T_CLASS);
+    if (o.t == T_COMPLEX) {
+        if (nm == intern_c("real")) return mkfloat(AS_CPLX(o)->re);
+        if (nm == intern_c("imag")) return mkfloat(AS_CPLX(o)->im);
+    }
     if (o.t == T_INT || o.t == T_BOOL || o.t == T_BIG || o.t == T_FLOAT) {
         const char *a = nm->s;
         if (!strcmp(a, "real") || (o.t != T_FLOAT && !strcmp(a, "numerator")))
@@ -1270,6 +1365,13 @@ static Value slice_get(Value o, Value lo, Value hi, Value st)
         buf_init(&b);
         for (i = 0; i < cnt; i++) buf_addc(&b, s->s[start + i * step]);
         { Value r = mkbytes(b.s, b.n); buf_free(&b); return r; } }
+    case T_BARR: {
+        BArr *s = AS_BARR(o);
+        Buf b;
+        slice_adjust(lo, hi, st, s->n, &start, &stop, &step, &cnt);
+        buf_init(&b);
+        for (i = 0; i < cnt; i++) buf_addc(&b, s->s[start + i * step]);
+        { Value r = mkbarr(b.s, b.n); buf_free(&b); return r; } }
     case T_ND: return nd_subscr(o, mkslice(lo, hi, st));
     case T_RANGE: {
         Range *r = (Range *)o.u.o;
@@ -1337,10 +1439,23 @@ static Value subscr(Value o, Value idx)
     case T_BYTES:
         if (idx.t == T_INT || idx.t == T_BOOL) {
             Str *s = AS_STR(o);
-            long i = norm_index(idx.u.i, s->len, "index");
+            long i = idx.u.i;
+            if (i < 0) i += s->len;
+            if (i < 0 || i >= s->len) throw_new(cls_IndexError, "index out of range");
             return mkint((unsigned char)s->s[i]);
         }
         throw_new(cls_TypeError, "byte indices must be integers or slices, not %.40s",
+            type_name(idx));
+        break;
+    case T_BARR:
+        if (idx.t == T_INT || idx.t == T_BOOL) {
+            BArr *s = AS_BARR(o);
+            long i = idx.u.i;
+            if (i < 0) i += s->n;
+            if (i < 0 || i >= s->n) throw_new(cls_IndexError, "index out of range");
+            return mkint((unsigned char)s->s[i]);
+        }
+        throw_new(cls_TypeError, "bytearray indices must be integers or slices, not %.40s",
             type_name(idx));
         break;
     case T_ND: return nd_subscr(o, idx);
@@ -1355,6 +1470,13 @@ static Value subscr(Value o, Value idx)
         break;
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_getitem);
+        if (m && m->t == T_BUILTIN && AS_INST(o)->pay.t == T_DICT) {
+            Value r, *mm;
+            if (dict_get(AS_DICT(AS_INST(o)->pay), idx, &r)) return r;
+            mm = class_find(AS_INST(o)->cls, intern_c("__missing__"));
+            if (mm) return call2(*mm, o, idx);
+            throw_key(idx);
+        }
         if (m) return call2(*m, o, idx);
         break; }
     default: break;
@@ -1373,6 +1495,26 @@ static void list_splice(List *l, long start, long stop, Value *items, long ni)
     if (ni != old) memmove(l->a + start + ni, l->a + stop, sizeof(Value) * (size_t)(l->n - stop));
     for (i = 0; i < ni; i++) l->a[start + i] = items[i];
     l->n = newn;
+}
+static void bytes_slice_assign(BArr *a, long start, long stop, long step, long cnt,
+                               const char *src, long sn)
+{
+    long i;
+    if (step == 1) {
+        long old, newn;
+        if (stop < start) stop = start;
+        old = stop - start;
+        newn = a->n - old + sn;
+        barr_reserve(a, newn);
+        memmove(a->s + start + sn, a->s + stop, (size_t)(a->n - stop));
+        if (sn > 0) memcpy(a->s + start, src, (size_t)sn);
+        a->n = newn;
+        return;
+    }
+    if (sn != cnt)
+        throw_new(cls_ValueError,
+            "attempt to assign bytes of size %ld to extended slice of size %ld", sn, cnt);
+    for (i = 0; i < cnt; i++) a->s[start + i * step] = src[i];
 }
 static void slice_set(Value o, Value lo, Value hi, Value st, Value v)
 {
@@ -1394,6 +1536,35 @@ static void slice_set(Value o, Value lo, Value hi, Value st, Value v)
             for (i = 0; i < cnt; i++) l->a[start + i * step] = src->a[i];
         }
         vsp--;
+        return;
+    }
+    if (o.t == T_BARR) {
+        BArr *a = AS_BARR(o);
+        Buf nb;
+        const char *sp;
+        long sn;
+        slice_adjust(lo, hi, st, a->n, &start, &stop, &step, &cnt);
+        if (!bytes_get(v, &sp, &sn)) {
+            Value lv = iter_to_list(v);
+            VPUSH(lv);
+            buf_init(&nb);
+            for (i = 0; i < AS_LIST(lv)->n; i++) {
+                Value y = AS_LIST(lv)->a[i];
+                if (y.t != T_INT || y.u.i < 0 || y.u.i > 255) {
+                    buf_free(&nb);
+                    throw_new(cls_ValueError, "byte must be in range(0, 256)");
+                }
+                buf_addc(&nb, (int)y.u.i);
+            }
+            vsp--;
+            bytes_slice_assign(a, start, stop, step, cnt, nb.s, nb.n);
+            buf_free(&nb);
+            return;
+        }
+        buf_init(&nb);
+        buf_addn(&nb, sp, sn);
+        bytes_slice_assign(a, start, stop, step, cnt, nb.s, nb.n);
+        buf_free(&nb);
         return;
     }
     if (o.t == T_ND) { nd_setitem(o, mkslice(lo, hi, st), v); return; }
@@ -1430,6 +1601,24 @@ static void setitem(Value o, Value idx, Value v)
             type_name(idx));
         break;
     case T_DICT: dict_set(AS_DICT(o), idx, v); return;
+    case T_BARR:
+        if (idx.t == T_INT || idx.t == T_BOOL) {
+            BArr *a = AS_BARR(o);
+            long i = idx.u.i;
+            if (i < 0) i += a->n;
+            if (i < 0 || i >= a->n)
+                throw_new(cls_IndexError, "bytearray assignment index out of range");
+            if (v.t != T_INT && v.t != T_BOOL)
+                throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+                    type_name(v));
+            if (v.u.i < 0 || v.u.i > 255)
+                throw_new(cls_ValueError, "byte must be in range(0, 256)");
+            a->s[i] = (char)v.u.i;
+            return;
+        }
+        throw_new(cls_TypeError, "bytearray indices must be integers or slices, not %.40s",
+            type_name(idx));
+        break;
     case T_ND: nd_setitem(o, idx, v); return;
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_setitem);
@@ -1466,6 +1655,18 @@ static void delitem(Value o, Value idx)
     case T_DICT:
         if (!dict_del(AS_DICT(o), idx)) throw_key(idx);
         return;
+    case T_BARR:
+        if (idx.t == T_INT || idx.t == T_BOOL) {
+            BArr *a = AS_BARR(o);
+            long i = idx.u.i;
+            if (i < 0) i += a->n;
+            if (i < 0 || i >= a->n)
+                throw_new(cls_IndexError, "bytearray index out of range");
+            memmove(a->s + i, a->s + i + 1, (size_t)(a->n - i - 1));
+            a->n--;
+            return;
+        }
+        break;
     case T_SET:
         break;
     case T_INST: {
@@ -1486,6 +1687,21 @@ static void slice_del(Value o, Value lo, Value hi, Value st)
         if (step < 0) { start = start + (cnt - 1) * step; step = -step; }
         for (i = cnt - 1; i >= 0; i--)
             list_splice(l, start + i * step, start + i * step + 1, NULL, 0);
+        return;
+    }
+    if (o.t == T_BARR) {
+        BArr *a = AS_BARR(o);
+        slice_adjust(lo, hi, st, a->n, &start, &stop, &step, &cnt);
+        if (step == 1) {
+            if (stop > start) bytes_slice_assign(a, start, stop, 1, cnt, NULL, 0);
+            return;
+        }
+        if (step < 0) { start = start + (cnt - 1) * step; step = -step; }
+        for (i = cnt - 1; i >= 0; i--) {
+            long k = start + i * step;
+            memmove(a->s + k, a->s + k + 1, (size_t)(a->n - k - 1));
+            a->n--;
+        }
         return;
     }
     if (o.t == T_INST) {
@@ -1512,7 +1728,7 @@ static Value get_iter(Value o)
     case T_LIST: it = iter_new(IK_LIST); it->a = o; return mkobj(it, T_ITER);
     case T_TUPLE: it = iter_new(IK_TUPLE); it->a = o; return mkobj(it, T_ITER);
     case T_STR: it = iter_new(IK_STR); it->a = o; return mkobj(it, T_ITER);
-    case T_BYTES: it = iter_new(IK_BYTES); it->a = o; return mkobj(it, T_ITER);
+    case T_BYTES: case T_BARR: it = iter_new(IK_BYTES); it->a = o; return mkobj(it, T_ITER);
     case T_DICT: it = iter_new(IK_DICT); it->a = o; return mkobj(it, T_ITER);
     case T_SET: it = iter_new(IK_SET); it->a = o; return mkobj(it, T_ITER);
     case T_RANGE: {
@@ -1580,9 +1796,11 @@ static int iter_next(Value it, Value *out)
         t->i++;
         return 1; }
     case IK_BYTES: {
-        Str *s = AS_STR(t->a);
-        if (t->i >= s->len) return 0;
-        *out = mkint((unsigned char)s->s[t->i++]);
+        const char *bp = "";
+        long bn = 0;
+        bytes_get(t->a, &bp, &bn);
+        if (t->i >= bn) return 0;
+        *out = mkint((unsigned char)bp[t->i++]);
         return 1; }
     case IK_CALLSENT: {
         Value r = call0(t->a);
@@ -1735,16 +1953,20 @@ static int contains(Value c, Value x)
         for (i = 0; i + u->len <= s->len; i++)
             if (s->s[i] == u->s[0] && memcmp(s->s + i, u->s, (size_t)u->len) == 0) return 1;
         return 0; }
-    case T_BYTES: {
-        Str *s = AS_STR(c), *u;
-        long i;
-        if (x.t == T_INT) return memchr(s->s, (int)x.u.i, (size_t)s->len) != NULL;
-        if (x.t != T_BYTES)
+    case T_BYTES: case T_BARR: {
+        const char *sp, *up;
+        long sn, un, i;
+        bytes_get(c, &sp, &sn);
+        if (x.t == T_INT) {
+            if (x.u.i < 0 || x.u.i > 255)
+                throw_new(cls_ValueError, "byte must be in range(0, 256)");
+            return memchr(sp, (int)x.u.i, (size_t)sn) != NULL;
+        }
+        if (!bytes_get(x, &up, &un))
             throw_new(cls_TypeError, "a bytes-like object is required, not '%.40s'", type_name(x));
-        u = AS_STR(x);
-        if (u->len == 0) return 1;
-        for (i = 0; i + u->len <= s->len; i++)
-            if (s->s[i] == u->s[0] && memcmp(s->s + i, u->s, (size_t)u->len) == 0) return 1;
+        if (un == 0) return 1;
+        for (i = 0; i + un <= sn; i++)
+            if (sp[i] == up[0] && memcmp(sp + i, up, (size_t)un) == 0) return 1;
         return 0; }
     case T_RANGE: {
         Range *r = (Range *)c.u.o;
@@ -1872,7 +2094,7 @@ static Value num_binop(int op, Value a, Value b)
             if (x == 0 && y < 0)
                 throw_new(cls_ZeroDivisionError, "0.0 cannot be raised to a negative power");
             if (x < 0 && y != floor(y))
-                throw_new(cls_ValueError, "negative number cannot be raised to a fractional power");
+                return cplx_binop(B_POW, mkcomplex(x, 0.0), mkcomplex(y, 0.0));
             return mkfloat(pow(x, y));
         default: break;
         }
@@ -1958,6 +2180,8 @@ static Value set_op(int op, Value a, Value b)
 static Value binop(int op, Value a, Value b)
 {
     if (is_num(a) && is_num(b)) return num_binop(op, a, b);
+    if ((a.t == T_COMPLEX && (b.t == T_COMPLEX || is_num(b))) ||
+        (b.t == T_COMPLEX && is_num(a))) return cplx_binop(op, a, b);
     if ((a.t == T_ND || b.t == T_ND) && a.t != T_INST && b.t != T_INST) return nd_binop(op, a, b);
     if (a.t == T_STR && b.t == T_STR && op == B_ADD) {
         Str *x = AS_STR(a), *y = AS_STR(b);
@@ -1969,28 +2193,31 @@ static Value binop(int op, Value a, Value b)
         r->s[r->len] = 0;
         return mkobj(r, T_STR);
     }
-    if (a.t == T_BYTES && b.t == T_BYTES && op == B_ADD) {
-        Str *x = AS_STR(a), *y = AS_STR(b);
+    if ((a.t == T_BYTES || a.t == T_BARR) && (op == B_ADD || op == B_MUL)) {
+        const char *pa, *pb;
+        long na, nb, i;
         Buf bf;
         Value r;
-        buf_init(&bf);
-        buf_addn(&bf, x->s, x->len);
-        buf_addn(&bf, y->s, y->len);
-        r = mkbytes(bf.s, bf.n);
-        buf_free(&bf);
-        return r;
+        if (op == B_ADD && bytes_get(b, &pb, &nb) && (b.t == T_BYTES || b.t == T_BARR)) {
+            bytes_get(a, &pa, &na);
+            buf_init(&bf);
+            buf_addn(&bf, pa, na);
+            buf_addn(&bf, pb, nb);
+            r = a.t == T_BARR ? mkbarr(bf.s, bf.n) : mkbytes(bf.s, bf.n);
+            buf_free(&bf);
+            return r;
+        }
+        if (op == B_MUL && (b.t == T_INT || b.t == T_BOOL)) {
+            bytes_get(a, &pa, &na);
+            buf_init(&bf);
+            for (i = 0; i < b.u.i; i++) buf_addn(&bf, pa, na);
+            r = a.t == T_BARR ? mkbarr(bf.s, bf.n) : mkbytes(bf.s, bf.n);
+            buf_free(&bf);
+            return r;
+        }
     }
-    if (op == B_MUL && ((a.t == T_BYTES && b.t == T_INT) || (b.t == T_BYTES && a.t == T_INT))) {
-        Str *x = AS_STR(a.t == T_BYTES ? a : b);
-        long n = a.t == T_BYTES ? b.u.i : a.u.i, i;
-        Buf bf;
-        Value r;
-        buf_init(&bf);
-        for (i = 0; i < n; i++) buf_addn(&bf, x->s, x->len);
-        r = mkbytes(bf.s, bf.n);
-        buf_free(&bf);
-        return r;
-    }
+    if (op == B_MUL && (b.t == T_BYTES || b.t == T_BARR) && (a.t == T_INT || a.t == T_BOOL))
+        return binop(op, b, a);
     if (op == B_ADD && a.t == b.t && (a.t == T_LIST || a.t == T_TUPLE)) {
         List *x = AS_LIST(a), *y = AS_LIST(b), *r;
         long i;
@@ -2053,6 +2280,8 @@ static Value binop(int op, Value a, Value b)
             if (!IS_NOTIMPL(r)) return r;
         }
     }
+    if (b.t == T_INST && a.t != T_INST && AS_INST(b)->pay.t != T_UNSET)
+        return binop(op, a, AS_INST(b)->pay);
     if (a.t == T_ND || b.t == T_ND) return nd_binop(op, a, b);
     if (op == B_ADD && a.t == T_STR)
         throw_new(cls_TypeError, "can only concatenate str (not \"%.40s\") to str", type_name(b));
@@ -2067,6 +2296,35 @@ static Value binop(int op, Value a, Value b)
 }
 static Value inplace_binop(int op, Value a, Value b)
 {
+    if (a.t == T_BARR && op == B_ADD) {
+        const char *pb;
+        long nb;
+        BArr *ba = AS_BARR(a);
+        if (!bytes_get(b, &pb, &nb))
+            throw_new(cls_TypeError, "can't concat %.40s to bytearray", type_name(b));
+        if (pb >= ba->s && pb < ba->s + ba->n) {   /* b += b */
+            Buf t;
+            buf_init(&t);
+            buf_addn(&t, pb, nb);
+            barr_reserve(ba, ba->n + nb);
+            memcpy(ba->s + ba->n, t.s, (size_t)nb);
+            buf_free(&t);
+        } else {
+            barr_reserve(ba, ba->n + nb);
+            memcpy(ba->s + ba->n, pb, (size_t)nb);
+        }
+        ba->n += nb;
+        return a;
+    }
+    if (a.t == T_BARR && op == B_MUL && (b.t == T_INT || b.t == T_BOOL)) {
+        BArr *ba = AS_BARR(a);
+        long i, n0 = ba->n;
+        if (b.u.i <= 0) { ba->n = 0; return a; }
+        barr_reserve(ba, n0 * b.u.i);
+        for (i = 1; i < b.u.i; i++) memcpy(ba->s + i * n0, ba->s, (size_t)n0);
+        ba->n = n0 * b.u.i;
+        return a;
+    }
     if (a.t == T_INST) {
         Str *dn = idunder(op);
         Value *m = dn ? class_find(AS_INST(a)->cls, dn) : NULL;
@@ -2080,6 +2338,7 @@ static Value inplace_binop(int op, Value a, Value b)
 static Value unop(int op, Value a)
 {
     if (a.t == T_ND) return nd_unop(op, a);
+    if (a.t == T_COMPLEX) return cplx_unop(op, a);
     if (op == '-') {
         if (a.t == T_INT || a.t == T_BOOL) return mkint(-a.u.i);
         if (a.t == T_FLOAT) return mkfloat(-a.u.d);

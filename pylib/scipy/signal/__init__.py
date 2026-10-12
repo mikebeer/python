@@ -627,3 +627,244 @@ def square(t, duty=0.5):
 
 
 get_window = windows.get_window
+
+
+# ----------------------------------------------------------------------------- frequency domain
+
+def _vals(x):
+    return [complex(v) for v in np.atleast_1d(np.asarray(x)).flatten().tolist()]
+
+
+def freqz(b, a=1, worN=512, whole=False, plot=None, fs=2 * math.pi, include_nyquist=False):
+    """frequency response of a digital filter (direct evaluation of the polynomials)"""
+    bb = _vals(b)
+    aa = _vals(a)
+    if worN is None:
+        worN = 512
+    if isinstance(worN, (int, np.integer)) if hasattr(np, "integer") else isinstance(worN, int):
+        n = int(worN)
+        last = 2 * math.pi if whole else math.pi
+        if include_nyquist and not whole:
+            den = n - 1
+        else:
+            den = n
+        w = [last * i / den if den > 0 else 0.0 for i in range(n)]
+    else:
+        w = [2 * math.pi * float(v) / fs for v in np.atleast_1d(np.asarray(worN)).flatten().tolist()]
+    h = []
+    for wi in w:
+        z = complex(math.cos(wi), -math.sin(wi))
+        nb = complex(0.0, 0.0)
+        for c in bb[::-1]:
+            nb = nb * z + c
+        na = complex(0.0, 0.0)
+        for c in aa[::-1]:
+            na = na * z + c
+        if na == 0:
+            h.append(complex(nan, nan))
+        else:
+            h.append(nb / na)
+    return np.array([v * fs / (2 * math.pi) for v in w]), np.array(h)
+
+
+def hilbert(x, N=None, axis=-1):
+    """analytic signal of a real sequence"""
+    x = np.asarray(x)
+    if str(x.dtype)[:7] == 'complex':
+        raise ValueError("x must be real.")
+    if N is None:
+        N = x.shape[axis]
+    if N <= 0:
+        raise ValueError("N must be positive.")
+    Xf = np.fft.fft(x, N, axis=axis)
+    h = [0.0] * N
+    if N % 2 == 0:
+        h[0] = 1.0
+        h[N // 2] = 1.0
+        for i in range(1, N // 2):
+            h[i] = 2.0
+    else:
+        h[0] = 1.0
+        for i in range(1, (N + 1) // 2):
+            h[i] = 2.0
+    if x.ndim > 1:
+        ax = axis + x.ndim if axis < 0 else axis
+        shp = [1] * x.ndim
+        shp[ax] = N
+        hh = np.array(h).reshape(tuple(shp))
+        return np.fft.ifft(Xf * hh, axis=axis)
+    return np.fft.ifft(Xf * np.array(h), axis=axis)
+
+
+def _detrend_line(seg, kind):
+    n = len(seg)
+    if kind is None or kind is False:
+        return seg
+    if callable(kind):
+        return [float(v) for v in kind(np.array(seg)).tolist()]
+    if kind == "constant":
+        m = sum(seg) / n
+        return [v - m for v in seg]
+    if kind == "linear":
+        # least squares line through the segment
+        sx = (n - 1) * n / 2.0
+        sxx = (n - 1) * n * (2 * n - 1) / 6.0
+        sy = sum(seg)
+        sxy = 0.0
+        for i in range(n):
+            sxy += i * seg[i]
+        den = n * sxx - sx * sx
+        if den == 0:
+            return seg
+        slope = (n * sxy - sx * sy) / den
+        icpt = (sy - slope * sx) / n
+        return [seg[i] - (slope * i + icpt) for i in range(n)]
+    raise ValueError("%r is not a valid detrend type" % (kind,))
+
+
+def _spectral_helper(x, fs, window, nperseg, noverlap, nfft, detrend, return_onesided, scaling, mode):
+    xa = np.asarray(x)
+    if xa.ndim != 1:
+        raise NotImplementedError("only 1-D input is supported")
+    iscplx = str(xa.dtype)[:7] == 'complex'
+    xs = xa.tolist()
+    nx = len(xs)
+    if nperseg is None:
+        nperseg = 256
+    if nx < nperseg:
+        nperseg = nx
+    nperseg = int(nperseg)
+    if isinstance(window, (str, tuple)):
+        win = windows.get_window(window, nperseg)
+    else:
+        win = np.asarray(window)
+        if win.ndim != 1:
+            raise ValueError("window must be 1-D")
+        if win.shape[0] != nperseg:
+            raise ValueError("window must have length of nperseg")
+    wl = [float(v) for v in win.tolist()]
+    if nfft is None:
+        nfft = nperseg
+    elif nfft < nperseg:
+        raise ValueError("nfft must be greater than or equal to nperseg.")
+    nfft = int(nfft)
+    if noverlap is None:
+        noverlap = nperseg // 2
+    noverlap = int(noverlap)
+    if noverlap >= nperseg:
+        raise ValueError("noverlap must be less than nperseg.")
+    onesided = return_onesided and not iscplx
+    if scaling == "density":
+        scale = 1.0 / (fs * sum(v * v for v in wl))
+    elif scaling == "spectrum":
+        scale = 1.0 / sum(wl) ** 2
+    else:
+        raise ValueError("Unknown scaling: %r" % scaling)
+    if mode == "stft":
+        scale = math.sqrt(scale)
+    step = nperseg - noverlap
+    segs = []
+    i = 0
+    while i + nperseg <= nx:
+        seg = xs[i:i + nperseg]
+        if iscplx:
+            re = _detrend_line([v.real for v in seg], detrend)
+            im = _detrend_line([v.imag for v in seg], detrend)
+            seg = [complex(re[k] * wl[k], im[k] * wl[k]) for k in range(nperseg)]
+        else:
+            seg = _detrend_line([float(v) for v in seg], detrend)
+            seg = [seg[k] * wl[k] for k in range(nperseg)]
+        segs.append(seg)
+        i += step
+    cols = []
+    for seg in segs:
+        if onesided:
+            r = np.fft.rfft(np.array(seg), nfft)
+        else:
+            r = np.fft.fft(np.array(seg), nfft)
+        cols.append(r.tolist())
+    nf = len(cols[0]) if cols else (nfft // 2 + 1 if onesided else nfft)
+    out = []
+    for k in range(nf):
+        row = []
+        for c in cols:
+            v = complex(c[k])
+            if mode == "psd":
+                v = (v.real * v.real + v.imag * v.imag) * scale
+            else:
+                v = v * scale
+            row.append(v)
+        out.append(row)
+    if mode == "psd" and onesided:
+        hi = nf if nfft % 2 else nf - 1
+        for k in range(1, hi):
+            out[k] = [2 * v for v in out[k]]
+    if onesided:
+        freqs = np.fft.rfftfreq(nfft, 1.0 / fs)
+    else:
+        freqs = np.fft.fftfreq(nfft, 1.0 / fs)
+    nseg = len(cols)
+    t = np.array([(nperseg / 2.0 + j * step) / fs for j in range(nseg)])
+    if mode == "psd":
+        res = np.array(out) if nseg > 0 else np.zeros((nf, 0))
+    else:
+        res = np.array([[complex(v) for v in row] for row in out]) if nseg > 0 else np.zeros((nf, 0), dtype=complex)
+    return freqs, t, res
+
+
+def spectrogram(x, fs=1.0, window=("tukey", 0.25), nperseg=None, noverlap=None, nfft=None, detrend="constant",
+                return_onesided=True, scaling="density", axis=-1, mode="psd"):
+    if mode not in ("psd", "complex", "magnitude", "angle", "phase"):
+        raise ValueError("unknown value for mode %s, must be one of: 'psd', 'complex', 'magnitude', 'angle', 'phase'" % mode)
+    if nperseg is None and noverlap is None:
+        noverlap = None
+    if nperseg is None:
+        nperseg = 256
+    if noverlap is None:
+        noverlap = nperseg // 8
+    sm = "psd" if mode == "psd" else "stft"
+    f, t, s = _spectral_helper(x, fs, window, nperseg, noverlap, nfft, detrend, return_onesided, scaling, sm)
+    if mode == "magnitude":
+        s = np.abs(s)
+    elif mode == "angle":
+        s = np.angle(s)
+    elif mode == "phase":
+        s = np.unwrap(np.angle(s), axis=-1) if hasattr(np, "unwrap") else np.angle(s)
+    return f, t, s
+
+
+def periodogram(x, fs=1.0, window="boxcar", nfft=None, detrend="constant", return_onesided=True, scaling="density",
+                axis=-1):
+    xa = np.asarray(x)
+    if xa.shape[0] == 0:
+        return np.empty(0), np.empty(0)
+    n = xa.shape[0]
+    if nfft is None:
+        nfft = n
+    elif nfft < n:
+        xa = xa[:nfft]
+        n = nfft
+    f, _t, s = _spectral_helper(xa, fs, window, n, 0, nfft, detrend, return_onesided, scaling, "psd")
+    return f, np.array([row[0] for row in s.tolist()])
+
+
+def welch(x, fs=1.0, window="hann", nperseg=None, noverlap=None, nfft=None, detrend="constant", return_onesided=True,
+          scaling="density", axis=-1, average="mean"):
+    f, _t, s = _spectral_helper(x, fs, window, nperseg, noverlap, nfft, detrend, return_onesided, scaling, "psd")
+    rows = s.tolist()
+    out = []
+    for row in rows:
+        if average == "median":
+            r = sorted(row)
+            m = len(r)
+            med = r[m // 2] if m % 2 else 0.5 * (r[m // 2 - 1] + r[m // 2])
+            # scipy corrects the median bias of the chi^2 distribution
+            out.append(med / _median_bias(m))
+        else:
+            out.append(sum(row) / len(row))
+    return f, np.array(out)
+
+
+def _median_bias(n):
+    ii_2 = [2 * i for i in range(1, (n - 1) // 2 + 1)]
+    return 1 + sum(1.0 / (i + 1) - 1.0 / i for i in ii_2)

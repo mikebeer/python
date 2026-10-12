@@ -32,7 +32,8 @@ enum {
     T_UNSET = 0, T_NONE, T_BOOL, T_INT, T_FLOAT,
     T_STR, T_BIG, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_FUNC, T_BUILTIN,
     T_CLASS, T_INST, T_BOUND, T_GEN, T_ITER, T_CELL, T_MODULE, T_PROP,
-    T_SMETH, T_CMETH, T_SUPER, T_FILE, T_ND, T_SLICE, T_DVIEW, T_BYTES, T_NTYPES
+    T_SMETH, T_CMETH, T_SUPER, T_FILE, T_ND, T_SLICE, T_DVIEW, T_BYTES, T_BARR, T_COMPLEX,
+    T_NTYPES
 };
 #define IS_HEAP(t) ((t) >= T_STR)
 
@@ -141,7 +142,8 @@ typedef struct Module {
 } Module;
 typedef struct Range { Hdr h; long start, stop, step; } Range;
 #define ND_MAXD 8
-enum { ND_BOOL = 0, ND_INT = 1, ND_FLOAT = 2 };
+enum { ND_BOOL = 0, ND_INT = 1, ND_FLOAT = 2, ND_COMPLEX = 3 };
+/* complex arrays keep 2 * size doubles (re, im interleaved) in dv */
 typedef struct Nd {
     Hdr h;
     int dt, nd;
@@ -151,6 +153,10 @@ typedef struct Nd {
     double *dv;          /* float data */
 } Nd;
 #define AS_ND(v) ((Nd *)(v).u.o)
+typedef struct BArr { Hdr h; long n, cap; char *s; } BArr;     /* bytearray */
+typedef struct Cplx { Hdr h; double re, im; } Cplx;          /* complex */
+#define AS_BARR(v) ((BArr *)(v).u.o)
+#define AS_CPLX(v) ((Cplx *)(v).u.o)
 typedef struct Prop { Hdr h; Value get, set, del; } Prop;
 typedef struct DView { Hdr h; Value d; int what; } DView;   /* what: 0 keys 1 values 2 items */
 typedef struct Super { Hdr h; Class *start; Value obj; } Super;
@@ -299,13 +305,16 @@ static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, 
     *cls_tuple, *cls_dict, *cls_set, *cls_range, *cls_none, *cls_func, *cls_builtin,
     *cls_method, *cls_gen, *cls_module, *cls_iter, *cls_prop, *cls_file, *cls_cell,
     *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice, *cls_dview[3], *cls_notimpl,
-        *cls_bytes;
+        *cls_bytes, *cls_bytearray, *cls_complex, *cls_frozenset;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError, *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError, *cls_KeyError, *cls_ValueError,
     *cls_TypeError, *cls_NameError, *cls_UnboundLocalError, *cls_AttributeError,
     *cls_RuntimeError, *cls_RecursionError, *cls_NotImplementedError, *cls_StopIteration,
     *cls_AssertionError, *cls_SystemExit, *cls_ImportError, *cls_OSError, *cls_EOFError,
-    *cls_SyntaxError, *cls_KeyboardInterrupt, *cls_GeneratorExit, *cls_FileNotFoundError;
+    *cls_SyntaxError, *cls_KeyboardInterrupt, *cls_GeneratorExit, *cls_FileNotFoundError,
+    *cls_UnicodeDecodeError, *cls_ConnectionError, *cls_TimeoutError, *cls_ConnectionRefusedError,
+    *cls_ConnectionResetError, *cls_ConnectionAbortedError, *cls_BrokenPipeError,
+    *cls_BlockingIOError, *cls_InterruptedError;
 
 /* interned names used by the runtime */
 static Str *S_init, *S_str, *S_repr, *S_eq, *S_ne, *S_lt, *S_le, *S_gt, *S_ge, *S_add, *S_sub,
@@ -365,6 +374,10 @@ static Value nd_item(Value o, long i);
 static int nd_getattr(Value o, Str *nm, Value *out);
 static void nd_assign_all(Value dst, Value src);
 static Value mkslice(Value lo, Value hi, Value st);
+/* complex numbers (p7_cplx.c) */
+static Value cplx_binop(int op, Value a, Value b);
+static Value cplx_unop(int op, Value a);
+static double n_hypot(double a, double b);
 
 /* ---- value constructors ----------------------------------------------- */
 static Value mkint(long n)
@@ -464,6 +477,32 @@ static Value mkbytes(const char *s, long n)
     if (n > 0) memcpy(r->s, s, (size_t)n);
     r->s[n] = 0;
     return mkobj(r, T_BYTES);
+}
+static Value mkbarr(const char *s, long n)
+{
+    BArr *r = (BArr *)gc_alloc(sizeof(BArr), T_BARR);
+    r->n = n;
+    r->cap = n < 8 ? 8 : n;
+    r->s = (char *)xmalloc((size_t)r->cap);
+    GC_ACCOUNT(r->cap);
+    if (n > 0) memcpy(r->s, s, (size_t)n);
+    return mkobj(r, T_BARR);
+}
+static void barr_reserve(BArr *r, long need)
+{
+    if (need > r->cap) {
+        long nc = r->cap * 2;
+        if (nc < need) nc = need;
+        GC_ACCOUNT(nc - r->cap);
+        r->s = (char *)xrealloc(r->s, (size_t)nc);
+        r->cap = nc;
+    }
+}
+static Value mkcomplex(double re, double im)
+{
+    Cplx *c = (Cplx *)gc_alloc(sizeof(Cplx), T_COMPLEX);
+    c->re = re; c->im = im;
+    return mkobj(c, T_COMPLEX);
 }
 static Value mkcstr(const char *s)
 {
@@ -800,7 +839,8 @@ static long gc_obj_size(Hdr *h)
     case T_BIG: return (long)sizeof(Big) + 2L * ((Big *)h)->n;
     case T_LIST: case T_TUPLE: case T_SLICE:
         return (long)sizeof(List) + (long)sizeof(Value) * ((List *)h)->cap;
-    case T_ND: return (long)sizeof(Nd) + 8L * ((Nd *)h)->size;
+    case T_ND: return (long)sizeof(Nd) + 16L * ((Nd *)h)->size;
+    case T_BARR: return (long)sizeof(BArr) + ((BArr *)h)->cap;
     case T_DICT: case T_SET:
         return (long)sizeof(Dict) + (long)sizeof(DEnt) * ((Dict *)h)->cap +
             (long)sizeof(long) * ((Dict *)h)->isz;
@@ -882,6 +922,7 @@ static void gc_free_obj(Hdr *h)
     switch (h->type) {
     case T_LIST: case T_TUPLE: case T_SLICE: free(((List *)h)->a); break;
     case T_ND: free(((Nd *)h)->iv); free(((Nd *)h)->dv); break;
+    case T_BARR: free(((BArr *)h)->s); break;
     case T_DICT: case T_SET: free(((Dict *)h)->e); free(((Dict *)h)->idx); break;
     case T_CLASS: free(((Class *)h)->ns.k); free(((Class *)h)->ns.v);
         free(((Class *)h)->mro); free(((Class *)h)->bases); break;

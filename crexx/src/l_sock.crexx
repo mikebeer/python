@@ -1,0 +1,44 @@
+/* ---------------------------------------------------------------------
+   _sock(op, h, a, b): thin access to the rxsocket library for pylib/socket.py
+   --------------------------------------------------------------------- */
+sock_call: procedure = .int
+  arg base = .int, na = .int
+  op = .int
+  h = .int
+  r = .int
+  s = .string
+  bin = .binary
+  if na < 2 then return raise_exc(C_TYPEERROR, "_sock() needs an operation and a handle")
+  op = ival(ast[base + 1])
+  h = ival(ast[base + 2])
+  select
+    when op = 1 then return mkint(socketcreate())
+    when op = 2 then return mkint(socketclose(h))
+    when op = 3 then return mkint(socketconnect(h, ob_s[ast[base + 3] % 2], ival(ast[base + 4])))
+    when op = 4 then return mkint(socketbind(h, ob_s[ast[base + 3] % 2], ival(ast[base + 4])))
+    when op = 5 then return mkint(socketlisten(h, ival(ast[base + 3])))
+    when op = 6 then return mkint(socketaccept(h))
+    when op = 7 then do
+      s = ob_s[ast[base + 3] % 2]
+      if length(s) = 0 then return mkint(0)
+      bin = x2bin(c2x(s))
+      return mkint(socketsendb(h, bin))
+    end
+    when op = 8 then do
+      bin = socketrecvb(h, ival(ast[base + 3]))
+      s = bin2x(bin)
+      if length(s) = 0 then return mkbytes("")
+      return mkbytes(x2c(s))
+    end
+    when op = 9 then return mkint(sockettimeout(h, ival(ast[base + 3])))
+    when op = 10 then return mkint(socketstatus(h))
+    when op = 11 then return mkstr(socketerror(h))
+    when op = 12 then return mkstr(socketpeer(h))
+    when op = 13 then return mkstr(socketlocal(h))
+    when op = 14 then return mkint(socketshutdown(h, ival(ast[base + 3])))
+    when op = 15 then return mkint(socketblocking(h, ival(ast[base + 3])))
+    when op = 16 then return mkint(socketnodelay(h, ival(ast[base + 3])))
+    when op = 17 then return mkint(socketpending(h))
+    otherwise nop
+  end
+  return NONE_OOP

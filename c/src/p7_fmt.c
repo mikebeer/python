@@ -148,6 +148,74 @@ static Value format_int_spec(Value v, FSpec *sp)
     return r;
 }
 
+/* format() of a complex number: [(]real imag j[)] with the spec applied to both parts */
+static Value format_complex_spec(Value v, FSpec *sp)
+{
+    double re = AS_CPLX(v)->re, im = AS_CPLX(v)->im;
+    int type = sp->type, paren = 0, skip_re = 0;
+    long prec = sp->prec;
+    Buf out;
+    Value r, part;
+    FSpec ps;
+    if (sp->align == '=')
+        throw_new(cls_ValueError, "'=' alignment flag is not allowed in complex format specifier");
+    if (sp->zero)
+        throw_new(cls_ValueError, "Zero padding is not allowed in complex format specifier");
+    if (type != 0 && !strchr("eEfFgGn", type))
+        throw_new(cls_ValueError, "Unknown format code '%c' for object of type 'complex'", type);
+    if (type == 0) {
+        type = 'r';
+        if (re == 0.0 && !signbit_d(re)) skip_re = 1; else paren = 1;
+    }
+    if (type == 'n') type = 'g';
+    if (prec >= 0 && type == 'r') type = 'g';
+    buf_init(&out);
+    if (paren) buf_addc(&out, '(');
+    ps = *sp;
+    ps.width = -1; ps.zero = 0; ps.align = 0; ps.fill = ' '; ps.prec = prec;
+    ps.type = type == 'r' ? 0 : type;
+    if (!skip_re) {
+        if (type == 'r') {
+            Buf t;
+            int neg = signbit_d(re) && re == re;
+            buf_init(&t);
+            complex_part(neg ? -re : re, &t);
+            buf_add(&out, sign_str(sp, neg));
+            buf_addn(&out, t.s, t.n);
+            buf_free(&t);
+        } else {
+            part = format_float_spec(re, &ps);
+            buf_addn(&out, AS_STR(part)->s, AS_STR(part)->len);
+        }
+    }
+    {
+        int neg = signbit_d(im) && im == im;
+        const char *sg;
+        sg = skip_re ? sign_str(sp, neg) : (neg ? "-" : "+");
+        if (type == 'r') {
+            Buf t;
+            buf_init(&t);
+            complex_part(neg ? -im : im, &t);
+            buf_add(&out, sg);
+            buf_addn(&out, t.s, t.n);
+            buf_free(&t);
+        } else {
+            ps.sign = skip_re ? sp->sign : '+';
+            part = format_float_spec(im, &ps);
+            buf_addn(&out, AS_STR(part)->s, AS_STR(part)->len);
+        }
+    }
+    buf_addc(&out, 'j');
+    if (paren) buf_addc(&out, ')');
+    {
+        FSpec ws = *sp;
+        ws.zero = 0;
+        r = pad_result(&ws, "", "", out.s, out.n, '>');
+    }
+    buf_free(&out);
+    return r;
+}
+
 static Value format_value(Value v, const char *spec, long speclen)
 {
     FSpec sp;
@@ -190,6 +258,7 @@ static Value format_value(Value v, const char *spec, long speclen)
         if (strchr("eEfFgG%", t)) return format_float_spec(to_dbl(v), &sp);
         throw_new(cls_ValueError, "Unknown format code '%c' for object of type 'int'", t);
     }
+    if (v.t == T_COMPLEX) return format_complex_spec(v, &sp);
     if (v.t == T_FLOAT) {
         int t = sp.type;
         if (t == 0 || strchr("eEfFgG%", t)) return format_float_spec(v.u.d, &sp);
@@ -205,8 +274,11 @@ static Value py_format_percent(Value fmt, Value args)
     Str *f = AS_STR(fmt);
     Buf out;
     long i = 0, argi = 0;
-    List *tup = args.t == T_TUPLE ? AS_LIST(args) : NULL;
+    List *tup;
     int used_single = 0;
+    if (args.t == T_INST && (AS_INST(args)->pay.t == T_TUPLE || AS_INST(args)->pay.t == T_DICT))
+        args = AS_INST(args)->pay;
+    tup = args.t == T_TUPLE ? AS_LIST(args) : NULL;
     buf_init(&out);
     while (i < f->len) {
         int c = f->s[i++];
@@ -290,6 +362,7 @@ static Value py_format_percent(Value fmt, Value args)
         if (flags_zero && !flags_minus && !strchr("sra", t)) spec[sl++] = '0';
         if (width >= 0) sl += sprintf(spec + sl, "%ld", width);
         if (prec >= 0) sl += sprintf(spec + sl, ".%ld", prec);
+        if (t != 'r' && t != 'a' && t != 's' && t != 'c') arg = unpay(arg);
         if (t == 'r' || t == 'a') { arg = py_repr(arg); t = 's'; }
         else if (t == 's') { arg = py_str(arg); }
         else if (t == 'i' || t == 'u') t = 'd';

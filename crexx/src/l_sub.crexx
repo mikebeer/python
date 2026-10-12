@@ -1,0 +1,300 @@
+/* ---------------------------------------------------------------------
+   User subclasses of built-in types, __new__
+
+   An instance of class Sub(list) is an ordinary native list object (K_LIST) whose ob_c field holds
+   the class id of Sub.  Instance attributes live in a K_INST "holder" object (stem xa).  The
+   interpreter operations ask nsov(x, name) for a user-defined override before the native action.
+   --------------------------------------------------------------------- */
+
+/* class id when x is a native object that is an instance of a user subclass, else 0 */
+nsub: procedure = .int
+  arg x = .int
+  k = .int
+  if x // 2 \= 0 then return 0
+  k = ob_k[x % 2]
+  if k >= K_STR & k <= K_SET then return ob_c[x % 2]
+  if k = K_FLOAT | k = K_BIG | k = K_BYTES then return ob_c[x % 2]
+  return 0
+
+/* the user-defined method nid of a subclass instance (0 if none or when explicitly bypassed) */
+nsov: procedure = .int
+  arg x = .int, nid = .int
+  c = .int
+  c = nsub(x)
+  if c = 0 then return 0
+  if nat_skip = x then do
+    nat_skip = 0
+    return 0
+  end
+  return cls_find(c, nid)
+
+/* class id of a K_INST or a native subclass instance, else 0 */
+ocls: procedure = .int
+  arg x = .int
+  if x // 2 \= 0 then return 0
+  if ob_k[x % 2] = K_INST then return ob_c[x % 2]
+  return nsub(x)
+
+/* like nsov for K_INST and native subclass instances */
+ovr: procedure = .int
+  arg x = .int, nid = .int
+  c = .int
+  c = ocls(x)
+  if c = 0 then return 0
+  if nat_skip = x then do
+    nat_skip = 0
+    return 0
+  end
+  return cls_find(c, nid)
+
+nat_holder: procedure = .int
+  arg x = .int
+  v = .string
+  v = nat_at["h" || x]
+  if v == "" then return 0
+  return v as .int
+
+nat_holder_make: procedure = .int
+  arg x = .int
+  h = .int
+  h = nat_holder(x)
+  if h = 0 then do
+    h = inst_new(ob_c[x % 2])
+    nat_at["h" || x] = h as .string
+  end
+  return h
+
+/* attribute of a subclass instance found in its own attributes or its class; 0 when absent */
+nat_getattr: procedure = .int
+  arg o = .int, c = .int, nid = .int
+  h = .int
+  v = .int
+  h = nat_holder(o)
+  if h > 0 then do
+    v = inst_get(h, nid)
+    if v \= 0 then return v
+  end
+  v = cls_find(c, nid)
+  if v > 0 then return bind_attr(v, o, c)
+  if nid = M___CLASS__ then return cl_obj[c]
+  if nid = M___DICT__ then return inst_dict(nat_holder_make(o))
+  return 0
+
+nat_setattr: procedure = .void
+  arg o = .int, c = .int, nid = .int, v = .int, raw = .int
+  p = .int
+  r = .int
+  p = cls_find(c, nid)
+  if p > 0 then do
+    if kind_of(p) = K_PROP then do
+      if ob_y[p % 2] = 0 then do
+        r = raise_exc(C_ATTRIBUTEERROR, "can't set attribute '" || nid_name[nid] || "'")
+        return
+      end
+      r = call2(ob_y[p % 2], o, v)
+      return
+    end
+  end
+  if raw = 0 then do
+    p = cls_find(c, M___SETATTR__)
+    if p > 0 then do
+      r = call3(p, o, mkstr(nid_name[nid]), v)
+      return
+    end
+  end
+  call inst_set nat_holder_make(o), nid, v
+  return
+
+/* an empty mutable native object of built-in type bt, an instance of class c */
+nat_empty: procedure = .int
+  arg bt = .int, c = .int
+  o = .int
+  if bt = C_LIST then o = mklist(4)
+  else if bt = C_DICT then o = dict_new(K_DICT)
+  else if bt = C_SET then o = dict_new(K_SET)
+  else if bt = C_BYTEARRAY then o = mkbytearr("")
+  else o = mklist(4)
+  ob_c[o % 2] = c
+  return o
+
+/* a copy of the plain native value v (built-in type bt) as an instance of class c */
+nat_wrap: procedure = .int
+  arg v = .int, bt = .int, c = .int
+  o = .int
+  i = .int
+  if bt = C_TUPLE then do
+    o = newobj(K_TUPLE)
+    ob_p[o % 2] = ob_p[v % 2]
+    ob_n[o % 2] = ob_n[v % 2]
+    ob_x[o % 2] = ob_x[v % 2]
+  end
+  else if bt = C_STR then o = mkstr(ob_s[v % 2])
+  else if bt = C_INT then o = mkbig(num_str(v))
+  else if bt = C_FLOAT then o = mkfloat(tofloat(v))
+  else if bt = C_BYTES then o = mkbytes(ob_s[v % 2])
+  else if bt = C_BYTEARRAY then o = mkbytearr(ob_s[v % 2])
+  else if bt = C_LIST then do
+    o = mklist(ob_n[v % 2])
+    call list_extend_from o, v
+  end
+  else if bt = C_DICT | bt = C_SET then do
+    o = dict_new(ob_k[v % 2])
+    call dict_update o, v
+    ob_y[o % 2] = ob_y[v % 2]
+  end
+  else return v
+  ob_c[o % 2] = c
+  return o
+
+/* fill the empty mutable object o from constructor arguments (list(x), dict(x, **kw), set(x)) */
+nat_fill: procedure = .int
+  arg o = .int, bt = .int, base = .int, na = .int, nk = .int
+  tmp = .int
+  tmp = bcall_type(bt, base, na, nk)
+  if tmp = 0 then return 0
+  if bt = C_LIST then call list_extend_from o, tmp
+  else if bt = C_BYTEARRAY then ob_s[o % 2] = ob_s[tmp % 2]
+  else call dict_update o, tmp
+  return 1
+
+/* call the user-defined __init__ init with the receiver o and the call arguments; 0 on error */
+call_init: procedure = .int
+  arg init = .int, o = .int, base = .int, na = .int, nk = .int
+  r = .int
+  call ast_insert base, na + nk, o
+  r = docall(init, base, na + 1, nk)
+  if r = 0 then return 0
+  if r \= NONE_OOP then return raise_exc(C_TYPEERROR, "__init__() should return None, not '" || type_name(r) || "'")
+  return 1
+
+/* instantiate a class that derives from a built-in container / value type */
+inst_native: procedure = .int
+  arg c = .int, base = .int, na = .int, nk = .int
+  bt = .int
+  init = .int
+  userinit = .int
+  o = .int
+  v = .int
+  bt = cl_bt[c]
+  init = cls_find(c, M___INIT__)
+  userinit = 0
+  if init > 0 then do
+    if kind_of(init) = K_FUNC then userinit = 1
+  end
+  if bt = C_LIST | bt = C_DICT | bt = C_SET | bt = C_BYTEARRAY then do
+    o = nat_empty(bt, c)
+    if userinit = 1 then do
+      if call_init(init, o, base, na, nk) = 0 then return 0
+    end
+    else if na + nk > 0 then do
+      if nat_fill(o, bt, base, na, nk) = 0 then return 0
+    end
+    return o
+  end
+  v = bcall_type(bt, base, na, nk)
+  if v = 0 then return 0
+  o = nat_wrap(v, bt, c)
+  if userinit = 1 then do
+    if call_init(init, o, base, na, nk) = 0 then return 0
+  end
+  return o
+
+/* class c has a user-defined __new__ nw: new = nw(cls, *args); then __init__ when it is an instance */
+inst_with_new: procedure = .int
+  arg c = .int, nw = .int, base = .int, na = .int, nk = .int
+  r = .int
+  init = .int
+  call ast_insert base, na + nk, cl_obj[c]
+  r = docall(nw, base, na + 1, nk)
+  if r = 0 then return 0
+  if cls_issub(cls_of(r), c) = 0 then return r
+  init = cls_find(c, M___INIT__)
+  if init > 0 then do
+    if kind_of(init) = K_FUNC then do
+      ast[base + 1] = r
+      if docall_init(init, base, na + 1, nk) = 0 then return 0
+    end
+  end
+  return r
+
+docall_init: procedure = .int
+  arg init = .int, base = .int, na = .int, nk = .int
+  r = .int
+  r = docall(init, base, na, nk)
+  if r = 0 then return 0
+  if r \= NONE_OOP then return raise_exc(C_TYPEERROR, "__init__() should return None, not '" || type_name(r) || "'")
+  return 1
+
+/* X.__new__(cls, args...) for the built-in type bc: ast[base+1] = cls */
+cls_new: procedure = .int
+  arg bc = .int, base = .int, na = .int, nk = .int
+  tc = .int
+  v = .int
+  o = .int
+  if na < 1 then return raise_exc(C_TYPEERROR, cl_name[bc] || ".__new__(): not enough arguments")
+  if kind_of(ast[base + 1]) \= K_CLASS then return raise_exc(C_TYPEERROR, cl_name[bc] || ".__new__(X): X is not a type object (" || type_name(ast[base + 1]) || ")")
+  tc = ob_x[ast[base + 1] % 2]
+  if cls_issub(tc, bc) = 0 then return raise_exc(C_TYPEERROR, cl_name[bc] || ".__new__(" || cl_name[tc] || "): " || cl_name[tc] || " is not a subtype of " || cl_name[bc])
+  if bc = C_OBJECT | (cl_flags[bc] // 4) >= 2 then do
+    if cl_bt[tc] > 0 then return nat_empty(cl_bt[tc], tc)
+    o = inst_new(tc)
+    if (cl_flags[tc] // 4) >= 2 then call inst_set o, M_ARGS, tup_from_ast(base + 2, base + na)
+    return o
+  end
+  if bc = C_LIST | bc = C_DICT | bc = C_SET | bc = C_BYTEARRAY then do
+    o = nat_empty(bc, tc)
+    if bc = C_SET & na > 1 then do
+      if nat_fill(o, bc, base + 1, na - 1, nk) = 0 then return 0
+    end
+    return o
+  end
+  v = bcall_type(bc, base + 1, na - 1, nk)
+  if v = 0 then return 0
+  if tc = bc then return v
+  return nat_wrap(v, bc, tc)
+
+/* the built-in base class that follows the defining class of super object o in the linearisation */
+super_base: procedure = .int
+  arg o = .int
+  selfv = .int
+  dcls = .int
+  start = .int
+  i = .int
+  p = .int
+  k = .int
+  selfv = ob_x[o % 2]
+  dcls = ob_x[ob_y[o % 2] % 2]
+  if kind_of(selfv) = K_CLASS then start = ob_x[selfv % 2]
+  else start = cls_of(selfv)
+  p = cl_mn[start]
+  do i = 0 to cl_mn[start] - 1
+    if mro_a[cl_ms[start] + i] = dcls then do
+      p = i
+      leave
+    end
+  end
+  do i = p + 1 to cl_mn[start] - 1
+    k = mro_a[cl_ms[start] + i]
+    if cl_flags[k] // 2 = 1 then return k
+  end
+  return C_OBJECT
+
+/* iterator for the result of a user-defined __iter__ */
+iter_wrap: procedure = .int
+  arg r = .int
+  if r = 0 then return 0
+  if kind_of(r) = K_GEN | kind_of(r) = K_ITER then return r
+  if kind_of(r) = K_INST then do
+    if cls_find(ob_c[r % 2], M___NEXT__) > 0 then return mkiter(IT_INST, r, 0)
+  end
+  if kind_of(r) = K_LIST | kind_of(r) = K_TUPLE then return mkiter(IT_SEQ, r, 0)
+  return raise_exc(C_TYPEERROR, "iter() returned non-iterator of type '" || type_name(r) || "'")
+
+/* the plain int for an instance of an int subclass (small values are stored as K_BIG), else x */
+unsub: procedure = .int
+  arg x = .int
+  if x // 2 \= 0 then return x
+  if ob_k[x % 2] = K_BIG then do
+    if ob_c[x % 2] > 0 then return big_norm(ob_s[x % 2])
+  end
+  return x
