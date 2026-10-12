@@ -32,9 +32,12 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <float.h>
+#include <errno.h>
 
 #ifdef PY_POSIX
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/select.h>
@@ -324,6 +327,17 @@ static char **host_environ(void)
 #endif
 }
 
+/* the descriptor behind a stdio stream, -1 where there is none */
+static int host_fileno(FILE *fp)
+{
+#ifdef PY_POSIX
+    return fileno(fp);
+#else
+    (void)fp;
+    return -1;
+#endif
+}
+
 static int host_isatty_stdin(void)
 {
 #ifdef PY_POSIX
@@ -385,6 +399,213 @@ static void host_urandom(unsigned char *buf, long n)
             buf[i] = (unsigned char)((s >> 16) & 255UL);
         }
     }
+}
+
+/* ---- operating system services: directories, process id, calendar time ----------------
+   Real under -DPY_POSIX.  Without it the directory calls fail with ENOSYS (OSError), getpid is 1
+   and the calendar functions report "no such time", on which pylib/time.py falls back to the pure
+   Python pylib/_pytime.py (UTC as the local zone). */
+
+/* the names in a directory (without . and ..), NUL separated, in a malloc'ed buffer; returns the
+   number of names, or -1 with errno set */
+static long host_listdir(const char *path, char **out, long *outlen)
+{
+#ifdef PY_POSIX
+    DIR *d = opendir(path);
+    struct dirent *e;
+    long cnt = 0, cap = 256, n = 0;
+    char *buf;
+    if (!d) return -1L;
+    buf = (char *)malloc((size_t)cap);
+    if (!buf) { closedir(d); errno = ENOMEM; return -1L; }
+    while ((e = readdir(d)) != NULL) {
+        size_t l = strlen(e->d_name);
+        if (e->d_name[0] == '.' && (l == 1 || (l == 2 && e->d_name[1] == '.'))) continue;
+        if (n + (long)l + 1 > cap) {
+            char *nb;
+            while (n + (long)l + 1 > cap) cap *= 2;
+            nb = (char *)realloc(buf, (size_t)cap);
+            if (!nb) { free(buf); closedir(d); errno = ENOMEM; return -1L; }
+            buf = nb;
+        }
+        memcpy(buf + n, e->d_name, l + 1);
+        n += (long)l + 1;
+        cnt++;
+    }
+    closedir(d);
+    *out = buf;
+    *outlen = n;
+    return cnt;
+#else
+    (void)path; (void)out; (void)outlen;
+    errno = ENOSYS;
+    return -1L;
+#endif
+}
+static int host_mkdir(const char *path, long mode)
+{
+#ifdef PY_POSIX
+    return mkdir(path, (mode_t)mode);
+#else
+    (void)path; (void)mode;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+static int host_rmdir(const char *path)
+{
+#ifdef PY_POSIX
+    return rmdir(path);
+#else
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+static int host_chdir(const char *path)
+{
+#ifdef PY_POSIX
+    return chdir(path);
+#else
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+static long host_getpid(void)
+{
+#ifdef PY_POSIX
+    return (long)getpid();
+#else
+    return 1L;
+#endif
+}
+static long host_getppid(void)
+{
+#ifdef PY_POSIX
+    return (long)getppid();
+#else
+    return 1L;
+#endif
+}
+
+#ifdef PY_POSIX
+/* days since 1970-01-01 of a proleptic Gregorian date (month 1..12) */
+static long host_days_from_civil(long y, long m, long d)
+{
+    long era, yoe, doy, doe;
+    if (m <= 2) y--;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+#endif
+/* broken-down time of `secs` (UTC, or the local zone when local != 0) into f[0..10]: year, month
+   (1..12), day, hour, minute, second, weekday (Monday = 0), day of the year (1..366), isdst,
+   offset east of UTC in seconds, and the zone name into zone; returns 0 if the C library has no
+   such time */
+static int host_timeparts(double secs, int local, long *f, char *zone, int zcap)
+{
+#ifdef PY_POSIX
+    time_t tt;
+    struct tm *tm;
+    long wday;
+    if (!(secs < 1e18 && secs > -1e18)) return 0;
+    tt = (time_t)secs;
+    tm = local ? localtime(&tt) : gmtime(&tt);
+    if (!tm) return 0;
+    f[0] = (long)tm->tm_year + 1900L;
+    f[1] = (long)tm->tm_mon + 1L;
+    f[2] = (long)tm->tm_mday;
+    f[3] = (long)tm->tm_hour;
+    f[4] = (long)tm->tm_min;
+    f[5] = (long)tm->tm_sec;
+    wday = ((long)tm->tm_wday + 6L) % 7L;
+    f[6] = wday;
+    f[7] = (long)tm->tm_yday + 1L;
+    f[8] = local ? (tm->tm_isdst > 0 ? 1L : (tm->tm_isdst == 0 ? 0L : -1L)) : 0L;
+    f[9] = local ? (host_days_from_civil(f[0], f[1], f[2]) * 86400L + f[3] * 3600L + f[4] * 60L +
+                    f[5]) - (long)tt : 0L;
+    if (local) {
+        if (strftime(zone, (size_t)zcap, "%Z", tm) == 0) zone[0] = 0;
+    } else {
+        strncpy(zone, "UTC", (size_t)zcap);
+        zone[zcap - 1] = 0;
+    }
+    return 1;
+#else
+    (void)secs; (void)local; (void)f; (void)zone; (void)zcap;
+    return 0;
+#endif
+}
+/* mktime of a local broken-down time (year, month 1..12, day, hour, minute, second, ..., isdst in
+   f[8]); returns 1 and the seconds in *out, or 0 */
+static int host_mktime(const long *f, double *out)
+{
+#ifdef PY_POSIX
+    struct tm tm;
+    time_t t;
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = (int)(f[0] - 1900L);
+    tm.tm_mon = (int)(f[1] - 1L);
+    tm.tm_mday = (int)f[2];
+    tm.tm_hour = (int)f[3];
+    tm.tm_min = (int)f[4];
+    tm.tm_sec = (int)f[5];
+    tm.tm_isdst = (int)f[8];
+    t = mktime(&tm);
+    if (t == (time_t)-1 && tm.tm_year != 69) return 0;
+    *out = (double)t;
+    return 1;
+#else
+    (void)f; (void)out;
+    return 0;
+#endif
+}
+/* the local zone: seconds west of UTC for standard and daylight time, whether there is daylight
+   time, and the two zone names */
+static int host_tzinfo(long *tz, long *alt, int *dst, char *stdn, char *dstn, int zcap)
+{
+#ifdef PY_POSIX
+    time_t now = time(NULL), jan, jul;
+    struct tm *tm, t1, t2;
+    long o1, o2;
+    int y;
+    tm = gmtime(&now);
+    if (!tm) return 0;
+    y = tm->tm_year;
+    memset(&t1, 0, sizeof(t1));
+    t1.tm_year = y; t1.tm_mon = 0; t1.tm_mday = 1; t1.tm_hour = 12; t1.tm_isdst = -1;
+    t2 = t1;
+    t2.tm_mon = 6;
+    jan = mktime(&t1);
+    jul = mktime(&t2);
+    tm = localtime(&jan);
+    if (!tm) return 0;
+    t1 = *tm;
+    tm = localtime(&jul);
+    if (!tm) return 0;
+    t2 = *tm;
+    o1 = host_days_from_civil((long)t1.tm_year + 1900L, (long)t1.tm_mon + 1L, (long)t1.tm_mday)
+         * 86400L + (long)t1.tm_hour * 3600L + (long)t1.tm_min * 60L + (long)t1.tm_sec - (long)jan;
+    o2 = host_days_from_civil((long)t2.tm_year + 1900L, (long)t2.tm_mon + 1L, (long)t2.tm_mday)
+         * 86400L + (long)t2.tm_hour * 3600L + (long)t2.tm_min * 60L + (long)t2.tm_sec - (long)jul;
+    if (t1.tm_isdst > 0 && t2.tm_isdst <= 0) {   /* southern hemisphere: january is summer */
+        long to = o1; struct tm tt = t1;
+        o1 = o2; o2 = to; t1 = t2; t2 = tt;
+    }
+    *tz = -o1;
+    *dst = (t1.tm_isdst > 0 || t2.tm_isdst > 0) ? 1 : 0;
+    *alt = *dst ? -o2 : -o1;
+    if (strftime(stdn, (size_t)zcap, "%Z", &t1) == 0) stdn[0] = 0;
+    if (strftime(dstn, (size_t)zcap, "%Z", *dst ? &t2 : &t1) == 0) dstn[0] = 0;
+    return 1;
+#else
+    (void)tz; (void)alt; (void)dst; (void)stdn; (void)dstn; (void)zcap;
+    return 0;
+#endif
 }
 
 /* ---- sockets (IPv4 TCP) -------------------------------------------------
@@ -554,6 +775,24 @@ static int host_sock_select(int n, const int *fds, const int *modes, int *ready,
     }
     return r;
 }
+/* two connected stream sockets (AF_UNIX pair) */
+static int host_sock_pair(int *a, int *b)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) return host_sock_fail();
+    *a = sv[0]; *b = sv[1];
+    return 0;
+}
+/* a stdio stream on a duplicate of the descriptor (closing it leaves the socket open) */
+static FILE *host_sock_fdopen(int fd, const char *mode)
+{
+    FILE *fp;
+    int d = dup(fd);
+    if (d < 0) { host_sock_fail(); return NULL; }
+    fp = fdopen(d, mode);
+    if (!fp) { host_sock_fail(); close(d); }
+    return fp;
+}
 static int host_sock_hostname(char *buf, long cap)
 {
     if (gethostname(buf, (size_t)cap) < 0) return host_sock_fail();
@@ -578,7 +817,8 @@ static int host_sock_resolve(const char *name, unsigned char *ip)
 static int host_sock_const(const char *name, long *val)
 {
     static const struct { const char *n; long v; } tab[] = {
-        { "AF_UNSPEC", AF_UNSPEC }, { "AF_INET", AF_INET }, { "AF_INET6", AF_INET6 },
+        { "AF_UNSPEC", AF_UNSPEC }, { "AF_UNIX", AF_UNIX }, { "AF_INET", AF_INET },
+        { "AF_INET6", AF_INET6 },
         { "SOCK_STREAM", SOCK_STREAM }, { "SOCK_DGRAM", SOCK_DGRAM },
         { "SOL_SOCKET", SOL_SOCKET }, { "SO_REUSEADDR", SO_REUSEADDR },
         { "SO_KEEPALIVE", SO_KEEPALIVE }, { "SO_RCVBUF", SO_RCVBUF }, { "SO_SNDBUF", SO_SNDBUF },
@@ -621,13 +861,15 @@ static int host_sock_getopt(int fd, int level, int opt, long *val)
 static int host_sock_soerror(int fd) { (void)fd; return 0; }
 static int host_sock_select(int n, const int *fds, const int *modes, int *ready, double timeout)
 { (void)n; (void)fds; (void)modes; (void)ready; (void)timeout; return -1; }
+static int host_sock_pair(int *a, int *b) { (void)a; (void)b; return -1; }
+static FILE *host_sock_fdopen(int fd, const char *mode) { (void)fd; (void)mode; return NULL; }
 static int host_sock_hostname(char *buf, long cap) { (void)buf; (void)cap; return -1; }
 static int host_sock_resolve(const char *name, unsigned char *ip)
 { (void)name; (void)ip; return -1; }
 static int host_sock_const(const char *name, long *val)
 {
     static const struct { const char *n; long v; } tab[] = {
-        { "AF_UNSPEC", 0 }, { "AF_INET", 2 }, { "AF_INET6", 10 },
+        { "AF_UNSPEC", 0 }, { "AF_UNIX", 1 }, { "AF_INET", 2 }, { "AF_INET6", 10 },
         { "SOCK_STREAM", 1 }, { "SOCK_DGRAM", 2 }, { "SOL_SOCKET", 1 }, { "SO_REUSEADDR", 2 },
         { "SO_KEEPALIVE", 9 }, { "SO_RCVBUF", 8 }, { "SO_SNDBUF", 7 }, { "SO_ERROR", 4 },
         { "SO_BROADCAST", 6 }, { "IPPROTO_TCP", 6 }, { "TCP_NODELAY", 1 },

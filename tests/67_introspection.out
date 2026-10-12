@@ -1,0 +1,32 @@
+f 3 2 2
+('a', 'b', 'c', 'd', 'e', 'args') True 5
+(2, 3) {'e': 'x'} f f
+True code True True
+{'x': <class 'int'>, 'y': <class 'str'>, 'return': <class 'bool'>} ('q',) None
+<lambda> 2 True
+[('<module>', 33), ('middle', 29), ('inner_error', 25)]
+ValueError True True
+(None, None, None)
+('who', 'caller', True, True)
+(1, '<module>')
+41 <module>
+[('<module>', 'middle()'), ('middle', 'inner_error()'), ('inner_error', "raise ValueError('bad')")]
+3
+['ValueError: bad\n']
+Traceback (most recent call last): ValueError: bad
+3
+True
+True RuntimeError: wrapped
+<module> True
+(a, b: int = 2, /, c=3, *args, d, e: str = 'x', **kw) -> int
+['a', 'b', 'c', 'args', 'd', 'e', 'kw'] 2 True
+['POSITIONAL_ONLY', 'POSITIONAL_ONLY', 'POSITIONAL_OR_KEYWORD', 'VAR_POSITIONAL', 'KEYWORD_ONLY', 'KEYWORD_ONLY', 'VAR_KEYWORD']
+True True
+(x, y=1) (z, *, w=0) (*a, **k)
+{'a': 1, 'b': 2, 'c': 3, 'd': 4}
+TypeError missing a required argument: 'd'
+['self', 'w', 'z']
+True False
+<module> <module> True
+True True True
+['do_log 143 67_introspection.py INFO hello', '<module> 147 67_introspection.py WARNING top level', '<module> 151 67_introspection.py ERROR failed'] Traceback (most recent call last): ZeroDivisionError: division by zero

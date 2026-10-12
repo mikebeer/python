@@ -4,3 +4,8 @@
 # 44_pathlib_fs: needs os.remove/os.rename, binary files and exact isdir/read semantics (CREXX os is smaller)
 44_pathlib_fs
 45_tempfile_shutil_glob
+# C-only (need __code__/frames/tracebacks/os natives that the CREXX port lacks)
+64_os_time_native
+65_socket_makefile
+66_runtime_gaps
+67_introspection

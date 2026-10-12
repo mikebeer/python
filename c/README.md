@@ -40,6 +40,8 @@ Uncaught exceptions print a traceback and exit with status 1.
                     legacy and Generator distributions); u64 helpers and the MT19937 core
     src/p7_pyrand.c random module, bit-exact with CPython 3.13 (MT19937, native SHA-512 seeding)
     src/p7_imp.c    import system (files, packages, relative imports), exec/eval/globals, os
+    src/p7_rt.c     code, frame and traceback objects, sys._getframe, function __code__/__defaults__,
+                    types.GenericAlias
     src/p7_mod.c    math, sys, time; exception hierarchy
     src/p7_re.c     native re: parser (CPython messages), compiler, explicit-stack backtracking VM
     src/p7_json.c   native json: dumps/loads/dump/load, JSONEncoder/JSONDecoder, JSONDecodeError
@@ -123,7 +125,7 @@ nested-quote f-strings and `{x=}`, `print(file=)`, `%` with mapping keys, `dict 
 
 Strings are bytes (len/index count UTF-8 bytes, case ops ASCII only); sets iterate in
 insertion order (their repr differs from CPython for mixed hash orders); `frozenset` is an alias
-of `set` (unhashable); no async, metaclass `__call__`; `except*` inside a generator is not resumable; `r = yield from g()` (as an
+of `set` (unhashable); no async; `except*` inside a generator is not resumable; `r = yield from g()` (as an
 expression) and chained assignment with `yield` are not supported; no generator finalization
 on garbage collection; `math.erf/erfc/gamma/lgamma` are within about 1e-15 of libm, not bit-identical
 (so `random.binomialvariate` for `n*p >= 10` can differ in the last digit through `lgamma`, and a
@@ -195,9 +197,54 @@ wait is a `select`; `recv`/`send`/`accept` retry on `EINTR`. `select.select(r, w
 takes sockets, ints or objects with `fileno()` (the exceptional list is always empty).
 BSD sockets are compiled only with `-DPY_POSIX`; otherwise `import socket` works but creating a
 socket (or resolving a name) raises `OSError: sockets not available`. Gaps: IPv4 TCP only (no
-UDP, IPv6, `sendto/recvfrom`, `socketpair`, `makefile`, `selectors`, `ssl`); sockets that are not
+UDP, IPv6, `sendto/recvfrom`, `selectors`, `ssl`); sockets that are not
 closed explicitly keep their descriptor until the process ends; `inet_aton` accepts only
-dotted quads.
+dotted quads. `sock.makefile(mode)` (`r`, `w`, `rw`, each with `b`) returns a file object on a
+duplicate of the descriptor (closing it leaves the socket open); `socket.socketpair()` returns two
+connected `AF_UNIX` stream sockets (`host_sock_pair`, `host_sock_fdopen`).
+
+## os, time and the pure Python overlays (src/p7_imp.c, src/p7_mod.c, pylib/os.py, pylib/time.py)
+
+The native `os` has `getenv getcwd remove unlink rename urandom getpid getppid listdir mkdir rmdir
+chdir environ` and `os.path`; the native `time` has `time sleep perf_counter monotonic
+process_time` (+ `_ns`) and the C library calendar as `_gmtime _localtime _mktime _tzinfo`. The
+overlay mechanism of numpy (`module_overlay`) is generalised: `pylib/os.py` and `pylib/time.py` are
+loaded as `os._overlay` / `time._overlay` and complete the native module, so `os.fspath fsencode
+fsdecode makedirs walk removedirs replace cpu_count strerror` and `time.struct_time gmtime
+localtime mktime strftime strptime asctime ctime timezone altzone daylight tzname` exist
+(`hasattr(os, 'listdir')` is true). With `-DPY_POSIX` the time zone follows `TZ` (`localtime`,
+`mktime`, `%Z %z`, `tm_zone`, `tm_gmtoff`); without it the host calls fail (`OSError` ENOSYS for the
+directory functions, `getpid` is 1) and `pylib/_pytime.py` treats the local zone as UTC.
+`random.SystemRandom`, `random.getstate/setstate` and `os.urandom` use `host_urandom`. Open errors
+raise `FileNotFoundError`, `FileExistsError`, `PermissionError`, `IsADirectoryError`,
+`NotADirectoryError` with `errno`, `strerror` and `filename`.
+
+## Introspection, metaclasses, files (src/p7_rt.c, p5_eval.c, p7_bi.c)
+
+`f.__code__` (`co_name co_qualname co_filename co_firstlineno co_argcount co_posonlyargcount
+co_kwonlyargcount co_nlocals co_varnames co_cellvars co_freevars co_flags co_names co_consts`),
+`__defaults__`, `__kwdefaults__`, `__annotations__`, `__globals__`, `__closure__`.
+`e.__traceback__` is a chain of traceback objects (`tb_frame`, `tb_lineno`, `tb_next`; the frame
+has `f_code`, `f_lineno`, `f_globals`, `f_locals` (a snapshot), `f_back`), built on demand from a
+compact record taken when the exception is raised; `sys.exc_info()` returns the real traceback;
+`sys._getframe(depth)` builds the frame chain with `f_back`. Approximations: `tb_frame.f_lineno` is
+the traceback line, frames of a traceback have empty `f_locals`, `except*` and `with` do not attach
+tracebacks. `raise X from Y` sets `__cause__`, `__suppress_context__`, and every exception raised in
+a handler gets `__context__`. `pylib/traceback.py` (`extract_tb extract_stack walk_tb format_exc
+print_exc TracebackException` with cause/context chaining; no `~^~` carets), `pylib/inspect.py`
+(`signature`, `Signature`, `Parameter`, `BoundArguments`, `currentframe`, `stack`, `getframeinfo`,
+`isgeneratorfunction`), `logging` (`funcName`, `lineno`, `pathname`, `stack_info`) and `types`
+(`CodeType FrameType TracebackType GenericAlias`) use them where present and keep their old
+fallbacks otherwise (the CREXX port has no frames).
+
+Metaclasses: `class C(metaclass=M)`, `M.__new__/__init__/__call__`, `type(name, bases, ns)`,
+metaclass methods and properties found through the class (`len(C)`, `iter(C)`, `x in C`, `C[k]`,
+`reversed(C)`), `__init_subclass__` with class keywords and `super().__init_subclass__()`,
+`__class_getitem__`, `list[int]`/`dict[k, v]` as `types.GenericAlias`, `Class.__new__(Class)`.
+`obj.__dict__` is live (updates, assignment, deletion are mirrored into the attributes). `open()`
+supports `r w a x + b t`, binary files read and write `bytes` (`seek tell readinto`), accepts
+path-like arguments, and `file.name/mode/closed/buffer`. `str.splitlines(keepends=True)`,
+`int(bytes_or_bytearray, base)`.
 
 ## re and json (src/p7_re.c, src/p7_json.c)
 

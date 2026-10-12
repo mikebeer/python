@@ -34,9 +34,12 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <float.h>
+#include <errno.h>
 
 #ifdef PY_POSIX
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/select.h>
@@ -326,6 +329,17 @@ static char **host_environ(void)
 #endif
 }
 
+/* the descriptor behind a stdio stream, -1 where there is none */
+static int host_fileno(FILE *fp)
+{
+#ifdef PY_POSIX
+    return fileno(fp);
+#else
+    (void)fp;
+    return -1;
+#endif
+}
+
 static int host_isatty_stdin(void)
 {
 #ifdef PY_POSIX
@@ -387,6 +401,213 @@ static void host_urandom(unsigned char *buf, long n)
             buf[i] = (unsigned char)((s >> 16) & 255UL);
         }
     }
+}
+
+/* ---- operating system services: directories, process id, calendar time ----------------
+   Real under -DPY_POSIX.  Without it the directory calls fail with ENOSYS (OSError), getpid is 1
+   and the calendar functions report "no such time", on which pylib/time.py falls back to the pure
+   Python pylib/_pytime.py (UTC as the local zone). */
+
+/* the names in a directory (without . and ..), NUL separated, in a malloc'ed buffer; returns the
+   number of names, or -1 with errno set */
+static long host_listdir(const char *path, char **out, long *outlen)
+{
+#ifdef PY_POSIX
+    DIR *d = opendir(path);
+    struct dirent *e;
+    long cnt = 0, cap = 256, n = 0;
+    char *buf;
+    if (!d) return -1L;
+    buf = (char *)malloc((size_t)cap);
+    if (!buf) { closedir(d); errno = ENOMEM; return -1L; }
+    while ((e = readdir(d)) != NULL) {
+        size_t l = strlen(e->d_name);
+        if (e->d_name[0] == '.' && (l == 1 || (l == 2 && e->d_name[1] == '.'))) continue;
+        if (n + (long)l + 1 > cap) {
+            char *nb;
+            while (n + (long)l + 1 > cap) cap *= 2;
+            nb = (char *)realloc(buf, (size_t)cap);
+            if (!nb) { free(buf); closedir(d); errno = ENOMEM; return -1L; }
+            buf = nb;
+        }
+        memcpy(buf + n, e->d_name, l + 1);
+        n += (long)l + 1;
+        cnt++;
+    }
+    closedir(d);
+    *out = buf;
+    *outlen = n;
+    return cnt;
+#else
+    (void)path; (void)out; (void)outlen;
+    errno = ENOSYS;
+    return -1L;
+#endif
+}
+static int host_mkdir(const char *path, long mode)
+{
+#ifdef PY_POSIX
+    return mkdir(path, (mode_t)mode);
+#else
+    (void)path; (void)mode;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+static int host_rmdir(const char *path)
+{
+#ifdef PY_POSIX
+    return rmdir(path);
+#else
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+static int host_chdir(const char *path)
+{
+#ifdef PY_POSIX
+    return chdir(path);
+#else
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+static long host_getpid(void)
+{
+#ifdef PY_POSIX
+    return (long)getpid();
+#else
+    return 1L;
+#endif
+}
+static long host_getppid(void)
+{
+#ifdef PY_POSIX
+    return (long)getppid();
+#else
+    return 1L;
+#endif
+}
+
+#ifdef PY_POSIX
+/* days since 1970-01-01 of a proleptic Gregorian date (month 1..12) */
+static long host_days_from_civil(long y, long m, long d)
+{
+    long era, yoe, doy, doe;
+    if (m <= 2) y--;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+#endif
+/* broken-down time of `secs` (UTC, or the local zone when local != 0) into f[0..10]: year, month
+   (1..12), day, hour, minute, second, weekday (Monday = 0), day of the year (1..366), isdst,
+   offset east of UTC in seconds, and the zone name into zone; returns 0 if the C library has no
+   such time */
+static int host_timeparts(double secs, int local, long *f, char *zone, int zcap)
+{
+#ifdef PY_POSIX
+    time_t tt;
+    struct tm *tm;
+    long wday;
+    if (!(secs < 1e18 && secs > -1e18)) return 0;
+    tt = (time_t)secs;
+    tm = local ? localtime(&tt) : gmtime(&tt);
+    if (!tm) return 0;
+    f[0] = (long)tm->tm_year + 1900L;
+    f[1] = (long)tm->tm_mon + 1L;
+    f[2] = (long)tm->tm_mday;
+    f[3] = (long)tm->tm_hour;
+    f[4] = (long)tm->tm_min;
+    f[5] = (long)tm->tm_sec;
+    wday = ((long)tm->tm_wday + 6L) % 7L;
+    f[6] = wday;
+    f[7] = (long)tm->tm_yday + 1L;
+    f[8] = local ? (tm->tm_isdst > 0 ? 1L : (tm->tm_isdst == 0 ? 0L : -1L)) : 0L;
+    f[9] = local ? (host_days_from_civil(f[0], f[1], f[2]) * 86400L + f[3] * 3600L + f[4] * 60L +
+                    f[5]) - (long)tt : 0L;
+    if (local) {
+        if (strftime(zone, (size_t)zcap, "%Z", tm) == 0) zone[0] = 0;
+    } else {
+        strncpy(zone, "UTC", (size_t)zcap);
+        zone[zcap - 1] = 0;
+    }
+    return 1;
+#else
+    (void)secs; (void)local; (void)f; (void)zone; (void)zcap;
+    return 0;
+#endif
+}
+/* mktime of a local broken-down time (year, month 1..12, day, hour, minute, second, ..., isdst in
+   f[8]); returns 1 and the seconds in *out, or 0 */
+static int host_mktime(const long *f, double *out)
+{
+#ifdef PY_POSIX
+    struct tm tm;
+    time_t t;
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = (int)(f[0] - 1900L);
+    tm.tm_mon = (int)(f[1] - 1L);
+    tm.tm_mday = (int)f[2];
+    tm.tm_hour = (int)f[3];
+    tm.tm_min = (int)f[4];
+    tm.tm_sec = (int)f[5];
+    tm.tm_isdst = (int)f[8];
+    t = mktime(&tm);
+    if (t == (time_t)-1 && tm.tm_year != 69) return 0;
+    *out = (double)t;
+    return 1;
+#else
+    (void)f; (void)out;
+    return 0;
+#endif
+}
+/* the local zone: seconds west of UTC for standard and daylight time, whether there is daylight
+   time, and the two zone names */
+static int host_tzinfo(long *tz, long *alt, int *dst, char *stdn, char *dstn, int zcap)
+{
+#ifdef PY_POSIX
+    time_t now = time(NULL), jan, jul;
+    struct tm *tm, t1, t2;
+    long o1, o2;
+    int y;
+    tm = gmtime(&now);
+    if (!tm) return 0;
+    y = tm->tm_year;
+    memset(&t1, 0, sizeof(t1));
+    t1.tm_year = y; t1.tm_mon = 0; t1.tm_mday = 1; t1.tm_hour = 12; t1.tm_isdst = -1;
+    t2 = t1;
+    t2.tm_mon = 6;
+    jan = mktime(&t1);
+    jul = mktime(&t2);
+    tm = localtime(&jan);
+    if (!tm) return 0;
+    t1 = *tm;
+    tm = localtime(&jul);
+    if (!tm) return 0;
+    t2 = *tm;
+    o1 = host_days_from_civil((long)t1.tm_year + 1900L, (long)t1.tm_mon + 1L, (long)t1.tm_mday)
+         * 86400L + (long)t1.tm_hour * 3600L + (long)t1.tm_min * 60L + (long)t1.tm_sec - (long)jan;
+    o2 = host_days_from_civil((long)t2.tm_year + 1900L, (long)t2.tm_mon + 1L, (long)t2.tm_mday)
+         * 86400L + (long)t2.tm_hour * 3600L + (long)t2.tm_min * 60L + (long)t2.tm_sec - (long)jul;
+    if (t1.tm_isdst > 0 && t2.tm_isdst <= 0) {   /* southern hemisphere: january is summer */
+        long to = o1; struct tm tt = t1;
+        o1 = o2; o2 = to; t1 = t2; t2 = tt;
+    }
+    *tz = -o1;
+    *dst = (t1.tm_isdst > 0 || t2.tm_isdst > 0) ? 1 : 0;
+    *alt = *dst ? -o2 : -o1;
+    if (strftime(stdn, (size_t)zcap, "%Z", &t1) == 0) stdn[0] = 0;
+    if (strftime(dstn, (size_t)zcap, "%Z", *dst ? &t2 : &t1) == 0) dstn[0] = 0;
+    return 1;
+#else
+    (void)tz; (void)alt; (void)dst; (void)stdn; (void)dstn; (void)zcap;
+    return 0;
+#endif
 }
 
 /* ---- sockets (IPv4 TCP) -------------------------------------------------
@@ -556,6 +777,24 @@ static int host_sock_select(int n, const int *fds, const int *modes, int *ready,
     }
     return r;
 }
+/* two connected stream sockets (AF_UNIX pair) */
+static int host_sock_pair(int *a, int *b)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) return host_sock_fail();
+    *a = sv[0]; *b = sv[1];
+    return 0;
+}
+/* a stdio stream on a duplicate of the descriptor (closing it leaves the socket open) */
+static FILE *host_sock_fdopen(int fd, const char *mode)
+{
+    FILE *fp;
+    int d = dup(fd);
+    if (d < 0) { host_sock_fail(); return NULL; }
+    fp = fdopen(d, mode);
+    if (!fp) { host_sock_fail(); close(d); }
+    return fp;
+}
 static int host_sock_hostname(char *buf, long cap)
 {
     if (gethostname(buf, (size_t)cap) < 0) return host_sock_fail();
@@ -580,7 +819,8 @@ static int host_sock_resolve(const char *name, unsigned char *ip)
 static int host_sock_const(const char *name, long *val)
 {
     static const struct { const char *n; long v; } tab[] = {
-        { "AF_UNSPEC", AF_UNSPEC }, { "AF_INET", AF_INET }, { "AF_INET6", AF_INET6 },
+        { "AF_UNSPEC", AF_UNSPEC }, { "AF_UNIX", AF_UNIX }, { "AF_INET", AF_INET },
+        { "AF_INET6", AF_INET6 },
         { "SOCK_STREAM", SOCK_STREAM }, { "SOCK_DGRAM", SOCK_DGRAM },
         { "SOL_SOCKET", SOL_SOCKET }, { "SO_REUSEADDR", SO_REUSEADDR },
         { "SO_KEEPALIVE", SO_KEEPALIVE }, { "SO_RCVBUF", SO_RCVBUF }, { "SO_SNDBUF", SO_SNDBUF },
@@ -623,13 +863,15 @@ static int host_sock_getopt(int fd, int level, int opt, long *val)
 static int host_sock_soerror(int fd) { (void)fd; return 0; }
 static int host_sock_select(int n, const int *fds, const int *modes, int *ready, double timeout)
 { (void)n; (void)fds; (void)modes; (void)ready; (void)timeout; return -1; }
+static int host_sock_pair(int *a, int *b) { (void)a; (void)b; return -1; }
+static FILE *host_sock_fdopen(int fd, const char *mode) { (void)fd; (void)mode; return NULL; }
 static int host_sock_hostname(char *buf, long cap) { (void)buf; (void)cap; return -1; }
 static int host_sock_resolve(const char *name, unsigned char *ip)
 { (void)name; (void)ip; return -1; }
 static int host_sock_const(const char *name, long *val)
 {
     static const struct { const char *n; long v; } tab[] = {
-        { "AF_UNSPEC", 0 }, { "AF_INET", 2 }, { "AF_INET6", 10 },
+        { "AF_UNSPEC", 0 }, { "AF_UNIX", 1 }, { "AF_INET", 2 }, { "AF_INET6", 10 },
         { "SOCK_STREAM", 1 }, { "SOCK_DGRAM", 2 }, { "SOL_SOCKET", 1 }, { "SO_REUSEADDR", 2 },
         { "SO_KEEPALIVE", 9 }, { "SO_RCVBUF", 8 }, { "SO_SNDBUF", 7 }, { "SO_ERROR", 4 },
         { "SO_BROADCAST", 6 }, { "IPPROTO_TCP", 6 }, { "TCP_NODELAY", 1 },
@@ -731,6 +973,7 @@ typedef struct Dict {
     long fill;       /* table mode: active + dummy slots */
     long finger;     /* table mode: set.pop() search position */
     int frozen;      /* frozenset */
+    struct Inst *owner;  /* the __dict__ of this instance: changes are mirrored into it */
 } Dict;
 
 typedef struct AMap {
@@ -761,6 +1004,7 @@ typedef struct Class {
     int nbases;
     struct Class *paycls; /* native base type (list dict set tuple str) holding the payload */
     Str *modname;        /* defining module, NULL for builtins */
+    struct Class *meta;  /* metaclass (a subclass of type) or NULL */
 } Class;
 #define CF_EXC 1
 #define CF_PROPS 2
@@ -768,7 +1012,7 @@ typedef struct Class {
 #define CF_SETATTR 8
 #define CF_NPABS 16   /* numpy abstract scalar type (np.floating ...): isinstance by value type */
 
-typedef struct Inst { Hdr h; Class *cls; AMap a; Value pay; } Inst;
+typedef struct Inst { Hdr h; Class *cls; AMap a; Value pay; Dict *dct; } Inst;
 
 typedef struct Cell { Hdr h; Value v; } Cell;
 
@@ -814,7 +1058,8 @@ typedef struct Cplx { Hdr h; double re, im; } Cplx;          /* complex */
 typedef struct Prop { Hdr h; Value get, set, del; } Prop;
 typedef struct DView { Hdr h; Value d; int what; } DView;   /* what: 0 keys 1 values 2 items */
 typedef struct Super { Hdr h; Class *start; Value obj; } Super;
-typedef struct File { Hdr h; FILE *fp; int closed; int out; } File;
+typedef struct File { Hdr h; FILE *fp; int closed; int out; int bin; Str *name; Str *mode; } File;
+/* bin: 0 text, 1 binary reading, 2 binary writing */
 
 typedef struct Gen {
     Hdr h;
@@ -921,6 +1166,7 @@ typedef struct Frame {
     int resuming;
     Str *gp;             /* global prefix of the module this frame runs in */
     struct Frame *up;
+    int line;            /* line of the call being made from this frame (tracebacks) */
 } Frame;
 
 typedef struct Handler {
@@ -941,6 +1187,16 @@ static int call_depth;
 static int cur_line;
 static Value cur_exc;
 static Value handled_exc;
+/* exception tracebacks (p6_obj.c): the frames between the raise point and the innermost handler,
+   innermost first, recorded when an exception is thrown */
+typedef struct TBEnt {
+    struct Func *fn; Str *gp; struct Class *ns; int line; struct Frame *frame;
+} TBEnt;
+static TBEnt *tb_buf;
+static int tb_n, tb_cap;
+static int tb_mode;      /* next throw: 0 propagate on, 1 fresh (raise statement), 2 bare raise */
+static int tb_live;      /* tb_buf describes the exception tb_excv still in flight */
+static Value tb_excv;
 static int class_epoch = 1;
 
 /* memory */
@@ -964,7 +1220,11 @@ static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, 
     *cls_tuple, *cls_dict, *cls_set, *cls_range, *cls_none, *cls_func, *cls_builtin,
     *cls_method, *cls_gen, *cls_module, *cls_iter, *cls_prop, *cls_file, *cls_cell,
     *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice, *cls_dview[3], *cls_notimpl,
+    *cls_fileb, *cls_filew,
         *cls_bytes, *cls_bytearray, *cls_complex, *cls_frozenset;
+static Class *cls_GenericAlias, *cls_code, *cls_frame, *cls_tb;
+static Class *cls_PermissionError, *cls_FileExistsError, *cls_IsADirectoryError,
+    *cls_NotADirectoryError;
 static Class *cls_MemoryError, *cls_BaseExceptionGroup, *cls_ExceptionGroup;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError, *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError, *cls_KeyError, *cls_ValueError,
@@ -984,6 +1244,9 @@ static Str *S_init, *S_str, *S_repr, *S_eq, *S_ne, *S_lt, *S_le, *S_gt, *S_ge, *
     *S_index, *S_pos, *S_invert, *S_and, *S_or, *S_xor, *S_lshift, *S_rshift, *S_dict,
     *S_mro, *S_doc, *S_setter, *S_main, *S_getattr, *S_format, *S_self, *S_super, *S_setattr,
     *S_new, *S_module, *S_reversed;
+static Str *S_tbraw,           /* hidden attribute: raw traceback entries of a caught exception */
+    *S_traceback, *S_cause, *S_context, *S_suppress, *S_init_subclass, *S_class_getitem,
+    *S_metaclass;
 
 static unsigned char ch_digit[256], ch_alpha[256], ch_alnum[256], ch_space[256],
     ch_upper[256], ch_lower[256], ch_hex[256], ch_print[256];
@@ -1022,6 +1285,11 @@ static Value *class_find(Class *c, Str *nm);
 static int class_isa(Class *c, Class *base);
 static int npabs_has(Class *abs, Class *k);
 static Value new_exc(Class *c, const char *msg);
+/* runtime introspection (p7_rt.c) */
+static Value generic_alias(Value origin, Value params);
+static int rt_inst_attr(Inst *in, Str *nm, Value *out);
+static int func_special_attr(Value fn, Str *nm, Value *out);
+static int file_attr(File *f, Str *nm, Value *out);
 
 /* numpy subset (p7_np.c) hooks */
 static Value nd_binop(int op, Value a, Value b);
@@ -1375,7 +1643,7 @@ static Dict *dict_new_t(int type)
 {
     Dict *d = (Dict *)gc_alloc(sizeof(Dict), type);
     d->n = 0; d->used = 0; d->cap = 0; d->e = NULL; d->idx = NULL; d->isz = 0;
-    d->fill = 0; d->finger = 0; d->frozen = 0;
+    d->fill = 0; d->finger = 0; d->frozen = 0; d->owner = NULL;
     return d;
 }
 static Dict *dict_new(void)
@@ -1434,10 +1702,12 @@ static int dict_get(Dict *d, Value k, Value *out)
     *out = d->e[e].v;
     return 1;
 }
+static void inst_dict_mirror(Dict *d, Value k, Value v, int del);
 static void dict_set_h(Dict *d, Value k, Value v, unsigned long h)
 {
     long e = dict_find(d, k, h);
     long i;
+    if (d->owner) inst_dict_mirror(d, k, v, 0);
     if (e >= 0) { d->e[e].v = v; return; }
     if (d->used >= d->cap) {
         if (d->n * 2 < d->used) dict_rebuild(d, d->cap);
@@ -1461,6 +1731,7 @@ static int dict_del_h(Dict *d, Value k, unsigned long h)
     long e = dict_find(d, k, h);
     long i;
     if (e < 0) return 0;
+    if (d->owner) inst_dict_mirror(d, k, NONE_V, 1);
     i = (long)(h % (unsigned long)d->isz);
     while (d->idx[i] != e) i = (i + 1) % d->isz;
     d->idx[i] = -2;
@@ -1475,6 +1746,7 @@ static int dict_del(Dict *d, Value k)
 }
 static void dict_clear(Dict *d)
 {
+    if (d->owner) inst_dict_mirror(d, NONE_V, NONE_V, 2);
     free(d->e); free(d->idx);
     d->e = NULL; d->idx = NULL; d->n = d->used = d->cap = d->isz = 0;
     d->fill = 0;
@@ -1841,6 +2113,7 @@ static void gc_scan(Hdr *h)
         Dict *d = (Dict *)h;
         for (i = 0; i < d->used; i++)
             if (d->e[i].k.t != T_UNSET) { gc_push(d->e[i].k); gc_push(d->e[i].v); }
+        gc_pushp(d->owner, T_INST);
         break; }
     case T_CLASS: {
         Class *c = (Class *)h;
@@ -1848,11 +2121,15 @@ static void gc_scan(Hdr *h)
         gc_pushp(c->name, T_STR); gc_pushp(c->base, T_CLASS); gc_mark_amap(&c->ns);
         for (k = 0; k < c->nmro; k++) gc_pushp(c->mro[k], T_CLASS);
         for (k = 0; k < c->nbases; k++) gc_pushp(c->bases[k], T_CLASS);
-        gc_pushp(c->paycls, T_CLASS); gc_pushp(c->modname, T_STR);
+        gc_pushp(c->paycls, T_CLASS); gc_pushp(c->modname, T_STR); gc_pushp(c->meta, T_CLASS);
+        break; }
+    case T_FILE: {
+        File *f = (File *)h;
+        gc_pushp(f->name, T_STR); gc_pushp(f->mode, T_STR);
         break; }
     case T_INST: {
         Inst *n = (Inst *)h;
-        gc_pushp(n->cls, T_CLASS); gc_mark_amap(&n->a); gc_push(n->pay);
+        gc_pushp(n->cls, T_CLASS); gc_mark_amap(&n->a); gc_push(n->pay); gc_pushp(n->dct, T_DICT);
         break; }
     case T_FUNC: {
         Func *f = (Func *)h;
@@ -1947,6 +2224,12 @@ static void gc_collect(void)
     }
     gc_push(cur_exc);
     gc_push(handled_exc);
+    gc_push(tb_excv);
+    for (i = 0; i < tb_n; i++) {
+        gc_pushp(tb_buf[i].fn, T_FUNC);
+        gc_pushp(tb_buf[i].gp, T_STR);
+        gc_pushp(tb_buf[i].ns, T_CLASS);
+    }
     while (ngray > 0) gc_scan(gray[--ngray]);
     live = 0;
     pp = &heap_list;
@@ -3628,8 +3911,14 @@ static Node *parse_classdef(void)
     n->var->defined = 1;
     if (p_accept('(')) {
         while (!at(')')) {
-            if (at(TK_NAME) && toks[pp + 1].type == '=') { pp += 2; parse_test(); }
-            else node_add(n, parse_test());
+            if (at(TK_NAME) && toks[pp + 1].type == '=') {   /* metaclass=M, class keywords */
+                Node *kw = mk(N_KW);
+                kw->name = TOK.s;
+                pp += 2;
+                kw->a = parse_test();
+                if (!n->a) n->a = mk(N_TUPLE);
+                node_add(n->a, kw);
+            } else node_add(n, parse_test());
             if (!p_accept(',')) break;
         }
         expect(')', ")");
@@ -4573,7 +4862,7 @@ static Node *parse_simple(void)
             pp++;
             if (!at(TK_NEWLINE) && !at(';') && !at(TK_EOF)) {
                 n->a = parse_test();
-                if (accept_kw(KW_FROM)) parse_test();
+                if (accept_kw(KW_FROM)) n->b = parse_test();
             }
             return n;
         case KW_ASSERT:
@@ -5292,7 +5581,7 @@ static Class *class_of(Value v)
     case T_RANGE: return cls_range;
     case T_FUNC: return cls_func;
     case T_BUILTIN: return cls_builtin;
-    case T_CLASS: return cls_type;
+    case T_CLASS: return AS_CLASS(v)->meta ? AS_CLASS(v)->meta : cls_type;
     case T_INST: return AS_INST(v)->cls;
     case T_BOUND: return cls_method;
     case T_GEN: return cls_gen;
@@ -5302,7 +5591,8 @@ static Class *class_of(Value v)
     case T_SMETH: return cls_smeth;
     case T_CMETH: return cls_cmeth;
     case T_SUPER: return cls_super;
-    case T_FILE: return cls_file;
+    case T_FILE: return ((File *)v.u.o)->bin == 0 ? cls_file :
+        (((File *)v.u.o)->bin == 1 ? cls_fileb : cls_filew);
     case T_CELL: return cls_cell;
     case T_ND: return cls_ndarray;
     case T_SLICE: return cls_slice;
@@ -5396,6 +5686,7 @@ static Inst *new_inst(Class *c)
     in->cls = c;
     in->a.k = NULL; in->a.v = NULL; in->a.n = in->a.cap = 0;
     in->pay = UNSET_V;
+    in->dct = NULL;
     return in;
 }
 static Value new_bound(Value self, Value fn)
@@ -5427,10 +5718,89 @@ static Value new_exc_args(Class *c, Value *args, long n)
     return iv;
 }
 static int exc_line;
+/* ---- tracebacks: the frames are recorded when the exception is thrown (the C frames are gone
+   once the handler runs); tb_attach turns the part between the catching frame and the raise point
+   into the hidden attribute __tbraw__ of the exception (flat tuple: fn, module prefix, class body
+   name, line for every frame, outermost first); `e.__traceback__` builds objects from it */
+static void tb_add(Frame *f, int line)
+{
+    if (tb_n >= tb_cap) {
+        tb_cap = tb_cap ? tb_cap * 2 : 32;
+        tb_buf = (TBEnt *)xrealloc(tb_buf, sizeof(TBEnt) * (size_t)tb_cap);
+    }
+    tb_buf[tb_n].fn = f->fn;
+    tb_buf[tb_n].gp = f->gp;
+    tb_buf[tb_n].ns = f->ns;
+    tb_buf[tb_n].line = line;
+    tb_buf[tb_n].frame = f;
+    tb_n++;
+}
+static void tb_snapshot(Value exc)
+{
+    Frame *f, *stop = cur_handler ? cur_handler->frame : NULL;
+    int line = cur_line;
+    if (tb_mode == 0 && tb_live && tb_excv.u.o == exc.u.o && tb_n > 0 && cur_frame &&
+        tb_buf[tb_n - 1].frame == cur_frame) {
+        /* the same exception propagates on (finally, import cleanup): extend the record */
+        if (cur_frame == stop) return;
+        f = cur_frame->up;
+        line = f ? f->line : 0;
+    } else {
+        tb_n = 0;
+        f = cur_frame;
+        if (tb_mode == 2 && f) {   /* bare raise: the frame keeps the entry it already has */
+            if (f == stop) return;
+            f = f->up;
+            line = f ? f->line : 0;
+        }
+    }
+    for (; f; f = f->up) {
+        tb_add(f, line);
+        if (f == stop) break;
+        line = f->up ? f->up->line : 0;
+    }
+}
+/* the exception was caught by an except clause of frame f */
+static void tb_attach(Value exc, Frame *f)
+{
+    Inst *in;
+    Value *old;
+    List *raw;
+    int k, nnew = 0, nold = 0, i, j, total;
+    if (exc.t != T_INST || tb_excv.u.o != exc.u.o || !tb_live) return;
+    tb_live = 0;
+    in = AS_INST(exc);
+    for (k = 0; k < tb_n; k++) if (tb_buf[k].frame == f) { nnew = k + 1; break; }
+    old = amap_get(&in->a, S_tbraw);
+    if (old && old->t == T_TUPLE) nold = (int)(AS_LIST(*old)->n / 4);
+    total = nnew + nold;
+    if (total > 100) { nold -= total - 100; total = 100; }
+    if (total <= 0) return;
+    raw = tuple_new(4L * total);
+    j = 0;
+    for (i = nnew - 1; i >= 0; i--) {   /* outermost first */
+        raw->a[j++] = tb_buf[i].fn ? mkobj(tb_buf[i].fn, T_FUNC) : NONE_V;
+        raw->a[j++] = tb_buf[i].gp ? mkobj(tb_buf[i].gp, T_STR) : NONE_V;
+        raw->a[j++] = tb_buf[i].ns ? mkobj(tb_buf[i].ns->name, T_STR) : NONE_V;
+        raw->a[j++] = mkint(tb_buf[i].line);
+    }
+    for (i = 0; i < nold * 4; i++) raw->a[j++] = AS_LIST(*old)->a[i];
+    amap_set(&in->a, S_tbraw, mkobj(raw, T_TUPLE));
+    amap_del(&in->a, S_traceback);
+}
 static void throw_val(Value exc)
 {
     cur_exc = exc;
     exc_line = cur_line;
+    if (exc.t == T_INST) {
+        tb_snapshot(exc);
+        if (handled_exc.t == T_INST && handled_exc.u.o != exc.u.o &&
+            !amap_get(&AS_INST(exc)->a, S_context))
+            amap_set(&AS_INST(exc)->a, S_context, handled_exc);
+    }
+    tb_mode = 0;
+    tb_live = 1;
+    tb_excv = exc;
     if (!cur_handler) {
         fflush(stdout);
         fprintf(stderr, "fatal: uncaught exception outside handler\n");
@@ -5541,6 +5911,16 @@ static long py_len(Value v)
     case T_RANGE: return range_len((Range *)v.u.o);
     case T_ND: return nd_len(v);
     case T_DVIEW: return AS_DICT(((DView *)v.u.o)->d)->n;
+    case T_CLASS: {
+        Value *m = AS_CLASS(v)->meta ? class_find(AS_CLASS(v)->meta, S_len) : NULL;
+        if (m) {
+            Value r = call1(*m, v);
+            if (r.t != T_INT)
+                throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+                type_name(r));
+            return r.u.i;
+        }
+        break; }
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_len);
         if (m) {
@@ -6179,6 +6559,10 @@ static void repr_buf(Value v, Buf *b, int depth)
     case T_CLASS:
         buf_add(b, "<class '");
         if (!(AS_CLASS(v)->flags & CF_BUILTIN)) buf_add(b, "__main__.");
+        else if (AS_CLASS(v)->modname && strcmp(AS_CLASS(v)->modname->s, "builtins") != 0) {
+            buf_add(b, AS_CLASS(v)->modname->s);
+            buf_addc(b, '.');
+        }
         buf_add(b, AS_CLASS(v)->name->s);
         buf_add(b, "'>");
         break;
@@ -6442,6 +6826,64 @@ static void c3_build(Class *c, Class **bases, int nb)
     c->mro = res;
     c->nmro = nres;
 }
+/* obj.__dict__: one dict per instance, refreshed from the attributes at every access; changes made
+   through it (update, item assignment, del, clear) are mirrored into the attributes (Dict.owner) */
+static Value inst_dict_get(Inst *in)
+{
+    Dict *d = in->dct;
+    int i;
+    if (!d) { d = dict_new(); in->dct = d; }
+    d->owner = NULL;
+    dict_clear(d);
+    for (i = 0; i < in->a.n; i++)
+        if (in->a.k[i] != S_tbraw && in->a.k[i] != S_traceback && in->a.k[i] != S_cause &&
+            in->a.k[i] != S_context && in->a.k[i] != S_suppress)
+            dict_set(d, mkobj(in->a.k[i], T_STR), in->a.v[i]);
+    d->owner = in;
+    return mkobj(d, T_DICT);
+}
+static void inst_attrs_clear(Inst *in)
+{
+    int i, j = 0;
+    for (i = 0; i < in->a.n; i++)   /* keep the hidden traceback attribute */
+        if (in->a.k[i] == S_tbraw || in->a.k[i] == S_cause || in->a.k[i] == S_context ||
+            in->a.k[i] == S_suppress) { in->a.k[j] = in->a.k[i]; in->a.v[j++] = in->a.v[i]; }
+    in->a.n = j;
+}
+static void inst_dict_mirror(Dict *d, Value k, Value v, int del)
+{
+    Inst *in = d->owner;
+    if (del == 2) { inst_attrs_clear(in); return; }
+    if (k.t != T_STR) return;
+    if (del) amap_del(&in->a, intern_str(AS_STR(k)));
+    else amap_set(&in->a, intern_str(AS_STR(k)), v);
+}
+/* obj.__dict__ = d */
+static void inst_dict_assign(Inst *in, Value v)
+{
+    Dict *d;
+    long i;
+    if (v.t != T_DICT)
+        throw_new(cls_TypeError, "__dict__ must be set to a dictionary, not a '%.60s'",
+                  type_name(v));
+    d = AS_DICT(v);
+    inst_attrs_clear(in);
+    for (i = 0; i < d->used; i++)
+        if (d->e[i].k.t == T_STR) amap_set(&in->a, intern_str(AS_STR(d->e[i].k)), d->e[i].v);
+    if (in->dct && in->dct != d) in->dct->owner = NULL;
+    in->dct = d;
+    d->owner = in;
+}
+/* the class whose MRO a super object searches: the type of the object, or for a class the class
+   itself (classmethods) unless the starting class is one of its metaclasses (metaclass methods) */
+static Class *super_type(Super *s)
+{
+    if (s->obj.t != T_CLASS) return class_of(s->obj);
+    if (AS_CLASS(s->obj)->meta && !class_isa(AS_CLASS(s->obj), s->start) &&
+        class_isa(AS_CLASS(s->obj)->meta, s->start))
+        return AS_CLASS(s->obj)->meta;
+    return AS_CLASS(s->obj);
+}
 static Value get_attr(Value o, Str *nm)
 {
     Value *p;
@@ -6453,14 +6895,12 @@ static Value get_attr(Value o, Str *nm)
         p = class_find(in->cls, nm);
         if (p) return bind_class_attr(o, p, in->cls);
         if (nm == S_class) return mkobj(in->cls, T_CLASS);
-        if (nm == S_dict) {
-            Dict *d = dict_new();
-            int i;
-            Value dv = mkobj(d, T_DICT);
-            VPUSH(dv);
-            for (i = 0; i < in->a.n; i++) dict_set(d, mkobj(in->a.k[i], T_STR), in->a.v[i]);
-            vsp--;
-            return dv;
+        if (nm == S_dict) return inst_dict_get(in);
+        if ((in->cls->flags & CF_EXC) && (nm == S_cause || nm == S_context)) return NONE_V;
+        if ((in->cls->flags & CF_EXC) && nm == S_suppress) return FALSE_V;
+        if ((in->cls->flags & CF_EXC) ? nm == S_traceback : in->cls == cls_frame) {
+            Value r;
+            if (rt_inst_attr(in, nm, &r)) return r;
         }
         p = class_find(in->cls, S_getattr);
         if (p) return call2(*p, o, mkobj(nm, T_STR));
@@ -6471,7 +6911,13 @@ static Value get_attr(Value o, Str *nm)
         if (p) {
             if (p->t == T_CMETH) return new_bound(o, ((Prop *)p->u.o)->get);
             if (p->t == T_SMETH) return ((Prop *)p->u.o)->get;
+            if (p->t == T_FUNC && (nm == S_init_subclass || nm == S_class_getitem))
+                return new_bound(o, *p);   /* implicit classmethods */
             return *p;
+        }
+        if (c->meta) {   /* attributes (methods, properties) of the metaclass */
+            p = class_find(c->meta, nm);
+            if (p) return bind_class_attr(o, p, c->meta);
         }
         if (nm == S_name) return mkobj(c->name, T_STR);
         if (nm == S_dict) {
@@ -6487,7 +6933,7 @@ static Value get_attr(Value o, Str *nm)
         if (nm == S_module) return c->modname ? mkobj(c->modname, T_STR) : mkcstr("builtins");
         if (nm == S_mro) return class_mro_tuple(c);
         if (nm == S_doc) return NONE_V;
-        if (nm == S_class) return mkobj(cls_type, T_CLASS);
+        if (nm == S_class) return mkobj(c->meta ? c->meta : cls_type, T_CLASS);
         if (nm == intern_c("__bases__")) {
             Value bv[1];
             int k;
@@ -6522,12 +6968,14 @@ static Value get_attr(Value o, Str *nm)
         break; }
     case T_SUPER: {
         Super *s = (Super *)o.u.o;
-        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start,
-            nm);
+        p = class_find_after(super_type(s), s->start, nm);
         if (p) {
-            if (s->obj.t == T_CLASS) {
+            if (s->obj.t == T_CLASS &&
+                (AS_CLASS(s->obj)->meta == NULL || class_isa(AS_CLASS(s->obj), s->start))) {
                 if (p->t == T_CMETH) return new_bound(s->obj, ((Prop *)p->u.o)->get);
                 if (p->t == T_SMETH) return ((Prop *)p->u.o)->get;
+                if (p->t == T_FUNC && (nm == S_init_subclass || nm == S_class_getitem))
+                    return new_bound(s->obj, *p);
                 return *p;
             }
             return bind_class_attr(s->obj, p, class_of(s->obj));
@@ -6539,6 +6987,7 @@ static Value get_attr(Value o, Str *nm)
     case T_FUNC:
         p = amap_get(&AS_FUNC(o)->attrs, nm);
         if (p) return *p;
+        { Value r; if (func_special_attr(o, nm, &r)) return r; }
         if (nm == intern_c("__annotations__")) {
             Value av = mkobj(dict_new(), T_DICT);
             amap_set(&AS_FUNC(o)->attrs, nm, av);
@@ -6551,6 +7000,7 @@ static Value get_attr(Value o, Str *nm)
             VPUSH(dv);
             for (k = 0; k < AS_FUNC(o)->attrs.n; k++) {
                 if (AS_FUNC(o)->attrs.k[k] == intern_c("__annotations__")) continue;
+                if (AS_FUNC(o)->attrs.k[k] == intern_c("__code__")) continue;
                 dict_set(d, mkobj(AS_FUNC(o)->attrs.k[k], T_STR), AS_FUNC(o)->attrs.v[k]);
             }
             vsp--;
@@ -6586,6 +7036,10 @@ static Value get_attr(Value o, Str *nm)
     case T_ND: {
         Value r;
         if (nd_getattr(o, nm, &r)) return r;
+        break; }
+    case T_FILE: {
+        Value r;
+        if (file_attr((File *)o.u.o, nm, &r)) return r;
         break; }
     default: break;
     }
@@ -6648,8 +7102,7 @@ static int lookup_method(Value *o, Str *nm, Value *out, Node *cache)
         break; }
     case T_SUPER: {
         Super *s = (Super *)o->u.o;
-        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start,
-            nm);
+        p = class_find_after(super_type(s), s->start, nm);
         if (p && (p->t == T_FUNC || p->t == T_BUILTIN) && s->obj.t != T_CLASS) {
             *out = *p;
             *o = s->obj;
@@ -6680,6 +7133,7 @@ static void set_attr(Value o, Str *nm, Value v)
     switch (o.t) {
     case T_INST: {
         Inst *in = AS_INST(o);
+        if (nm == S_dict) { inst_dict_assign(in, v); return; }
         if (in->cls->flags & CF_SETATTR) {
             Value *sa = class_find(in->cls, S_setattr);
             if (sa && sa->t == T_FUNC) {
@@ -6701,6 +7155,11 @@ static void set_attr(Value o, Str *nm, Value v)
             }
         }
         amap_set(&in->a, nm, v);
+        if (in->dct) {
+            in->dct->owner = NULL;
+            dict_set(in->dct, mkobj(nm, T_STR), v);
+            in->dct->owner = in;
+        }
         return; }
     case T_CLASS:
         amap_set(&AS_CLASS(o)->ns, nm, v);
@@ -6733,7 +7192,15 @@ static void del_attr(Value o, Str *nm)
             return;
         }
     }
-    if (o.t == T_INST && amap_del(&AS_INST(o)->a, nm)) return;
+    if (o.t == T_INST && amap_del(&AS_INST(o)->a, nm)) {
+        Inst *in = AS_INST(o);
+        if (in->dct) {
+            in->dct->owner = NULL;
+            dict_del(in->dct, mkobj(nm, T_STR));
+            in->dct->owner = in;
+        }
+        return;
+    }
     if (o.t == T_FUNC && amap_del(&AS_FUNC(o)->attrs, nm)) return;
     if (o.t == T_CLASS && amap_del(&AS_CLASS(o)->ns, nm)) { class_epoch++; return; }
     attr_error(o, nm);
@@ -6949,6 +7416,17 @@ static Value subscr(Value o, Value idx)
         throw_new(cls_TypeError, "range indices must be integers or slices, not %.40s",
             type_name(idx));
         break;
+    case T_CLASS: {
+        Class *c = AS_CLASS(o);
+        Value *m = class_find(c, S_class_getitem);
+        if (m) return call2(m->t == T_CMETH ? ((Prop *)m->u.o)->get : *m, o, idx);
+        m = c->meta ? class_find(c->meta, S_getitem) : NULL;
+        if (m) return call2(*m, o, idx);
+        if (c == cls_list || c == cls_dict || c == cls_set || c == cls_frozenset ||
+            c == cls_tuple || c == cls_type)
+            return generic_alias(o, idx);
+        throw_new(cls_TypeError, "type '%.60s' is not subscriptable", c->name->s);
+        break; }
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_getitem);
         if (m && m->t == T_BUILTIN && AS_INST(o)->pay.t == T_DICT) {
@@ -7238,6 +7716,10 @@ static Value get_iter(Value o)
     case T_ND:
         nd_len(o);
         it = iter_new(IK_ND); it->a = o; return mkobj(it, T_ITER);
+    case T_CLASS: {
+        Value *m = AS_CLASS(o)->meta ? class_find(AS_CLASS(o)->meta, S_iter) : NULL;
+        if (m) return call1(*m, o);
+        break; }
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_iter);
         if (m) return call1(*m, o);
@@ -7509,11 +7991,18 @@ static int contains(Value c, Value x)
         Value *m = class_find(AS_INST(c)->cls, S_contains);
         if (m) return py_truthy(call2(*m, c, x));
         break; }
+    case T_CLASS: {
+        Value *m = AS_CLASS(c)->meta ? class_find(AS_CLASS(c)->meta, S_contains) : NULL;
+        if (m) return py_truthy(call2(*m, c, x));
+        if (AS_CLASS(c)->meta && class_find(AS_CLASS(c)->meta, S_iter)) break;
+        throw_new(cls_TypeError, "argument of type 'type' is not iterable");
+        break; }
     default: break;
     }
     {
         Value it, y;
-        if (c.t != T_DVIEW && c.t != T_INST && c.t != T_GEN && c.t != T_ITER && c.t != T_ND)
+        if (c.t != T_DVIEW && c.t != T_INST && c.t != T_CLASS && c.t != T_GEN &&
+            c.t != T_ITER && c.t != T_ND)
             throw_new(cls_TypeError, "argument of type '%.60s' is not iterable", type_name(c));
         it = get_iter(c);
         VPUSH(it);
@@ -8403,7 +8892,7 @@ static Value call_func(Func *fn, int n, Value *a, int nk, Value *kw)
     FuncDef *fd = fn->def->fd;
     Value *save = vsp, *loc;
     Frame fr;
-    int st, i;
+    int st, i, sline = cur_line;
     Value ret;
     if (call_depth >= MAX_DEPTH)
         throw_new(cls_RecursionError, "maximum recursion depth exceeded");
@@ -8434,6 +8923,8 @@ static Value call_func(Func *fn, int n, Value *a, int nk, Value *kw)
     fr.resuming = 0;
     fr.gp = fd->gpfx;
     fr.up = cur_frame;
+    fr.line = sline;
+    if (cur_frame) cur_frame->line = sline;
     cur_frame = &fr;
     call_depth++;
     GC_POINT();
@@ -8441,6 +8932,7 @@ static Value call_func(Func *fn, int n, Value *a, int nk, Value *kw)
     ret = st == ST_RETURN ? fr.ret : NONE_V;
     call_depth--;
     cur_frame = fr.up;
+    cur_line = sline;
     vsp = save;
     return ret;
 }
@@ -8450,7 +8942,7 @@ static int gen_resume(Gen *g, Value *out)
     Frame fr;
     Handler h;
     Value *save = vsp;
-    int depth = call_depth, st = 0;
+    int depth = call_depth, st = 0, sline = cur_line;
     if (g->done) return 0;
     if (g->running) throw_new(cls_ValueError, "generator already executing");
     if (call_depth >= MAX_DEPTH)
@@ -8464,6 +8956,8 @@ static int gen_resume(Gen *g, Value *out)
     fr.resuming = g->started;
     fr.gp = g->def->fd->gpfx;
     fr.up = cur_frame;
+    fr.line = sline;
+    if (cur_frame) cur_frame->line = sline;
     g->started = 1;
     g->running = 1;
     cur_frame = &fr;
@@ -8487,6 +8981,7 @@ static int gen_resume(Gen *g, Value *out)
     }
     call_depth = depth;
     cur_frame = fr.up;
+    cur_line = sline;
     vsp = save;
     g->running = 0;
     if (st == ST_YIELD) {
@@ -8546,12 +9041,42 @@ static void run_init(Value iv, Class *c, int n, Value *a, int nk, Value *kw)
         vsp = base;
     }
 }
-static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
+static Value type_create(Class *meta, Value namev, Value basesv, Value nsv, int nk, Value *kw);
+/* calling a class that derives from `type` (a metaclass): M(name, bases, ns) makes a class */
+static Value meta_call(Class *c, int n, Value *a, int nk, Value *kw)
+{
+    Value *nw = class_find(c, S_new), *ini, r;
+    Value *base = vsp;
+    int i;
+    if (nw && nw->t == T_FUNC) {
+        vcheck(n + 8);
+        VPUSH(*nw);
+        VPUSH(mkobj(c, T_CLASS));
+        for (i = 0; i < n; i++) VPUSH(a[i]);
+        r = call_value(*nw, n + 1, base + 1, nk, kw);
+        vsp = base;
+    } else {
+        if (n != 3) throw_new(cls_TypeError, "type() takes 1 or 3 arguments");
+        r = type_create(c, a[0], a[1], a[2], nk, kw);
+    }
+    ini = class_find(c, S_init);
+    if (ini && ini->t == T_FUNC && r.t == T_CLASS && class_isa(class_of(r), c)) {
+        VPUSH(r);
+        VPUSH(*ini);
+        VPUSH(r);
+        for (i = 0; i < n; i++) VPUSH(a[i]);
+        call_value(*ini, n + 1, base + 2, nk, kw);
+    }
+    vsp = base;
+    return r;
+}
+static Value call_class_plain(Class *c, int n, Value *a, int nk, Value *kw)
 {
     Inst *in;
     Value iv, *nw;
     Value *base = vsp;
     int i;
+    if (c != cls_type && class_isa(c, cls_type)) return meta_call(c, n, a, nk, kw);
     if (c->ctor) {
         Args x;
         x.n = n; x.a = a; x.nk = nk; x.kw = kw;
@@ -8586,6 +9111,25 @@ static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
     run_init(iv, c, n, a, nk, kw);
     vsp = base;
     return iv;
+}
+/* C(...): a metaclass __call__ written in Python takes over, otherwise type.__call__ */
+static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
+{
+    if (c->meta) {
+        Value *mc = class_find(c->meta, S_call);
+        if (mc && mc->t == T_FUNC) {
+            Value *base = vsp, r;
+            int i;
+            vcheck(n + 8);
+            VPUSH(*mc);
+            VPUSH(mkobj(c, T_CLASS));
+            for (i = 0; i < n; i++) VPUSH(a[i]);
+            r = call_value(*mc, n + 1, base + 1, nk, kw);
+            vsp = base;
+            return r;
+        }
+    }
+    return call_class_plain(c, n, a, nk, kw);
 }
 
 static Value call_value(Value fn, int n, Value *a, int nk, Value *kw)
@@ -9390,7 +9934,7 @@ static int exc_matches(Frame *f, Value exc, Node *tn)
     return 0;
 }
 
-static void do_raise(Value v)
+static void do_raise(Value v, int has_cause, Value cause)
 {
     if (v.t == T_CLASS) {
         if (!(AS_CLASS(v)->flags & CF_EXC))
@@ -9399,6 +9943,14 @@ static void do_raise(Value v)
     }
     if (v.t != T_INST || !(AS_INST(v)->cls->flags & CF_EXC))
         throw_new(cls_TypeError, "exceptions must derive from BaseException");
+    if (has_cause) {
+        if (cause.t == T_CLASS) cause = call0(cause);
+        if (cause.t != T_NONE && (cause.t != T_INST || !(AS_INST(cause)->cls->flags & CF_EXC)))
+            throw_new(cls_TypeError, "exception causes must derive from BaseException");
+        amap_set(&AS_INST(v)->a, S_cause, cause);
+        amap_set(&AS_INST(v)->a, S_suppress, TRUE_V);
+    }
+    tb_mode = 1;
     throw_val(v);
 }
 
@@ -9484,7 +10036,7 @@ static int exec_try(Frame *f, Node *n)
 {
     int phase = 0, pend = 0, st = 0, k;
     Value *sp0 = vsp, exc;
-    Value *slot;
+    Value *slot, h_entry = handled_exc;
     if (n->level) return exec_try_star(f, n);
     VPUSH(NONE_V);
     slot = sp0;
@@ -9497,8 +10049,8 @@ static int exec_try(Frame *f, Node *n)
         STATE(f, n, 1) = mkint(pend); STATE(f, n, 2) = *slot; } } while (0)
     if (phase == 0) {
         if (protected_block(f, n->a, &st, &exc)) {
-            Value saved_h = handled_exc;
             int matched = -1;
+            handled_exc = h_entry;      /* an exception that escaped an inner handler */
             *slot = exc;
             for (k = 0; k < n->n; k++) {
                 Node *h = n->list[k];
@@ -9511,9 +10063,9 @@ static int exec_try(Frame *f, Node *n)
             } else {
                 Node *h = n->list[matched];
                 phase = 10 + matched;
+                tb_attach(exc, f);
                 if (h->b) store_var(f, h->b->var, exc);
             }
-            (void)saved_h;
         } else if (st == ST_YIELD) {
             TRY_SAVE();
             vsp = sp0;
@@ -9663,6 +10215,8 @@ static Class *make_class(Str *name, Class **bl, int nb, Str *modname)
     c->flags = fl;
     c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL;
     c->modname = modname;
+    c->meta = NULL;
+    for (i = 0; i < nb && !c->meta; i++) c->meta = bl[i]->meta;
     c->bases = bl;
     c->nbases = nb;
     VPUSH(mkobj(c, T_CLASS));
@@ -9694,33 +10248,114 @@ static void finish_class(Class *c)
     if (amap_get(&c->ns, S_setattr)) c->flags |= CF_SETATTR;
     class_epoch++;
 }
-/* call __init_subclass__ of the first base (implicit classmethod) */
-static void run_init_subclass(Class *c, Class *base, Value cv)
+/* call __init_subclass__ of the next class in the MRO (an implicit classmethod) with the class
+   keywords kw (nk name/value pairs) */
+static void run_init_subclass(Class *c, Value cv, int nk, Value *kw)
 {
-    Value *m = class_find(base, intern_c("__init_subclass__"));
+    Value *m = class_find_after(c, c, S_init_subclass), fn;
+    Value *base = vsp;
     if (!m) return;
-    if (m->t == T_CMETH) call1(((Prop *)m->u.o)->get, cv);
-    else if (m->t == T_FUNC) call1(*m, cv);
-    (void)c;
+    fn = m->t == T_CMETH ? ((Prop *)m->u.o)->get : *m;
+    VPUSH(fn);
+    VPUSH(cv);
+    call_value(fn, 1, base + 1, nk, kw);
+    vsp = base;
+}
+/* the class statement is done: metaclass __new__ / __init__, __init_subclass__ */
+static Value class_complete(Class *c, Value cv, int nk, Value *kw)
+{
+    Value *base = vsp;
+    Value *m, nsv, bv, nmv, r = cv;
+    int i;
+    if (c->meta && c->meta != cls_type) {
+        m = class_find(c->meta, S_new);
+        if (m && m->t == T_FUNC) {
+            Dict *d = dict_new();
+            List *bt = tuple_new(c->nbases);
+            nsv = mkobj(d, T_DICT);
+            VPUSH(nsv);
+            bv = mkobj(bt, T_TUPLE);
+            for (i = 0; i < c->nbases; i++) bt->a[i] = mkobj(c->bases[i], T_CLASS);
+            VPUSH(bv);
+            for (i = 0; i < c->ns.n; i++) dict_set(d, mkobj(c->ns.k[i], T_STR), c->ns.v[i]);
+            nmv = mkobj(c->name, T_STR);
+            VPUSH(*m);
+            VPUSH(mkobj(c->meta, T_CLASS));
+            VPUSH(nmv); VPUSH(bv); VPUSH(nsv);
+            r = call_value(*m, 4, base + 3, nk, kw);
+        } else {
+            run_init_subclass(c, cv, nk, kw);
+        }
+        VPUSH(r);
+        m = class_find(c->meta, S_init);
+        if (m && m->t == T_FUNC && r.t == T_CLASS) {
+            Dict *d = dict_new();
+            List *bt = tuple_new(c->nbases);
+            Value *ap = vsp;
+            nsv = mkobj(d, T_DICT);
+            VPUSH(nsv);
+            bv = mkobj(bt, T_TUPLE);
+            for (i = 0; i < c->nbases; i++) bt->a[i] = mkobj(c->bases[i], T_CLASS);
+            VPUSH(bv);
+            for (i = 0; i < c->ns.n; i++) dict_set(d, mkobj(c->ns.k[i], T_STR), c->ns.v[i]);
+            VPUSH(*m);
+            VPUSH(r);
+            VPUSH(mkobj(c->name, T_STR)); VPUSH(bv); VPUSH(nsv);
+            call_value(*m, 4, ap + 3, 0, NULL);
+        }
+        vsp = base;
+        return r;
+    }
+    run_init_subclass(c, cv, nk, kw);
+    return r;
 }
 static void exec_class(Frame *f, Node *n)
 {
     FuncDef *fd = n->fd;
     Class *c;
     Value cv, *basev = vsp;
-    int i, nbases = n->n - n->op, nb = 0;
+    int i, nbases = n->n - n->op, nb = 0, sline = cur_line;
     Frame cf;
     Cell **cells = NULL;
     Class **bl;
+    Value metav = UNSET_V, *kwbase;
+    int nkw = 0;
     bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(nbases + 1));
     for (i = 0; i < nbases; i++) {
         Value b = eval(f, n->list[i]);
         VPUSH(b);
+        if (b.t == T_INST && AS_INST(b)->cls == cls_GenericAlias) {   /* class A(list[int]) */
+            Value *o = amap_get(&AS_INST(b)->a, intern_c("__origin__"));
+            if (o && o->t == T_CLASS) { b = *o; vsp[-1] = b; }
+        }
         if (b.t != T_CLASS) { free(bl); throw_new(cls_TypeError, "bases must be types"); }
         bl[nb++] = AS_CLASS(b);
     }
+    if (n->a) {   /* class keywords: metaclass=M and the arguments of __init_subclass__ */
+        for (i = 0; i < n->a->n; i++)
+            if (n->a->list[i]->name == S_metaclass) {
+                metav = eval(f, n->a->list[i]->a);
+                VPUSH(metav);
+                if (metav.t != T_CLASS) {
+                    free(bl);
+                    throw_new(cls_TypeError, "metaclass must be a type");
+                }
+            }
+        kwbase = vsp;
+        for (i = 0; i < n->a->n; i++) {
+            Node *k = n->a->list[i];
+            if (k->name != S_metaclass) {
+                Value xv = eval(f, k->a);
+                vcheck(4);
+                VPUSH(mkobj(k->name, T_STR));
+                VPUSH(xv);
+                nkw++;
+            }
+        }
+    } else kwbase = vsp;
     if (nb == 0) bl[nb++] = cls_object;
     c = make_class(n->name, bl, nb, modname_of_gp(f->gp));
+    if (metav.t == T_CLASS) c->meta = AS_CLASS(metav);
     cv = mkobj(c, T_CLASS);
     VPUSH(cv);
     if (fd->nfree > 0) {
@@ -9740,12 +10375,16 @@ static void exec_class(Frame *f, Node *n)
     cf.resuming = 0;
     cf.gp = fd->gpfx;
     cf.up = cur_frame;
+    cf.line = sline;
+    if (cur_frame) cur_frame->line = sline;
     cur_frame = &cf;
     exec_block(&cf, fd->body);
     cur_frame = cf.up;
+    cur_line = sline;
     free(cells);
     finish_class(c);
-    run_init_subclass(c, c->base, cv);
+    cv = class_complete(c, cv, nkw, kwbase);
+    vsp[-1] = cv;
     /* decorators (rare) */
     for (i = n->n - 1; i >= nbases; i--) {
         Value d = eval(f, n->list[i]);
@@ -10053,9 +10692,17 @@ static int exec(Frame *f, Node *n)
         return 0; }
     case S_TRY: return exec_try(f, n);
     case S_RAISE:
-        if (n->a) do_raise(eval(f, n->a));
+        if (n->a) {
+            Value rv = eval(f, n->a);
+            if (n->b) {
+                VPUSH(rv);
+                do_raise(rv, 1, eval(f, n->b));
+            }
+            do_raise(rv, 0, NONE_V);
+        }
         if (handled_exc.t == T_NONE || handled_exc.t == T_UNSET)
             throw_new(cls_RuntimeError, "No active exception to reraise");
+        tb_mode = 2;
         throw_val(handled_exc);
         return 0;
     case S_ASSERT:
@@ -10806,7 +11453,7 @@ static Class *new_class(const char *name, Class *base, int flags)
     c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
     c->ctor = NULL;
     c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL;
-    c->modname = NULL;
+    c->modname = NULL; c->meta = NULL;
     c->flags = flags | (base ? (base->flags & CF_EXC) : 0);
     set_global(c->name, mkobj(c, T_CLASS));
     return c;
@@ -10936,6 +11583,18 @@ BI(bi_int)
     if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET && !class_find(AS_INST(v)->cls, S_int) &&
         !class_find(AS_INST(v)->cls, S_index))
         v = AS_INST(v)->pay;
+    if (v.t == T_BYTES || v.t == T_BARR) {   /* int(b"ff", 16): the text of a bytes-like object */
+        const char *bp;
+        long bn;
+        Value r;
+        bytes_get(v, &bp, &bn);
+        if (!parse_int(bp, bn, bv.t == T_UNSET ? 10 : base, &r)) {
+            Value q = py_repr(v);
+            throw_new(cls_ValueError, "invalid literal for int() with base %d: %.200s", base,
+                AS_STR(q)->s);
+        }
+        return r;
+    }
     if (v.t == T_STR) {
         Value r;
         if (!parse_int(AS_STR(v)->s, AS_STR(v)->len, bv.t == T_UNSET ? 10 : base, &r)) {
@@ -11431,6 +12090,10 @@ BI(bi_reversed)
         it->i = py_len(v) - 1;
         return mkobj(it, T_ITER);
     }
+    if (v.t == T_CLASS && AS_CLASS(v)->meta) {
+        Value *m = class_find(AS_CLASS(v)->meta, S_reversed);
+        if (m) return call1(*m, v);
+    }
     if (v.t == T_INST) {
         Value *m = class_find(AS_INST(v)->cls, intern_c("__reversed__"));
         if (m) return call1(*m, v);
@@ -11668,47 +12331,78 @@ BI(bi_issubclass)
     return NONE_V;
 }
 static Str *cur_gp(void);
+/* type(name, bases, ns) with metaclass `meta` (NULL: type): the class is made, its namespace filled
+   from ns, __init_subclass__ of the next base runs with the class keywords kw */
+static Value type_create(Class *meta, Value namev, Value basesv, Value nsv, int nk, Value *kw)
+{
+    Class **bl, *c;
+    List *bt;
+    Dict *ns;
+    long i, nb;
+    Value cv;
+    Str *nm = intern_str(astr(namev, "type.__new__() argument 1"));
+    if (basesv.t != T_TUPLE)
+        throw_new(cls_TypeError, "type.__new__() argument 2 must be tuple, not %.40s",
+        type_name(basesv));
+    if (nsv.t != T_DICT)
+        throw_new(cls_TypeError, "type.__new__() argument 3 must be dict, not %.40s",
+        type_name(nsv));
+    bt = AS_LIST(basesv);
+    ns = AS_DICT(nsv);
+    bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(bt->n + 1));
+    nb = 0;
+    for (i = 0; i < bt->n; i++) {
+        if (bt->a[i].t != T_CLASS) { free(bl);
+            throw_new(cls_TypeError, "bases must be types");
+        }
+        bl[nb++] = AS_CLASS(bt->a[i]);
+    }
+    if (nb == 0) bl[nb++] = cls_object;
+    c = make_class(nm, bl, (int)nb, modname_of_gp(cur_gp()));
+    if (meta && meta != cls_type) c->meta = meta;
+    cv = mkobj(c, T_CLASS);
+    VPUSH(cv);
+    for (i = 0; i < ns->used; i++) {
+        if (ns->e[i].k.t != T_STR) continue;
+        amap_set(&c->ns, intern_str(AS_STR(ns->e[i].k)), ns->e[i].v);
+    }
+    finish_class(c);
+    run_init_subclass(c, cv, nk, kw);
+    vsp--;
+    return cv;
+}
 BI(bi_type)
 {
     need(x, 1, 3, "type");
     if (x->n == 2) throw_new(cls_TypeError, "type() takes 1 or 3 arguments");
-    if (x->n == 3) {
-        Class **bl, *c;
-        List *bt;
-        Dict *ns;
-        long i, nb;
-        Value cv;
-        Str *nm = intern_str(astr(A(0), "type.__new__() argument 1"));
-        if (A(1).t != T_TUPLE)
-            throw_new(cls_TypeError, "type.__new__() argument 2 must be tuple, not %.40s",
-            type_name(A(1)));
-        if (A(2).t != T_DICT)
-            throw_new(cls_TypeError, "type.__new__() argument 3 must be dict, not %.40s",
-            type_name(A(2)));
-        bt = AS_LIST(A(1));
-        ns = AS_DICT(A(2));
-        bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(bt->n + 1));
-        nb = 0;
-        for (i = 0; i < bt->n; i++) {
-            if (bt->a[i].t != T_CLASS) { free(bl);
-                throw_new(cls_TypeError, "bases must be types");
-            }
-            bl[nb++] = AS_CLASS(bt->a[i]);
-        }
-        if (nb == 0) bl[nb++] = cls_object;
-        c = make_class(nm, bl, (int)nb, modname_of_gp(cur_gp()));
-        cv = mkobj(c, T_CLASS);
-        VPUSH(cv);
-        for (i = 0; i < ns->used; i++) {
-            if (ns->e[i].k.t != T_STR) continue;
-            amap_set(&c->ns, intern_str(AS_STR(ns->e[i].k)), ns->e[i].v);
-        }
-        finish_class(c);
-        run_init_subclass(c, c->base, cv);
-        vsp--;
-        return cv;
-    }
+    if (x->n == 3) return type_create(NULL, A(0), A(1), A(2), x->nk, x->kw);
     return mkobj(class_of(A(0)), T_CLASS);
+}
+/* type.__new__(mcs, name, bases, ns, **kw), type.__call__(cls, *args), type.__init__(...) */
+BI(type_new)
+{
+    if (x->n != 4 || A(0).t != T_CLASS)
+        throw_new(cls_TypeError, "type.__new__() takes exactly 4 arguments (%d given)", x->n);
+    return type_create(AS_CLASS(A(0)), A(1), A(2), A(3), x->nk, x->kw);
+}
+BI(type_call)
+{
+    if (x->n < 1 || A(0).t != T_CLASS)
+        throw_new(cls_TypeError, "descriptor '__call__' needs a type");
+    return call_class_plain(AS_CLASS(A(0)), x->n - 1, x->a + 1, x->nk, x->kw);
+}
+BI(type_init)
+{
+    (void)x;
+    return NONE_V;
+}
+/* object.__init_subclass__(cls): takes no keyword arguments */
+BI(obj_init_subclass)
+{
+    if (x->nk > 0)
+        throw_new(cls_TypeError, "%.80s.__init_subclass__() takes no keyword arguments",
+            x->n > 0 && A(0).t == T_CLASS ? AS_CLASS(A(0))->name->s : "object");
+    return NONE_V;
 }
 static int try_attr(Value o, Str *nm, Value *out)
 {
@@ -12525,7 +13219,8 @@ BI(s_splitlines)
     List *l = list_new(8);
     Value lv = mklist(l);
     long i = 0, st = 0;
-    int keep = x->n > 1 && py_truthy(A(1));
+    Value kv = kwget(x, "keepends");
+    int keep = (x->n > 1 && py_truthy(A(1))) || (kv.t != T_UNSET && py_truthy(kv));
     VPUSH(lv);
     while (i < s->len) {
         if (s->s[i] == '\n' || s->s[i] == '\r') {
@@ -13382,6 +14077,46 @@ BI(g_close)
 }
 
 /* ---- files ------------------------------------------------------------ */
+/* the exception class for a host error number (errno) */
+static Class *oserror_class(int err)
+{
+    if (err == ENOENT) return cls_FileNotFoundError;
+    if (err == EACCES || err == EPERM) return cls_PermissionError;
+    if (err == EEXIST) return cls_FileExistsError;
+    if (err == EISDIR) return cls_IsADirectoryError;
+    if (err == ENOTDIR) return cls_NotADirectoryError;
+    return cls_OSError;
+}
+/* raise OSError(errno, strerror, filename) as the matching subclass */
+static void throw_oserror(int err, Value filename)
+{
+    Value v[3];
+    Class *c = oserror_class(err);
+    long n = 2;
+    v[0] = mkint(err);
+    v[1] = mkcstr(strerror(err));
+    if (filename.t != T_UNSET && filename.t != T_NONE) { v[2] = filename; n = 3; }
+    {
+        Value ev = new_exc_args(c, v, n);
+        VPUSH(ev);
+        amap_set(&AS_INST(ev)->a, intern_c("errno"), v[0]);
+        amap_set(&AS_INST(ev)->a, intern_c("strerror"), v[1]);
+        amap_set(&AS_INST(ev)->a, intern_c("filename"), n == 3 ? v[2] : NONE_V);
+        vsp--;
+        throw_val(ev);
+    }
+}
+static Value new_file_obj(FILE *fp, int out, int bin, Value name, const char *mode)
+{
+    File *f = (File *)gc_alloc(sizeof(File), T_FILE);
+    f->fp = fp;
+    f->closed = 0;
+    f->out = out;
+    f->bin = bin;
+    f->name = name.t == T_STR ? AS_STR(name) : NULL;
+    f->mode = intern_c(mode);
+    return mkobj(f, T_FILE);
+}
 static File *self_file(Args *x)
 {
     File *f;
@@ -13389,6 +14124,16 @@ static File *self_file(Args *x)
     f = (File *)A(0).u.o;
     if (f->closed) throw_new(cls_ValueError, "I/O operation on closed file");
     return f;
+}
+/* a chunk read from a file: str in text mode, bytes in binary mode */
+static Value file_value(File *f, Buf *b)
+{
+    if (f->bin) {
+        Value r = mkbytes(b->s, b->n);
+        buf_free(b);
+        return r;
+    }
+    return buf_value(b);
 }
 static Value file_readline(File *f)
 {
@@ -13399,43 +14144,68 @@ static Value file_readline(File *f)
         buf_addc(&b, c);
         if (c == '\n') break;
     }
-    return buf_value(&b);
+    return file_value(f, &b);
+}
+static long file_value_len(Value v)
+{
+    return v.t == T_BYTES || v.t == T_STR ? AS_STR(v)->len : 0;
 }
 BI(bi_open)
 {
-    File *f;
     Str *path, *mode;
     FILE *fp;
     char m[8];
-    int k = 0, i;
+    int k = 0, i, bin = 0, plus = 0, excl = 0;
+    char base = 'r';
     need(x, 1, 2, "open");
+    if (A(0).t == T_INST && class_find(AS_INST(A(0))->cls, intern_c("__fspath__"))) {
+        Value fs = call0(get_attr(A(0), intern_c("__fspath__")));
+        if (fs.t == T_STR) x->a[0] = fs;
+    }
     path = astr(A(0), "file");
     mode = x->n > 1 ? astr(A(1), "mode") : NULL;
     if (!mode && kwget(x, "mode").t == T_STR) mode = AS_STR(kwget(x, "mode"));
-    m[k++] = 'r';
     if (mode) {
-        k = 0;
-        for (i = 0; i < mode->len && k < 3; i++) {
-            if (mode->s[i] == 'r' || mode->s[i] == 'w' || mode->s[i] == 'a' || mode->s[i] == '+')
-                m[k++] = mode->s[i];
+        int seen = 0;
+        for (i = 0; i < mode->len; i++) {
+            char ch = mode->s[i];
+            if (ch == 'r' || ch == 'w' || ch == 'a' || ch == 'x') {
+                if (seen)
+                    throw_new(cls_ValueError,
+                              "must have exactly one of create/read/write/append mode");
+                base = ch; seen = 1;
+            } else if (ch == '+') plus = 1;
+            else if (ch == 'b') bin = 1;
+            else if (ch != 't' && ch != 'U')
+                throw_new(cls_ValueError, "invalid mode: '%.20s'", mode->s);
         }
-        if (k == 0) m[k++] = 'r';
+        if (!seen) base = 'r';
     }
+    if (base == 'x') {
+        if (host_file_exists(path->s)) throw_oserror(EEXIST, A(0));
+        base = 'w';
+        excl = 1;
+    }
+    m[k++] = base;
+    if (plus) m[k++] = '+';
+    if (bin) m[k++] = 'b';
     m[k] = 0;
+    errno = 0;
     fp = host_fopen(path->s, m);
-    if (!fp) {
-        Value v[2];
-        Value q = py_repr(A(0));
-        char msg[300];
-        sprintf(msg, "[Errno 2] No such file or directory: %.200s", AS_STR(q)->s);
-        v[0] = mkcstr(msg);
-        throw_val(new_exc_args(cls_FileNotFoundError, v, 1));
+    if (!fp) throw_oserror(errno ? errno : ENOENT, A(0));
+    if (base == 'r' && !plus && host_file_isdir(path->s)) {
+        fclose(fp);
+        throw_oserror(EISDIR, A(0));
     }
-    f = (File *)gc_alloc(sizeof(File), T_FILE);
-    f->fp = fp;
-    f->closed = 0;
-    f->out = 0;
-    return mkobj(f, T_FILE);
+    {
+        char md[8];
+        k = 0;
+        md[k++] = excl ? 'x' : base;
+        if (plus) md[k++] = '+';
+        if (bin) md[k++] = 'b';
+        md[k] = 0;
+        return new_file_obj(fp, 0, bin ? (base == 'r' && !plus ? 1 : 2) : 0, A(0), md);
+    }
 }
 BI(fl_read)
 {
@@ -13444,8 +14214,12 @@ BI(fl_read)
     int c;
     long n = x->n > 1 && A(1).t != T_NONE ? to_index(A(1)) : -1;
     buf_init(&b);
-    while ((n < 0 || b.n < n) && (c = getc(f->fp)) != EOF) buf_addc(&b, c);
-    return buf_value(&b);
+    if (n < 0) {
+        while ((c = getc(f->fp)) != EOF) buf_addc(&b, c);
+    } else {
+        while (b.n < n && (c = getc(f->fp)) != EOF) buf_addc(&b, c);
+    }
+    return file_value(f, &b);
 }
 BI(fl_readline) { return file_readline(self_file(x)); }
 BI(fl_readlines)
@@ -13456,19 +14230,36 @@ BI(fl_readlines)
     VPUSH(lv);
     for (;;) {
         ln = file_readline(f);
-        if (AS_STR(ln)->len == 0) break;
+        if (file_value_len(ln) == 0) break;
         list_push(l, ln);
     }
     vsp--;
     return lv;
 }
+/* the bytes of a binary write, or the text of a text write */
+static void file_put(File *f, Value v)
+{
+    const char *p;
+    long n = 0;
+    if (f->bin) {
+        if (!bytes_get(v, &p, &n))
+            throw_new(cls_TypeError, "a bytes-like object is required, not '%.40s'", type_name(v));
+        fwrite(p, 1, (size_t)n, f->fp);
+    } else {
+        Str *s = astr(v, "write() argument");
+        fwrite(s->s, 1, (size_t)s->len, f->fp);
+    }
+}
 BI(fl_write)
 {
     File *f = self_file(x);
-    Str *s = astr(A(1), "write() argument");
+    const char *p;
+    long n = 0;
+    need(x, 2, 2, "write");
     if (f->fp == stderr) fflush(stdout);
-    fwrite(s->s, 1, (size_t)s->len, f->fp);
-    return mkint(s->len);
+    file_put(f, A(1));
+    if (f->bin) { bytes_get(A(1), &p, &n); return mkint(n); }
+    return mkint(AS_STR(A(1).t == T_INST ? AS_INST(A(1))->pay : A(1))->len);
 }
 BI(fl_writelines)
 {
@@ -13476,7 +14267,7 @@ BI(fl_writelines)
     Value it, y;
     it = get_iter(A(1));
     VPUSH(it);
-    while (iter_next(it, &y)) fwrite(astr(y, "item")->s, 1, (size_t)AS_STR(y)->len, f->fp);
+    while (iter_next(it, &y)) file_put(f, y);
     vsp--;
     return NONE_V;
 }
@@ -13492,13 +14283,97 @@ BI(fl_close)
     f->closed = 1;
     return NONE_V;
 }
-BI(fl_enter) { return A(0); }
+BI(fl_enter)
+{
+    (void)self_file(x);
+    return A(0);
+}
 BI(fl_exit)
 {
     File *f = (File *)A(0).u.o;
     if (!f->closed && !f->out) fclose(f->fp);
     f->closed = 1;
     return FALSE_V;
+}
+BI(fl_seek)
+{
+    File *f = self_file(x);
+    long off = to_index(A(1)), wh = x->n > 2 ? to_index(A(2)) : 0;
+    need(x, 2, 3, "seek");
+    if (wh < 0 || wh > 2)
+        throw_new(cls_ValueError, "invalid whence (%ld, should be 0, 1 or 2)", wh);
+    if (fseek(f->fp, off, wh == 0 ? SEEK_SET : (wh == 1 ? SEEK_CUR : SEEK_END)) != 0)
+        throw_oserror(errno ? errno : EINVAL, NONE_V);
+    return mkint(ftell(f->fp));
+}
+BI(fl_tell)
+{
+    File *f = self_file(x);
+    long p = ftell(f->fp);
+    if (p < 0) throw_oserror(errno ? errno : ESPIPE, NONE_V);
+    return mkint(p);
+}
+BI(fl_readable)
+{
+    File *f = self_file(x);
+    const char *m = f->mode->s;
+    return mkbool(m[0] == 'r' || strchr(m, '+') != NULL);
+}
+BI(fl_writable)
+{
+    File *f = self_file(x);
+    const char *m = f->mode->s;
+    return mkbool(m[0] != 'r' || strchr(m, '+') != NULL);
+}
+BI(fl_seekable)
+{
+    File *f = self_file(x);
+    return mkbool(f->fp != stdin && f->fp != stdout && f->fp != stderr);
+}
+BI(fl_isatty)
+{
+    (void)self_file(x);
+    return FALSE_V;
+}
+BI(fl_fileno)
+{
+    File *f = self_file(x);
+    int fd = host_fileno(f->fp);
+    if (fd < 0) throw_new(cls_OSError, "fileno() is not available");
+    return mkint(fd);
+}
+/* readinto(bytearray): fills the buffer, returns the number of bytes read */
+BI(fl_readinto)
+{
+    File *f = self_file(x);
+    size_t got;
+    need(x, 2, 2, "readinto");
+    if (A(1).t != T_BARR) throw_new(cls_TypeError, "readinto() argument must be a bytearray");
+    got = fread(AS_BARR(A(1))->s, 1, (size_t)AS_BARR(A(1))->n, f->fp);
+    return mkint((long)got);
+}
+/* attributes of file objects: name, mode, closed, encoding, buffer */
+static int file_attr(File *f, Str *nm, Value *out)
+{
+    const char *a = nm->s;
+    if (strcmp(a, "closed") == 0) { *out = mkbool(f->closed); return 1; }
+    if (strcmp(a, "mode") == 0) {
+        *out = mkcstr(f->mode ? f->mode->s : "r");
+        return 1;
+    }
+    if (strcmp(a, "name") == 0) {
+        if (f->name) *out = mkobj(f->name, T_STR);
+        else *out = mkcstr(f->fp == stdin ? "<stdin>" :
+                           (f->fp == stdout ? "<stdout>" : "<stderr>"));
+        return 1;
+    }
+    if (strcmp(a, "encoding") == 0 && !f->bin) { *out = mkcstr("utf-8"); return 1; }
+    if (strcmp(a, "errors") == 0 && !f->bin) { *out = mkcstr("strict"); return 1; }
+    if (strcmp(a, "buffer") == 0 && !f->bin) {
+        *out = new_file_obj(f->fp, 1, f->fp == stdin ? 1 : 2, NONE_V, f->fp == stdin ? "rb" : "wb");
+        return 1;
+    }
+    return 0;
 }
 
 /* ---- protocol methods of the native base types (list dict set tuple str) ----------
@@ -14841,7 +15716,7 @@ static Class *mod_class(const char *name, Class *base, const char *modname)
     c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
     c->ctor = NULL;
     c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL;
-    c->modname = intern_c(modname);
+    c->modname = intern_c(modname); c->meta = NULL;
     c->flags = CF_BUILTIN | (base ? (base->flags & CF_EXC) : 0);
     return c;
 }
@@ -18409,6 +19284,7 @@ static void np_init(void)
     c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
     c->ctor = np_array; c->flags = CF_BUILTIN;
     c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL; c->modname = NULL;
+    c->meta = NULL;
     cls_ndarray = c;
     def_bi(cls_ndarray, "tolist", nd_tolist); def_bi(cls_ndarray, "copy", nd_copy);
     def_bi(cls_ndarray, "reshape", nd_reshape); def_bi(cls_ndarray, "flatten", nd_flatten);
@@ -26919,6 +27795,8 @@ static void init_frame(Frame *fr, Str *gp)
 {
     fr->loc = NULL; fr->cells = NULL; fr->fn = NULL; fr->ret = NONE_V; fr->gen = NULL;
     fr->ns = NULL; fr->resuming = 0; fr->gp = gp; fr->up = cur_frame;
+    fr->line = cur_line;
+    if (cur_frame) cur_frame->line = cur_line;
 }
 static void run_block_in(Node *blk, Str *gp)
 {
@@ -26930,6 +27808,7 @@ static void run_block_in(Node *blk, Str *gp)
     exec_block(&fr, blk);
     call_depth--;
     cur_frame = fr.up;
+    if (cur_frame) cur_line = cur_frame->line;
 }
 
 /* ---- modules written in Python ---------------------------------------- */
@@ -27115,23 +27994,31 @@ static Value module_getattr_opt(Value mv, Str *nm)
     return UNSET_V;
 }
 
-/* native numpy falls back to the pure-Python overlay pylib/numpy/__init__.py (loaded once as the
-   hidden module numpy._overlay) for names it does not provide */
-static int overlay_state;   /* 0 not tried, 1 loading, 2 loaded, 3 unavailable */
-static Value overlay_mod;
+/* a native module falls back to the pure-Python overlay of the same name (pylib/numpy/__init__.py,
+   pylib/os.py, pylib/time.py), loaded once as the hidden module <name>._overlay, for the names it
+   does not provide */
+#define NOVERLAY 3
+static const char *overlay_names[NOVERLAY] = { "numpy", "os", "time" };
+static int overlay_state[NOVERLAY];   /* 0 not tried, 1 loading, 2 loaded, 3 unavailable */
+static Value overlay_mod[NOVERLAY];
 static int module_overlay(Module *md, Str *nm, Value *out)
 {
     Value r, full;
-    if (md->gp || md->name->len != 5 || memcmp(md->name->s, "numpy", 5) != 0) return 0;
-    if (nm->len == 8 && memcmp(nm->s, "__path__", 8) == 0) {
+    int oi = -1, k;
+    if (md->gp) return 0;
+    for (k = 0; k < NOVERLAY; k++)
+        if (md->name->len == (long)strlen(overlay_names[k]) &&
+            memcmp(md->name->s, overlay_names[k], (size_t)md->name->len) == 0) oi = k;
+    if (oi < 0) return 0;
+    if (oi == 0 && nm->len == 8 && memcmp(nm->s, "__path__", 8) == 0) {
         /* the native numpy behaves as a package: file submodules (numpy.fft ...) are looked up in
            <sys.path entry>/numpy; native submodules (linalg, random) are found in sys.modules */
         List *pl = list_new(4);
         Value plv = mklist(pl), sp;
-        long k;
+        long j;
         VPUSH(plv);
-        for (k = 0; k < AS_LIST(sys_path_v)->n; k++) {
-            sp = AS_LIST(sys_path_v)->a[k];
+        for (j = 0; j < AS_LIST(sys_path_v)->n; j++) {
+            sp = AS_LIST(sys_path_v)->a[j];
             if (sp.t == T_STR) list_push(pl, path_join_v(sp, "numpy"));
         }
         amap_set(&md->ns, nm, plv);
@@ -27140,27 +28027,30 @@ static int module_overlay(Module *md, Str *nm, Value *out)
         return 1;
     }
     if (nm->len >= 2 && nm->s[0] == '_' && nm->s[1] == '_') return 0;
-    if (overlay_state == 1 || overlay_state == 3) return 0;
-    if (overlay_state == 0) {
-        long k;
-        Str *ovn = intern_c("numpy._overlay");
-        Str *leaf = intern_c("numpy");
-        overlay_state = 1;
-        overlay_mod = UNSET_V;
-        for (k = 0; k < AS_LIST(sys_path_v)->n && overlay_mod.t == T_UNSET; k++) {
-            Value cand = AS_LIST(sys_path_v)->a[k];
+    if (overlay_state[oi] == 1 || overlay_state[oi] == 3) return 0;
+    if (overlay_state[oi] == 0) {
+        long j;
+        char ovb[32];
+        Str *ovn, *leaf = md->name;
+        sprintf(ovb, "%s._overlay", overlay_names[oi]);
+        ovn = intern_c(ovb);
+        overlay_state[oi] = 1;
+        overlay_mod[oi] = UNSET_V;
+        for (j = 0; j < AS_LIST(sys_path_v)->n && overlay_mod[oi].t == T_UNSET; j++) {
+            Value cand = AS_LIST(sys_path_v)->a[j];
             char pb[PY_PATHMAX];
             char *src = NULL;
             long len;
             if (cand.t != T_STR) continue;
-            if (host_module_path(pb, AS_STR(cand)->s, AS_STR(cand)->len, "numpy", 5, 1) >= 0)
+            if (host_module_path(pb, AS_STR(cand)->s, AS_STR(cand)->len, leaf->s, leaf->len,
+                                 oi == 0) >= 0)
                 src = read_whole(pb, &len);
-            if (src) { free(src); overlay_mod = try_dir(cand, leaf, ovn, NULL); }
+            if (src) { free(src); overlay_mod[oi] = try_dir(cand, leaf, ovn, NULL); }
         }
-        if (overlay_mod.t == T_UNSET) { overlay_state = 3; return 0; }
-        overlay_state = 2;
+        if (overlay_mod[oi].t == T_UNSET) { overlay_state[oi] = 3; return 0; }
+        overlay_state[oi] = 2;
     }
-    full = overlay_mod;
+    full = overlay_mod[oi];
     r = module_getattr_opt(full, nm);
     if (r.t == T_UNSET) return 0;
     amap_set(&md->ns, nm, r);
@@ -27445,7 +28335,7 @@ BI(bi_exc_info)
     if (handled_exc.t == T_INST) {
         r[0] = mkobj(AS_INST(handled_exc)->cls, T_CLASS);
         r[1] = handled_exc;
-        r[2] = NONE_V;
+        r[2] = get_attr(handled_exc, S_traceback);
     } else {
         r[0] = r[1] = r[2] = NONE_V;
     }
@@ -27647,6 +28537,11 @@ BI(osp_isabs)
     s = astr(A(0), "path");
     return mkbool(s->len > 0 && s->s[0] == '/');
 }
+BI(osp_normcase)
+{
+    need(x, 1, 1, "normcase");
+    return mkobj(astr(A(0), "path"), T_STR);
+}
 BI(osp_normpath)
 {
     Str *s;
@@ -27748,20 +28643,90 @@ BI(osp_getsize)
                   AS_STR(A(0))->s);
     return mkint(n);
 }
+/* a path argument: str, bytes or an object with __fspath__, as a str */
+static Str *fs_path(Value v, const char *what)
+{
+    if (v.t == T_INST && class_find(AS_INST(v)->cls, intern_c("__fspath__")))
+        v = call0(get_attr(v, intern_c("__fspath__")));
+    if (v.t == T_BYTES) v = mkstr(AS_STR(v)->s, AS_STR(v)->len);
+    return astr(v, what);
+}
 BI(os_remove)
 {
     need(x, 1, 1, "remove");
-    if (host_file_remove(astr(A(0), "path")->s) != 0)
-        throw_new(cls_FileNotFoundError, "[Errno 2] No such file or directory: '%.200s'",
-            AS_STR(A(0))->s);
+    errno = 0;
+    if (host_file_remove(fs_path(A(0), "path")->s) != 0)
+        throw_oserror(errno ? errno : ENOENT, A(0));
     return NONE_V;
 }
 BI(os_rename)
 {
     need(x, 2, 2, "rename");
-    if (host_file_rename(astr(A(0), "src")->s, astr(A(1), "dst")->s) != 0)
-        throw_new(cls_OSError, "rename failed: '%.200s'", AS_STR(A(0))->s);
+    errno = 0;
+    if (host_file_rename(fs_path(A(0), "src")->s, fs_path(A(1), "dst")->s) != 0)
+        throw_oserror(errno ? errno : ENOENT, A(0));
     return NONE_V;
+}
+/* names of a directory, in directory order */
+BI(os_listdir)
+{
+    Str *p = x->n > 0 && A(0).t != T_NONE ? fs_path(A(0), "path") : NULL;
+    char *buf = NULL;
+    long blen = 0, cnt, i, off = 0;
+    List *l;
+    Value lv;
+    errno = 0;
+    cnt = host_listdir(p ? p->s : ".", &buf, &blen);
+    if (cnt < 0) throw_oserror(errno ? errno : ENOENT, p ? A(0) : mkcstr("."));
+    l = list_new(cnt);
+    lv = mklist(l);
+    VPUSH(lv);
+    for (i = 0; i < cnt; i++) {
+        list_push(l, mkcstr(buf + off));
+        off += (long)strlen(buf + off) + 1;
+    }
+    free(buf);
+    vsp--;
+    return lv;
+}
+BI(os_mkdir)
+{
+    long mode = x->n > 1 ? to_index(A(1)) : 511L;
+    need(x, 1, 2, "mkdir");
+    errno = 0;
+    if (host_mkdir(fs_path(A(0), "path")->s, mode) != 0)
+        throw_oserror(errno ? errno : EACCES, A(0));
+    return NONE_V;
+}
+BI(os_rmdir)
+{
+    need(x, 1, 1, "rmdir");
+    errno = 0;
+    if (host_rmdir(fs_path(A(0), "path")->s) != 0) throw_oserror(errno ? errno : EACCES, A(0));
+    return NONE_V;
+}
+BI(os_chdir)
+{
+    need(x, 1, 1, "chdir");
+    errno = 0;
+    if (host_chdir(fs_path(A(0), "path")->s) != 0) throw_oserror(errno ? errno : ENOENT, A(0));
+    return NONE_V;
+}
+BI(os_getpid) { (void)x; return mkint(host_getpid()); }
+BI(os_getppid) { (void)x; return mkint(host_getppid()); }
+BI(os_urandom)
+{
+    long n;
+    unsigned char *b;
+    Value r;
+    need(x, 1, 1, "urandom");
+    n = to_index(A(0));
+    if (n < 0) throw_new(cls_ValueError, "negative argument not allowed");
+    b = (unsigned char *)xmalloc((size_t)n + 1);
+    host_urandom(b, n);
+    r = mkbytes((const char *)b, n);
+    free(b);
+    return r;
 }
 
 
@@ -27775,6 +28740,437 @@ static Value init_environ(void)
         if (eq) dict_set(d, mkstr(*e, (long)(eq - *e)), mkcstr(eq + 1));
     }
     return dv;
+}
+/* ===== p7_rt.c ===== */
+/* =========================================================================
+   p7_rt.c   runtime introspection: function __code__ / __defaults__ / __kwdefaults__, code, frame
+             and traceback objects, sys._getframe, e.__traceback__, types.GenericAlias
+
+   Frame and traceback objects are snapshots (instances of native classes made by mod_class): the C
+   frames live on the C stack and are gone when an exception has been caught.  A frame object has
+   f_code, f_lineno, f_back, f_globals, f_locals; a traceback tb_frame, tb_lineno, tb_next.
+   ========================================================================= */
+static void rt_set(Inst *in, const char *nm, Value v)
+{
+    amap_set(&in->a, intern_c(nm), v);
+}
+static Value rt_names(List *l)
+{
+    Value r = mktuple_from(l->a, l->n);
+    return r;
+}
+
+/* ---- modules' file names ---------------------------------------------- */
+static Value file_of_gp(Str *gp)
+{
+    long gi;
+    if (gp) {
+        Str *key = prefixed(gp, intern_c("__file__"));
+        gi = global_find(key);
+        if (gi >= 0 && G[gi].t == T_STR) return G[gi];
+    }
+    return mkcstr(script_name);
+}
+
+/* ---- code objects ----------------------------------------------------- */
+static Value make_code(const char *name, Str *nmstr, Str *gp, int line, FuncDef *fd)
+{
+    Inst *in = new_inst(cls_code);
+    Value iv = mkobj(in, T_INST);
+    Value nv = nmstr ? mkobj(nmstr, T_STR) : mkcstr(name);
+    List *vn, *cv, *fv;
+    Value vnv, cvv, fvv;
+    int i, flags = 0, nargs = 0, nkw = 0, nposonly = 0;
+    VPUSH(iv);
+    VPUSH(nv);
+    vn = list_new(8); vnv = mklist(vn); VPUSH(vnv);
+    cv = list_new(4); cvv = mklist(cv); VPUSH(cvv);
+    fv = list_new(4); fvv = mklist(fv); VPUSH(fvv);
+    if (fd) {
+        Scope *sc = fd->sc;
+        nargs = fd->npos;
+        nkw = fd->nkwonly;
+        nposonly = fd->nposonly;
+        for (i = 0; i < sc->nvars; i++) {
+            Var *v = sc->vars[i];
+            if (v->name->s[0] == '.') continue;
+            if (v->isparam) list_push(vn, mkobj(v->name, T_STR));
+            else if (v->kind == VK_LOCAL) list_push(vn, mkobj(v->name, T_STR));
+            else if (v->kind == VK_CELL) list_push(cv, mkobj(v->name, T_STR));
+            else if (v->kind == VK_FREE) list_push(fv, mkobj(v->name, T_STR));
+        }
+        flags = 3;
+        if (fd->va_slot >= 0) flags |= 4;
+        if (fd->kw_slot >= 0) flags |= 8;
+        if (sc->parent && sc->parent->kind == SC_FUNC) flags |= 16;
+        if (fd->isgen) flags |= 32;
+    }
+    rt_set(in, "co_name", nv);
+    rt_set(in, "co_qualname", nv);
+    rt_set(in, "co_filename", file_of_gp(gp));
+    rt_set(in, "co_firstlineno", mkint(line));
+    rt_set(in, "co_argcount", mkint(nargs));
+    rt_set(in, "co_posonlyargcount", mkint(nposonly));
+    rt_set(in, "co_kwonlyargcount", mkint(nkw));
+    rt_set(in, "co_nlocals", mkint(vn->n));
+    rt_set(in, "co_varnames", rt_names(vn));
+    rt_set(in, "co_cellvars", rt_names(cv));
+    rt_set(in, "co_freevars", rt_names(fv));
+    rt_set(in, "co_flags", mkint(flags));
+    rt_set(in, "co_names", mktuple_from(NULL, 0));
+    rt_set(in, "co_consts", mktuple_from(NULL, 0));
+    rt_set(in, "co_code", mkbytes("", 0));
+    vsp -= 5;
+    return iv;
+}
+BI(code_repr)
+{
+    Inst *in = AS_INST(A(0));
+    Value *nm = amap_get(&in->a, intern_c("co_name"));
+    Value *fl = amap_get(&in->a, intern_c("co_filename"));
+    Value *ln = amap_get(&in->a, intern_c("co_firstlineno"));
+    char b[500];
+    sprintf(b, "<code object %.100s at %p, file \"%.200s\", line %ld>",
+            nm && nm->t == T_STR ? AS_STR(*nm)->s : "?", (void *)in,
+            fl && fl->t == T_STR ? AS_STR(*fl)->s : "?", ln ? ln->u.i : 0L);
+    return mkcstr(b);
+}
+static Value code_for_func(Func *fn)
+{
+    Value *c = amap_get(&fn->attrs, intern_c("__code__"));
+    Value r;
+    if (c) return *c;
+    r = make_code(NULL, fn->name, fn->def->fd->gpfx, fn->def->fd->line, fn->def->fd);
+    amap_set(&fn->attrs, intern_c("__code__"), r);
+    return r;
+}
+
+/* computed function attributes: __code__ __defaults__ __kwdefaults__ __globals__ __closure__ */
+static int func_special_attr(Value fv, Str *nm, Value *out)
+{
+    Func *fn = AS_FUNC(fv);
+    FuncDef *fd = fn->def->fd;
+    const char *a = nm->s;
+    int i;
+    if (a[0] != '_' || a[1] != '_') return 0;
+    if (strcmp(a, "__code__") == 0) { *out = code_for_func(fn); return 1; }
+    if (strcmp(a, "__defaults__") == 0) {
+        *out = fn->ndefs > 0 ? mktuple_from(fn->defs, fn->ndefs) : NONE_V;
+        return 1;
+    }
+    if (strcmp(a, "__kwdefaults__") == 0) {
+        Dict *d;
+        Value dv;
+        int cnt = 0;
+        for (i = 0; i < fd->nkwonly; i++) if (fn->kwdefs && fn->kwdefs[i].t != T_UNSET) cnt++;
+        if (cnt == 0) { *out = NONE_V; return 1; }
+        d = dict_new();
+        dv = mkobj(d, T_DICT);
+        VPUSH(dv);
+        for (i = 0; i < fd->nkwonly; i++)
+            if (fn->kwdefs[i].t != T_UNSET)
+                dict_set(d, mkobj(fd->pnames[fd->npos + i], T_STR), fn->kwdefs[i]);
+        vsp--;
+        *out = dv;
+        return 1;
+    }
+    if (strcmp(a, "__globals__") == 0) {
+        *out = globals_of(fd->gpfx ? fd->gpfx : main_gp);
+        return 1;
+    }
+    if (strcmp(a, "__closure__") == 0) {
+        if (fd->nfree == 0) { *out = NONE_V; return 1; }
+        {
+            List *t = tuple_new(fd->nfree);
+            for (i = 0; i < fd->nfree; i++) t->a[i] = mkobj(fn->cells[i], T_CELL);
+            *out = mkobj(t, T_TUPLE);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- frame objects ---------------------------------------------------- */
+/* pay = (function or None, module prefix or None, class body name or None) */
+static Value make_frame_obj(Value fnv, Value gpv, Value clsname, int line, Value back, Value locals)
+{
+    Inst *in = new_inst(cls_frame);
+    Value iv = mkobj(in, T_INST), pv[3];
+    VPUSH(iv);
+    pv[0] = fnv; pv[1] = gpv; pv[2] = clsname;
+    in->pay = mktuple_from(pv, 3);
+    rt_set(in, "f_lineno", mkint(line));
+    rt_set(in, "f_back", back);
+    rt_set(in, "f_locals", locals);
+    rt_set(in, "f_trace", NONE_V);
+    rt_set(in, "f_lasti", mkint(0));
+    vsp--;
+    return iv;
+}
+BI(frame_repr)
+{
+    Inst *in = AS_INST(A(0));
+    Value *ln = amap_get(&in->a, intern_c("f_lineno"));
+    char b[200];
+    sprintf(b, "<frame at %p, line %ld>", (void *)in, ln ? ln->u.i : 0L);
+    return mkcstr(b);
+}
+/* the local variables of a live frame as a dict */
+static Value frame_locals_dict(Frame *f)
+{
+    Dict *d = dict_new();
+    Value dv = mkobj(d, T_DICT);
+    int i;
+    VPUSH(dv);
+    if (f->fn && f->loc) {
+        Scope *sc = f->fn->def->fd->sc;
+        for (i = 0; i < sc->nvars; i++) {
+            Var *v = sc->vars[i];
+            Value val = UNSET_V;
+            if (v->kind == VK_LOCAL) val = f->loc[v->slot];
+            else if (v->kind == VK_CELL) val = ((Cell *)f->loc[v->slot].u.o)->v;
+            else if (v->kind == VK_FREE && f->cells) val = f->cells[v->slot]->v;
+            if (val.t != T_UNSET && v->name->s[0] != '.') dict_set(d, mkobj(v->name, T_STR), val);
+        }
+    } else if (f->ns) {
+        for (i = 0; i < f->ns->ns.n; i++) dict_set(d, mkobj(f->ns->ns.k[i], T_STR), f->ns->ns.v[i]);
+    } else {
+        vsp--;
+        return globals_of(f->gp ? f->gp : main_gp);
+    }
+    vsp--;
+    return dv;
+}
+BI(sys_getframe)
+{
+    long depth = x->n > 0 ? to_index(A(0)) : 0, n = 0, i;
+    Frame *f, **fa;
+    Value prev = NONE_V;
+    for (f = cur_frame; f; f = f->up) n++;
+    if (depth < 0 || depth >= n) throw_new(cls_ValueError, "call stack is not deep enough");
+    fa = (Frame **)xmalloc(sizeof(Frame *) * (size_t)n);
+    for (f = cur_frame, i = 0; f; f = f->up) fa[i++] = f;
+    for (i = n - 1; i >= depth; i--) {
+        Value fnv, gpv, cn, ld;
+        int line = i == 0 ? cur_line : fa[i]->line;
+        fnv = fa[i]->fn ? mkobj(fa[i]->fn, T_FUNC) : NONE_V;
+        gpv = fa[i]->gp ? mkobj(fa[i]->gp, T_STR) : NONE_V;
+        cn = fa[i]->ns ? mkobj(fa[i]->ns->name, T_STR) : NONE_V;
+        VPUSH(prev);
+        ld = frame_locals_dict(fa[i]);
+        VPUSH(ld);
+        prev = make_frame_obj(fnv, gpv, cn, line, prev, ld);
+        vsp -= 2;
+    }
+    free(fa);
+    return prev;
+}
+
+/* ---- traceback objects ------------------------------------------------ */
+static Value make_tb_obj(Value frame, int line, Value next)
+{
+    Inst *in = new_inst(cls_tb);
+    Value iv = mkobj(in, T_INST);
+    rt_set(in, "tb_frame", frame);
+    rt_set(in, "tb_lineno", mkint(line));
+    rt_set(in, "tb_next", next);
+    rt_set(in, "tb_lasti", mkint(0));
+    return iv;
+}
+BI(tb_repr)
+{
+    Inst *in = AS_INST(A(0));
+    Value *ln = amap_get(&in->a, intern_c("tb_lineno"));
+    char b[200];
+    sprintf(b, "<traceback object at %p>", (void *)in);
+    (void)ln;
+    return mkcstr(b);
+}
+/* the traceback of an exception from its hidden raw entries (outermost first) */
+static Value tb_chain(List *raw)
+{
+    long n = raw->n / 4, i;
+    List *fl = list_new(n);
+    Value flv = mklist(fl), prev = NONE_V, tb = NONE_V, e;
+    VPUSH(flv);
+    for (i = 0; i < n; i++) {
+        Value ld = mkobj(dict_new(), T_DICT);
+        VPUSH(ld);
+        prev = make_frame_obj(raw->a[4 * i], raw->a[4 * i + 1], raw->a[4 * i + 2],
+                              (int)raw->a[4 * i + 3].u.i, prev, ld);
+        vsp--;
+        list_push(fl, prev);
+    }
+    for (i = n - 1; i >= 0; i--) {
+        e = raw->a[4 * i + 3];
+        tb = make_tb_obj(fl->a[i], (int)e.u.i, tb);
+        VPUSH(tb);
+        vsp--;
+    }
+    vsp--;
+    return tb;
+}
+
+/* code object of a frame object: function, class body or module */
+static Value frame_code(Inst *in)
+{
+    List *p = AS_LIST(in->pay);
+    Value *ln = amap_get(&in->a, intern_c("f_lineno"));
+    if (p->a[0].t == T_FUNC) return code_for_func(AS_FUNC(p->a[0]));
+    if (p->a[2].t == T_STR)
+        return make_code(NULL, AS_STR(p->a[2]), p->a[1].t == T_STR ? AS_STR(p->a[1]) : main_gp,
+                         ln ? (int)ln->u.i : 1, NULL);
+    return make_code("<module>", NULL, p->a[1].t == T_STR ? AS_STR(p->a[1]) : main_gp, 1, NULL);
+}
+/* attributes computed on demand: e.__traceback__ and f_code / f_globals / f_builtins of frames */
+static int rt_inst_attr(Inst *in, Str *nm, Value *out)
+{
+    if (in->cls != cls_frame) {
+        Value *raw = amap_get(&in->a, S_tbraw), tb;
+        if (!raw || raw->t != T_TUPLE) { *out = NONE_V; return 1; }
+        tb = tb_chain(AS_LIST(*raw));
+        amap_set(&in->a, S_traceback, tb);
+        *out = tb;
+        return 1;
+    }
+    if (strcmp(nm->s, "f_code") == 0) {
+        Value c = frame_code(in);
+        amap_set(&in->a, nm, c);
+        *out = c;
+        return 1;
+    }
+    if (strcmp(nm->s, "f_globals") == 0) {
+        List *p = AS_LIST(in->pay);
+        *out = globals_of(p->a[1].t == T_STR ? AS_STR(p->a[1]) : main_gp);
+        return 1;
+    }
+    if (strcmp(nm->s, "f_builtins") == 0) {
+        *out = mkobj(dict_new(), T_DICT);
+        return 1;
+    }
+    return 0;
+}
+/* BaseException.with_traceback(tb) */
+BI(exc_with_traceback)
+{
+    need(x, 2, 2, "with_traceback");
+    if (A(0).t == T_INST) amap_set(&AS_INST(A(0))->a, S_traceback, A(1));
+    return A(0);
+}
+
+/* ---- types.GenericAlias ----------------------------------------------- */
+static void ga_type_repr(Value v, Buf *b)
+{
+    if (v.t == T_CLASS) {
+        Class *c = AS_CLASS(v);
+        if (c->modname && !(c->modname->len == 8 && memcmp(c->modname->s, "builtins", 8) == 0)) {
+            buf_addn(b, c->modname->s, c->modname->len);
+            buf_addc(b, '.');
+        }
+        buf_addn(b, c->name->s, c->name->len);
+    } else if (v.t == T_INST && v.u.o == Ellipsis_V.u.o) {
+        buf_add(b, "...");
+    } else if (v.t == T_LIST) {
+        long i;
+        buf_addc(b, '[');
+        for (i = 0; i < AS_LIST(v)->n; i++) {
+            if (i) buf_add(b, ", ");
+            ga_type_repr(AS_LIST(v)->a[i], b);
+        }
+        buf_addc(b, ']');
+    } else {
+        Value r = py_repr(v);
+        buf_addn(b, AS_STR(r)->s, AS_STR(r)->len);
+    }
+}
+static Value generic_alias(Value origin, Value params)
+{
+    Inst *in = new_inst(cls_GenericAlias);
+    Value iv = mkobj(in, T_INST), args;
+    VPUSH(iv);
+    if (params.t == T_TUPLE) args = params;
+    else args = mktuple_from(&params, 1);
+    rt_set(in, "__origin__", origin);
+    rt_set(in, "__args__", args);
+    rt_set(in, "__parameters__", mktuple_from(NULL, 0));
+    rt_set(in, "__unpacked__", FALSE_V);
+    vsp--;
+    return iv;
+}
+BI(ga_new)
+{
+    need(x, 2, 2, "GenericAlias");
+    return generic_alias(A(0), A(1));
+}
+BI(ga_repr)
+{
+    Inst *in = AS_INST(A(0));
+    Value *o = amap_get(&in->a, intern_c("__origin__"));
+    Value *a = amap_get(&in->a, intern_c("__args__"));
+    Buf b;
+    long i;
+    buf_init(&b);
+    ga_type_repr(*o, &b);
+    buf_addc(&b, '[');
+    if (AS_LIST(*a)->n == 0) buf_add(&b, "()");
+    for (i = 0; i < AS_LIST(*a)->n; i++) {
+        if (i) buf_add(&b, ", ");
+        ga_type_repr(AS_LIST(*a)->a[i], &b);
+    }
+    buf_addc(&b, ']');
+    return buf_value(&b);
+}
+BI(ga_eq)
+{
+    Value *o1, *a1, *o2, *a2;
+    if (A(1).t != T_INST || AS_INST(A(1))->cls != cls_GenericAlias) return FALSE_V;
+    o1 = amap_get(&AS_INST(A(0))->a, intern_c("__origin__"));
+    a1 = amap_get(&AS_INST(A(0))->a, intern_c("__args__"));
+    o2 = amap_get(&AS_INST(A(1))->a, intern_c("__origin__"));
+    a2 = amap_get(&AS_INST(A(1))->a, intern_c("__args__"));
+    return mkbool(py_eq(*o1, *o2) && py_eq(*a1, *a2));
+}
+BI(ga_hash)
+{
+    Value *o = amap_get(&AS_INST(A(0))->a, intern_c("__origin__"));
+    Value *a = amap_get(&AS_INST(A(0))->a, intern_c("__args__"));
+    return mkint((long)(py_hash(*o) ^ (py_hash(*a) * 3UL)) & 0x3fffffffL);
+}
+BI(ga_call)
+{
+    Value *o = amap_get(&AS_INST(A(0))->a, intern_c("__origin__"));
+    return call_value(*o, x->n - 1, x->a + 1, x->nk, x->kw);
+}
+/* attributes not found on the alias come from the origin (list[int].__name__) */
+BI(ga_getattr)
+{
+    Value *o = amap_get(&AS_INST(A(0))->a, intern_c("__origin__"));
+    if (A(1).t != T_STR) return NONE_V;
+    return get_attr(*o, intern_str(AS_STR(A(1))));
+}
+BI(ga_mro_entries)
+{
+    Value *o = amap_get(&AS_INST(A(0))->a, intern_c("__origin__"));
+    return mktuple_from(o, 1);
+}
+
+static void introspect_init(void)
+{
+    cls_code = mod_class("code", cls_object, "builtins");
+    cls_frame = mod_class("frame", cls_object, "builtins");
+    cls_tb = mod_class("traceback", cls_object, "builtins");
+    cls_GenericAlias = mod_class("GenericAlias", cls_object, "types");
+    cls_GenericAlias->ctor = ga_new;
+    def_bi(cls_code, "__repr__", code_repr);
+    def_bi(cls_frame, "__repr__", frame_repr);
+    def_bi(cls_tb, "__repr__", tb_repr);
+    def_bi(cls_GenericAlias, "__repr__", ga_repr);
+    def_bi(cls_GenericAlias, "__eq__", ga_eq);
+    def_bi(cls_GenericAlias, "__hash__", ga_hash);
+    def_bi(cls_GenericAlias, "__call__", ga_call);
+    def_bi(cls_GenericAlias, "__getattr__", ga_getattr);
+    def_bi(cls_GenericAlias, "__mro_entries__", ga_mro_entries);
+    def_bi(cls_BaseException, "with_traceback", exc_with_traceback);
 }
 /* ===== p7_mod.c ===== */
 /* =========================================================================
@@ -28380,11 +29776,7 @@ BI(m_dist)
 /* ---- sys / time ------------------------------------------------------- */
 static Value std_file(FILE *fp, int out)
 {
-    File *f = (File *)gc_alloc(sizeof(File), T_FILE);
-    f->fp = fp;
-    f->closed = 0;
-    f->out = out;
-    return mkobj(f, T_FILE);
+    return new_file_obj(fp, out, 0, NONE_V, fp == stdin ? "r" : "w");
 }
 BI(t_time)
 {
@@ -28412,6 +29804,53 @@ BI(t_clock_ns)
 {
     (void)x;
     return ns_value(host_clock());
+}
+/* _gmtime(secs) / _localtime(secs): (year, month, day, hour, minute, second, weekday, yearday,
+   isdst, zone, offset) like the sequence of time.struct_time; the pure Python overlay pylib/time.py
+   wraps them */
+static Value tm_tuple(Args *x, int local)
+{
+    long f[10];
+    char zone[64];
+    Value v[11];
+    double secs;
+    int i;
+    need(x, 1, 1, "gmtime");
+    secs = floor(dbl_arg(x, 0));
+    if (!host_timeparts(secs, local, f, zone, (int)sizeof(zone)))
+        throw_new(cls_OverflowError, "timestamp out of range for platform time_t");
+    for (i = 0; i < 9; i++) v[i] = mkint(f[i]);
+    v[9] = mkcstr(zone);
+    v[10] = mkint(f[9]);
+    return mktuple_from(v, 11);
+}
+BI(t_gmtime_raw) { return tm_tuple(x, 0); }
+BI(t_localtime_raw) { return tm_tuple(x, 1); }
+BI(t_mktime_raw)
+{
+    long f[9];
+    double out;
+    int i;
+    Value t;
+    need(x, 1, 1, "mktime");
+    t = unpay(A(0));
+    if (t.t != T_TUPLE || AS_LIST(t)->n < 9)
+        throw_new(cls_TypeError, "mktime(): illegal time tuple argument");
+    for (i = 0; i < 9; i++) f[i] = to_index(AS_LIST(t)->a[i]);
+    if (!host_mktime(f, &out)) throw_new(cls_OverflowError, "mktime argument out of range");
+    return mkfloat(out);
+}
+BI(t_tzinfo_raw)
+{
+    long tz, alt;
+    int dst;
+    char sn[64], dn[64];
+    Value v[5];
+    (void)x;
+    if (!host_tzinfo(&tz, &alt, &dst, sn, dn, (int)sizeof(sn)))
+        throw_new(cls_OSError, "time zone information is not available");
+    v[0] = mkint(tz); v[1] = mkint(alt); v[2] = mkint(dst); v[3] = mkcstr(sn); v[4] = mkcstr(dn);
+    return mktuple_from(v, 5);
 }
 BI(t_sleep)
 {
@@ -28470,10 +29909,10 @@ static struct { const char *name; Class **var; Class **base; } exc_table[] = {
     { "BufferError", &cls_dummy_exc[6], &cls_Exception },
     { "SystemError", &cls_dummy_exc[7], &cls_Exception },
     { "StopAsyncIteration", &cls_dummy_exc[8], &cls_Exception },
-    { "PermissionError", &cls_dummy_exc[9], &cls_OSError },
-    { "FileExistsError", &cls_dummy_exc[10], &cls_OSError },
-    { "IsADirectoryError", &cls_dummy_exc[11], &cls_OSError },
-    { "NotADirectoryError", &cls_dummy_exc[12], &cls_OSError },
+    { "PermissionError", &cls_PermissionError, &cls_OSError },
+    { "FileExistsError", &cls_FileExistsError, &cls_OSError },
+    { "IsADirectoryError", &cls_IsADirectoryError, &cls_OSError },
+    { "NotADirectoryError", &cls_NotADirectoryError, &cls_OSError },
     { "TimeoutError", &cls_TimeoutError, &cls_OSError },
     { "ConnectionError", &cls_ConnectionError, &cls_OSError },
     { "ConnectionRefusedError", &cls_ConnectionRefusedError, &cls_ConnectionError },
@@ -28541,6 +29980,10 @@ static void init_runtime(int argc, char **argv)
     SN(S_getattr, "__getattr__"); SN(S_format, "__format__"); SN(S_self, "self");
     SN(S_super, "super"); SN(S_setattr, "__setattr__"); SN(S_new, "__new__");
     SN(S_module, "__module__"); SN(S_reversed, "__reversed__");
+    SN(S_tbraw, "__tbraw__"); SN(S_traceback, "__traceback__");
+    SN(S_cause, "__cause__"); SN(S_context, "__context__"); SN(S_suppress, "__suppress_context__");
+    SN(S_init_subclass, "__init_subclass__"); SN(S_class_getitem, "__class_getitem__");
+    SN(S_metaclass, "metaclass");
 #undef SN
     /* classes */
     cls_object = new_class("object", NULL, CF_BUILTIN);
@@ -28564,6 +30007,8 @@ static void init_runtime(int argc, char **argv)
     cls_iter = mk_type("iterator", cls_object, NULL);
     cls_prop = mk_type("property", cls_object, bi_property);
     cls_file = mk_type("TextIOWrapper", cls_object, NULL);
+    cls_fileb = mk_type("BufferedReader", cls_object, NULL);
+    cls_filew = mk_type("BufferedWriter", cls_object, NULL);
     cls_cell = mk_type("cell", cls_object, NULL);
     cls_smeth = mk_type("staticmethod", cls_object, bi_staticmethod);
     cls_cmeth = mk_type("classmethod", cls_object, bi_classmethod);
@@ -28617,6 +30062,10 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_object, "__new__", nat_new);
     def_bi(cls_object, "__setattr__", obj_setattr);
     obj_str_v = *amap_get(&cls_object->ns, S_str);
+    amap_set(&cls_type->ns, S_new, mkbuiltin("__new__", type_new));
+    def_bi(cls_type, "__call__", type_call); def_bi(cls_type, "__init__", type_init);
+    amap_set(&cls_object->ns, S_init_subclass,
+             mk_prop(T_CMETH, mkbuiltin("__init_subclass__", obj_init_subclass), UNSET_V));
 
     /* str */
     def_bi(cls_str, "upper", s_upper); def_bi(cls_str, "lower", s_lower);
@@ -28769,6 +30218,24 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_file, "writelines", fl_writelines); def_bi(cls_file, "flush", fl_flush);
     def_bi(cls_file, "close", fl_close); def_bi(cls_file, "__enter__", fl_enter);
     def_bi(cls_file, "__exit__", fl_exit);
+    {
+        Class *fk[3];
+        int k;
+        fk[0] = cls_file; fk[1] = cls_fileb; fk[2] = cls_filew;
+        for (k = 0; k < 3; k++) {
+            if (k) {
+                def_bi(fk[k], "read", fl_read); def_bi(fk[k], "readline", fl_readline);
+                def_bi(fk[k], "readlines", fl_readlines); def_bi(fk[k], "write", fl_write);
+                def_bi(fk[k], "writelines", fl_writelines); def_bi(fk[k], "flush", fl_flush);
+                def_bi(fk[k], "close", fl_close); def_bi(fk[k], "__enter__", fl_enter);
+                def_bi(fk[k], "__exit__", fl_exit);
+            }
+            def_bi(fk[k], "seek", fl_seek); def_bi(fk[k], "tell", fl_tell);
+            def_bi(fk[k], "readable", fl_readable); def_bi(fk[k], "writable", fl_writable);
+            def_bi(fk[k], "seekable", fl_seekable); def_bi(fk[k], "isatty", fl_isatty);
+            def_bi(fk[k], "fileno", fl_fileno); def_bi(fk[k], "readinto", fl_readinto);
+        }
+    }
 
     bytes_init();
     set_global(intern_c("bytearray"), mkobj(cls_bytearray, T_CLASS));
@@ -28846,12 +30313,15 @@ static void init_runtime(int argc, char **argv)
     struct_init();
     cmath_init();
     sock_init();
+    introspect_init();
     m = new_module("time");
     mod_def(m, "time", t_time); mod_def(m, "perf_counter", t_clock);
     mod_def(m, "monotonic", t_clock); mod_def(m, "process_time", t_clock);
     mod_def(m, "sleep", t_sleep);
     mod_def(m, "time_ns", t_time_ns); mod_def(m, "perf_counter_ns", t_clock_ns);
     mod_def(m, "monotonic_ns", t_clock_ns); mod_def(m, "process_time_ns", t_clock_ns);
+    mod_def(m, "_gmtime", t_gmtime_raw); mod_def(m, "_localtime", t_localtime_raw);
+    mod_def(m, "_mktime", t_mktime_raw); mod_def(m, "_tzinfo", t_tzinfo_raw);
     m = new_module("sys");
     sys_mod = m;
     av = list_new(argc + 1);
@@ -28866,6 +30336,7 @@ static void init_runtime(int argc, char **argv)
     mod_val(m, "version", mkcstr("3.12.0 (C89 subset interpreter)"));
     mod_val(m, "platform", mkcstr("c89"));
     mod_def(m, "exc_info", bi_exc_info);
+    mod_def(m, "_getframe", sys_getframe);
     mod_val(m, "modules", sys_modules_v);
     init_sys_path(sargv0);
     mod_val(m, "path", sys_path_v);
@@ -28890,6 +30361,10 @@ static void init_runtime(int argc, char **argv)
         mod_def(m, "getenv", os_getenv); mod_def(m, "getcwd", os_getcwd);
         mod_def(m, "remove", os_remove); mod_def(m, "unlink", os_remove);
         mod_def(m, "rename", os_rename);
+        mod_def(m, "urandom", os_urandom);
+        mod_def(m, "listdir", os_listdir); mod_def(m, "mkdir", os_mkdir);
+        mod_def(m, "rmdir", os_rmdir); mod_def(m, "chdir", os_chdir);
+        mod_def(m, "getpid", os_getpid); mod_def(m, "getppid", os_getppid);
         mod_val(m, "sep", mkcstr("/")); mod_val(m, "pathsep", mkcstr(":"));
         mod_val(m, "linesep", mkcstr("\n")); mod_val(m, "name", mkcstr("posix"));
         mod_val(m, "curdir", mkcstr(".")); mod_val(m, "pardir", mkcstr(".."));
@@ -28899,6 +30374,7 @@ static void init_runtime(int argc, char **argv)
         mod_def(pm, "join", osp_join); mod_def(pm, "exists", osp_exists);
         mod_def(pm, "basename", osp_basename); mod_def(pm, "dirname", osp_dirname);
         mod_def(pm, "split", osp_split); mod_def(pm, "splitext", osp_splitext);
+        mod_def(pm, "normcase", osp_normcase);
         mod_def(pm, "isabs", osp_isabs); mod_def(pm, "normpath", osp_normpath);
         mod_def(pm, "abspath", osp_abspath); mod_def(pm, "expanduser", osp_expanduser);
         mod_def(pm, "isdir", osp_isdir); mod_def(pm, "isfile", osp_isfile);
@@ -33510,6 +34986,52 @@ BI(sk_accept)
     vsp--;
     return nv;
 }
+BI(sk_makefile)
+{
+    Inst *in = sock_self(x);
+    Value v;
+    const char *md = "r";
+    char m[6];
+    int k = 0, rd = 0, wr = 0, bin = 0, i;
+    FILE *fp;
+    need(x, 1, 6, "makefile");
+    v = x->n > 1 ? A(1) : kwget(x, "mode");
+    if (v.t == T_STR) md = AS_STR(v)->s;
+    else if (v.t != T_UNSET && v.t != T_NONE) throw_new(cls_TypeError, "mode must be a str");
+    for (i = 0; md[i]; i++) {
+        if (md[i] == 'r') rd = 1;
+        else if (md[i] == 'w') wr = 1;
+        else if (md[i] == 'b') bin = 1;
+        else throw_new(cls_ValueError, "invalid mode '%.20s' (only r, w, b allowed)", md);
+    }
+    if (!rd && !wr) throw_new(cls_ValueError, "invalid mode '%.20s' (only r, w, b allowed)", md);
+    m[k++] = (rd && wr) ? 'r' : (rd ? 'r' : 'w');
+    if (rd && wr) m[k++] = '+';
+    if (bin) m[k++] = 'b';
+    m[k] = 0;
+    fp = host_sock_fdopen(sock_getfd(in), m);
+    if (!fp) raise_os(host_sock_err);
+    return new_file_obj(fp, 0, bin ? (rd && !wr ? 1 : 2) : 0, NONE_V, m);
+}
+BI(m_socketpair)
+{
+    int a, b;
+    Inst *ia, *ib;
+    Value va, vb, tv[2];
+    need(x, 0, 3, "socketpair");
+    sock_need_host();
+    if (host_sock_pair(&a, &b) < 0) raise_os(host_sock_err);
+    ia = new_inst(cls_socket); va = mkobj(ia, T_INST); VPUSH(va);
+    ib = new_inst(cls_socket); vb = mkobj(ib, T_INST); VPUSH(vb);
+    sock_attach(ia, a); sock_attach(ib, b);
+    amap_set(&ia->a, intern_c("family"), mkint(1)); amap_set(&ib->a, intern_c("family"), mkint(1));
+    amap_set(&ia->a, intern_c("type"), mkint(1)); amap_set(&ib->a, intern_c("type"), mkint(1));
+    amap_set(&ia->a, intern_c("proto"), mkint(0)); amap_set(&ib->a, intern_c("proto"), mkint(0));
+    tv[0] = va; tv[1] = vb;
+    va = mktuple_from(tv, 2);
+    vsp -= 2;
+    return va;
+}
 /* one send honouring the timeout; returns the byte count */
 static long sock_send_some(int fd, double to, const char *p, long n)
 {
@@ -33930,7 +35452,7 @@ static void sock_init(void)
 {
     Module *m, *sm;
     static const char *const cn[] = {
-        "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM", "SOCK_DGRAM", "SOL_SOCKET",
+        "AF_UNSPEC", "AF_UNIX", "AF_INET", "AF_INET6", "SOCK_STREAM", "SOCK_DGRAM", "SOL_SOCKET",
         "SO_REUSEADDR", "SO_KEEPALIVE", "SO_RCVBUF", "SO_SNDBUF", "SO_ERROR", "SO_BROADCAST",
         "IPPROTO_TCP", "TCP_NODELAY", "SHUT_RD", "SHUT_WR", "SHUT_RDWR", "SOMAXCONN",
         "AI_PASSIVE", NULL
@@ -33957,6 +35479,7 @@ static void sock_init(void)
     def_bi(cls_socket, "getsockname", sk_getsockname);
     def_bi(cls_socket, "getpeername", sk_getpeername);
     def_bi(cls_socket, "__repr__", sk_repr);
+    def_bi(cls_socket, "makefile", sk_makefile);
     mod_val(m, "socket", mkobj(cls_socket, T_CLASS));
     mod_val(m, "SocketType", mkobj(cls_socket, T_CLASS));
     cls_gaierror = mod_class("gaierror", cls_OSError, "socket");
@@ -33979,6 +35502,7 @@ static void sock_init(void)
     mod_def(m, "getdefaulttimeout", m_getdefaulttimeout);
     mod_def(m, "setdefaulttimeout", m_setdefaulttimeout);
     mod_def(m, "create_connection", m_create_connection);
+    mod_def(m, "socketpair", m_socketpair);
     sm = new_module("select");
     mod_def(sm, "select", sel_select);
 }

@@ -1,5 +1,5 @@
-# traceback for interpreters without frame objects: exception text formatting is exact, stack information
-# is not available (tracebacks are empty).
+# traceback: exception text formatting is exact.  Stack information comes from __traceback__ and
+# sys._getframe where the interpreter provides them (the C interpreter does); otherwise tracebacks are empty.
 import sys as _sys
 
 __all__ = ['extract_stack', 'extract_tb', 'format_exception', 'format_exception_only', 'format_list',
@@ -28,27 +28,62 @@ def format_tb(tb, limit=None):
 
 
 def extract_tb(tb, limit=None):
-    return StackSummary()
+    return StackSummary._extract_from_extended_iter(walk_tb(tb), limit)
 
 
 def walk_stack(f):
-    return iter(())
+    if f is None:
+        getf = getattr(_sys, '_getframe', None)
+        f = getf(1) if getf is not None else None
+    while f is not None:
+        yield f, f.f_lineno
+        f = f.f_back
 
 
 def walk_tb(tb):
-    return iter(())
+    while tb is not None:
+        yield tb.tb_frame, tb.tb_lineno
+        tb = tb.tb_next
 
 
 def extract_stack(f=None, limit=None):
-    return StackSummary()
+    if f is None:
+        getf = getattr(_sys, '_getframe', None)
+        f = getf(1) if getf is not None else None
+    stack = StackSummary._extract_from_extended_iter(walk_stack(f), limit)
+    stack.reverse()
+    return stack
 
 
 def format_stack(f=None, limit=None):
-    return []
+    if f is None:
+        getf = getattr(_sys, '_getframe', None)
+        f = getf(1) if getf is not None else None
+    return format_list(extract_stack(f, limit=limit))
 
 
 def print_stack(f=None, limit=None, file=None):
-    pass
+    if f is None:
+        getf = getattr(_sys, '_getframe', None)
+        f = getf(1) if getf is not None else None
+    print_list(extract_stack(f, limit=limit), file=file)
+
+
+_cache = {}
+
+
+def _getline(filename, lineno):
+    lines = _cache.get(filename)
+    if lines is None:
+        try:
+            with open(filename) as fh:
+                lines = fh.read().split('\n')
+        except Exception:
+            lines = []
+        _cache[filename] = lines
+    if 1 <= lineno <= len(lines):
+        return lines[lineno - 1]
+    return ''
 
 
 def clear_frames(tb):
@@ -66,7 +101,11 @@ class FrameSummary:
 
     @property
     def line(self):
-        return self._line
+        if self._line is None:
+            if self.lineno is None:
+                return None
+            self._line = _getline(self.filename, self.lineno)
+        return self._line.strip()
 
     def __eq__(self, other):
         if isinstance(other, FrameSummary):
@@ -91,7 +130,19 @@ class FrameSummary:
 class StackSummary(list):
     @classmethod
     def extract(klass, frame_gen, *, limit=None, lookup_lines=True, capture_locals=False):
-        return klass()
+        return klass._extract_from_extended_iter(frame_gen, limit)
+
+    @classmethod
+    def _extract_from_extended_iter(klass, frame_gen, limit):
+        result = klass()
+        n = 0
+        for f, lineno in frame_gen:
+            if limit is not None and limit >= 0 and n >= limit:
+                break
+            co = f.f_code
+            result.append(FrameSummary(co.co_filename, lineno, co.co_name))
+            n += 1
+        return result
 
     @classmethod
     def from_list(klass, a_list):
@@ -162,10 +213,25 @@ class TracebackException:
                  compact=False, max_group_width=15, max_group_depth=10, _seen=None):
         self.exc_type = exc_type
         self._exc_value = exc_value
+        if exc_traceback is None and exc_value is not None:
+            exc_traceback = getattr(exc_value, '__traceback__', None)
         self.stack = StackSummary()
+        if exc_traceback is not None:
+            self.stack = extract_tb(exc_traceback, limit=limit)
         self.__cause__ = None
         self.__context__ = None
         self.__suppress_context__ = False
+        if _seen is None:
+            _seen = set()
+        if exc_value is not None:
+            _seen.add(id(exc_value))
+            c = getattr(exc_value, '__cause__', None)
+            x = getattr(exc_value, '__context__', None)
+            if c is not None and id(c) not in _seen:
+                self.__cause__ = TracebackException(type(c), c, None, limit=limit, _seen=_seen)
+            if x is not None and id(x) not in _seen:
+                self.__context__ = TracebackException(type(x), x, None, limit=limit, _seen=_seen)
+            self.__suppress_context__ = bool(getattr(exc_value, '__suppress_context__', False))
         self.exceptions = None
         self._str = _some_str(exc_value)
         self.exc_type_str = _type_name(exc_type) if exc_type is not None else None
@@ -178,6 +244,15 @@ class TracebackException:
         yield _format_final_exc_line(self.exc_type_str, self._exc_value if self._str else None)
 
     def format(self, *, chain=True):
+        if chain:
+            if self.__cause__ is not None:
+                for line in self.__cause__.format(chain=chain):
+                    yield line
+                yield '\nThe above exception was the direct cause of the following exception:\n\n'
+            elif self.__context__ is not None and not self.__suppress_context__:
+                for line in self.__context__.format(chain=chain):
+                    yield line
+                yield '\nDuring handling of the above exception, another exception occurred:\n\n'
         if self.stack:
             yield 'Traceback (most recent call last):\n'
             for s in self.stack.format():

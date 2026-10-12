@@ -32,6 +32,10 @@ class EnumMeta(type):
     def __call__(cls, value, *args):
         return cls._lookup(value)
 
+    @property
+    def __members__(cls):
+        return dict(cls._member_map_)
+
 
 EnumType = EnumMeta
 
@@ -130,10 +134,6 @@ class Enum(metaclass=EnumMeta):
     @classmethod
     def _members(cls):
         return list(cls._member_list_)
-
-    @property
-    def __members__(self):
-        return dict(self._member_map_)
 
     def __repr__(self):
         return "<%s.%s: %r>" % (type(self).__name__, self._name_, self._value_)

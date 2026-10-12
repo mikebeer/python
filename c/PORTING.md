@@ -68,12 +68,13 @@ uses only ISO C (`time`, `clock`, `fopen`, `getenv`).
 | `host_read_file` | whole file (or embedded module) into memory | `fopen`/`getc` | |
 | `host_fopen` | Python `open()` | `fopen` | |
 | `host_file_exists/isdir/isfile/size/remove/rename` | `os.path.*`, `os.remove`, `os.rename` | stdio | |
+| `host_listdir`, `host_mkdir/rmdir/chdir`, `host_getpid/getppid` | `os.listdir`, `os.mkdir`, `os.rmdir`, `os.chdir`, `os.getpid`, `os.getppid` (names NUL separated in one malloc'ed buffer) | `opendir`/`mkdir`/`chdir`/`getpid` with `PY_POSIX` | fail with `errno = ENOSYS`; `getpid` returns 1 |
+| `host_timeparts`, `host_mktime`, `host_tzinfo`, `host_days_from_civil` | the C library calendar behind `time.gmtime/localtime/mktime/timezone/tzname` (fields year ... gmtoff, zone name) | `gmtime`/`localtime`/`mktime`/`tzset` with `PY_POSIX` | return 0: `pylib/time.py` then falls back to `_pytime.py` (UTC) |
 | `host_getenv`, `host_getcwd`, `host_environ` | `os.getenv`, `os.getcwd`, `os.environ`, `$PYLIB` | `getenv`; cwd and environ only with `PY_POSIX` | |
 | `host_isatty_stdin` | REPL prompt detection | `isatty(0)` with `PY_POSIX` | |
 | `host_time`, `host_clock`, `host_sleep`, `host_seed`, `host_urandom` | `time.time`, `perf_counter`, `sleep`, random seeding (`host_urandom` fills a buffer from `/dev/urandom`: unseeded `random`, numpy `SeedSequence()` and `SystemRandom`) | `gettimeofday`, `nanosleep` with `PY_POSIX`; else `time()` / `clock()` busy wait | |
 
-Not used anywhere, so no adapter exists: `popen`, `system`, directory
-listing (there is no `os.listdir`), threads. Signals: only `SIGPIPE` is
+Not used anywhere, so no adapter exists: `popen`, `system`, threads. Signals: only `SIGPIPE` is
 ignored (with `PY_POSIX`, on the first socket).
 
 ### Sockets (`host_sock_*`, last section of `p0_os.c`)
@@ -96,6 +97,7 @@ it has to supply:
 | `host_sock_blocking(fd, on)` | switch a handle to non-blocking mode (used for timeouts) |
 | `host_sock_select(n, fds, modes, ready, timeout)` | wait for readable (1) / writable (2) handles; timeout < 0 waits forever; a stack with no select can poll in a loop with `host_sleep` |
 | `host_sock_getname/setopt/getopt/soerror/shutdown` | `getsockname`, `getpeername`, options (`SO_REUSEADDR` ...), the pending connect error |
+| `host_sock_pair(&a, &b)`, `host_sock_fdopen(fd, mode)` | `socket.socketpair()` (two connected handles); `sock.makefile()` (a stdio stream on a duplicate of the handle, `NULL` when unsupported) |
 | `host_sock_hostname`, `host_sock_resolve(name, ip)` | local host name; name or dotted quad to 4 bytes |
 | `host_sock_errkind(e)`, `host_sock_strerror(e)` | map the host error number to the Python exception class (refused, reset, aborted, broken pipe, would block, interrupted, timed out, in progress) and its text |
 | `host_sock_const(name, &v)` | numeric values of `AF_INET`, `SOCK_STREAM`, `SOL_SOCKET`, `SO_*` ... |

@@ -21,6 +21,19 @@ def _g():
 
 
 GeneratorType = type(_g())
+try:
+    CodeType = type(_f.__code__)
+    try:
+        raise ValueError
+    except ValueError as _e:
+        TracebackType = type(_e.__traceback__)
+        FrameType = type(_e.__traceback__.tb_frame)
+except AttributeError:
+    pass
+try:
+    GenericAlias = type(list[int])
+except TypeError:
+    pass
 ModuleType = type(__import__("sys"))
 
 

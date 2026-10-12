@@ -1,0 +1,28 @@
+2 3 ['a', 'b', 'c']
+4
+False ['b', 'c', 'd']
+True 5
+26 ['z']
+['a\n', 'b\r\n', 'c'] ['a\n', 'b\n'] ['x', 'y']
+[b'a\n', b'b\n']
+255 5 42 -7 12
+Q False
+Q
+[('A', 'a'), ('B', 'b'), ('C', None)]
+list[int] dict[str, int] tuple[int, ...] <class 'list'> (<class 'int'>,)
+True dict[str, int]
+('box', <class 'int'>)
+[<Color.RED: 1>, <Color.GREEN: 2>, <Color.BLUE: 3>] 3 True Color.GREEN Color.BLUE
+['RED', 'GREEN', 'BLUE'] ['RED', 'GREEN', 'BLUE']
+1 2 3 
+10 2
+bytes 16 b'\x00\x01\x02' b'\x00\xfftail'
+b'\x00\xffta' 14
+b'\x00\x01\x02' b'\x03\x04'
+b'\x00\x01XY\x04'
+rb True False
+True
+ZeroDivisionError('division by zero') ZeroDivisionError('division by zero') True
+None ZeroDivisionError('division by zero') False
+None ZeroDivisionError('division by zero') True
+None None False

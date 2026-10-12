@@ -2705,6 +2705,7 @@ static void np_init(void)
     c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
     c->ctor = np_array; c->flags = CF_BUILTIN;
     c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL; c->modname = NULL;
+    c->meta = NULL;
     cls_ndarray = c;
     def_bi(cls_ndarray, "tolist", nd_tolist); def_bi(cls_ndarray, "copy", nd_copy);
     def_bi(cls_ndarray, "reshape", nd_reshape); def_bi(cls_ndarray, "flatten", nd_flatten);

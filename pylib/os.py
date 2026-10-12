@@ -94,8 +94,14 @@ def getpid():
 
 
 def urandom(n):
-    import pyrandom
-    return pyrandom.Random().randbytes(n)
+    # no operating system entropy source: bytes derived from the clock (the C interpreter has a native one)
+    import time as _time
+    x = _time.time_ns() ^ (id(object()) << 20) ^ 0x9E3779B97F4A7C15
+    out = bytearray()
+    while len(out) < n:
+        x = (x * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+        out.append((x >> 33) & 255)
+    return bytes(out)
 
 
 def strerror(code):
@@ -164,3 +170,16 @@ def removedirs(name):
 
 def replace(src, dst):
     return rename(src, dst)
+
+
+# Prefer the native versions where the interpreter provides them (C interpreter built with -DPY_POSIX).
+if hasattr(_os, 'listdir'):
+    listdir = _os.listdir
+if hasattr(_os, 'mkdir'):
+    mkdir = _os.mkdir
+if hasattr(_os, 'rmdir'):
+    rmdir = _os.rmdir
+if hasattr(_os, 'getpid'):
+    getpid = _os.getpid
+if hasattr(_os, 'urandom'):
+    urandom = _os.urandom

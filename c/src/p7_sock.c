@@ -327,6 +327,52 @@ BI(sk_accept)
     vsp--;
     return nv;
 }
+BI(sk_makefile)
+{
+    Inst *in = sock_self(x);
+    Value v;
+    const char *md = "r";
+    char m[6];
+    int k = 0, rd = 0, wr = 0, bin = 0, i;
+    FILE *fp;
+    need(x, 1, 6, "makefile");
+    v = x->n > 1 ? A(1) : kwget(x, "mode");
+    if (v.t == T_STR) md = AS_STR(v)->s;
+    else if (v.t != T_UNSET && v.t != T_NONE) throw_new(cls_TypeError, "mode must be a str");
+    for (i = 0; md[i]; i++) {
+        if (md[i] == 'r') rd = 1;
+        else if (md[i] == 'w') wr = 1;
+        else if (md[i] == 'b') bin = 1;
+        else throw_new(cls_ValueError, "invalid mode '%.20s' (only r, w, b allowed)", md);
+    }
+    if (!rd && !wr) throw_new(cls_ValueError, "invalid mode '%.20s' (only r, w, b allowed)", md);
+    m[k++] = (rd && wr) ? 'r' : (rd ? 'r' : 'w');
+    if (rd && wr) m[k++] = '+';
+    if (bin) m[k++] = 'b';
+    m[k] = 0;
+    fp = host_sock_fdopen(sock_getfd(in), m);
+    if (!fp) raise_os(host_sock_err);
+    return new_file_obj(fp, 0, bin ? (rd && !wr ? 1 : 2) : 0, NONE_V, m);
+}
+BI(m_socketpair)
+{
+    int a, b;
+    Inst *ia, *ib;
+    Value va, vb, tv[2];
+    need(x, 0, 3, "socketpair");
+    sock_need_host();
+    if (host_sock_pair(&a, &b) < 0) raise_os(host_sock_err);
+    ia = new_inst(cls_socket); va = mkobj(ia, T_INST); VPUSH(va);
+    ib = new_inst(cls_socket); vb = mkobj(ib, T_INST); VPUSH(vb);
+    sock_attach(ia, a); sock_attach(ib, b);
+    amap_set(&ia->a, intern_c("family"), mkint(1)); amap_set(&ib->a, intern_c("family"), mkint(1));
+    amap_set(&ia->a, intern_c("type"), mkint(1)); amap_set(&ib->a, intern_c("type"), mkint(1));
+    amap_set(&ia->a, intern_c("proto"), mkint(0)); amap_set(&ib->a, intern_c("proto"), mkint(0));
+    tv[0] = va; tv[1] = vb;
+    va = mktuple_from(tv, 2);
+    vsp -= 2;
+    return va;
+}
 /* one send honouring the timeout; returns the byte count */
 static long sock_send_some(int fd, double to, const char *p, long n)
 {
@@ -747,7 +793,7 @@ static void sock_init(void)
 {
     Module *m, *sm;
     static const char *const cn[] = {
-        "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM", "SOCK_DGRAM", "SOL_SOCKET",
+        "AF_UNSPEC", "AF_UNIX", "AF_INET", "AF_INET6", "SOCK_STREAM", "SOCK_DGRAM", "SOL_SOCKET",
         "SO_REUSEADDR", "SO_KEEPALIVE", "SO_RCVBUF", "SO_SNDBUF", "SO_ERROR", "SO_BROADCAST",
         "IPPROTO_TCP", "TCP_NODELAY", "SHUT_RD", "SHUT_WR", "SHUT_RDWR", "SOMAXCONN",
         "AI_PASSIVE", NULL
@@ -774,6 +820,7 @@ static void sock_init(void)
     def_bi(cls_socket, "getsockname", sk_getsockname);
     def_bi(cls_socket, "getpeername", sk_getpeername);
     def_bi(cls_socket, "__repr__", sk_repr);
+    def_bi(cls_socket, "makefile", sk_makefile);
     mod_val(m, "socket", mkobj(cls_socket, T_CLASS));
     mod_val(m, "SocketType", mkobj(cls_socket, T_CLASS));
     cls_gaierror = mod_class("gaierror", cls_OSError, "socket");
@@ -796,6 +843,7 @@ static void sock_init(void)
     mod_def(m, "getdefaulttimeout", m_getdefaulttimeout);
     mod_def(m, "setdefaulttimeout", m_setdefaulttimeout);
     mod_def(m, "create_connection", m_create_connection);
+    mod_def(m, "socketpair", m_socketpair);
     sm = new_module("select");
     mod_def(sm, "select", sel_select);
 }

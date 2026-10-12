@@ -1,0 +1,8 @@
+b'hello\n' b'world\n'
+b'reply\n'
+'line1\n' 'line2\n'
+'tail' ''
+b'abcdef' b''
+ping
+pong
+ValueError invalid mode 'x' (only r, w, b allowed)

@@ -311,7 +311,7 @@ static Value call_func(Func *fn, int n, Value *a, int nk, Value *kw)
     FuncDef *fd = fn->def->fd;
     Value *save = vsp, *loc;
     Frame fr;
-    int st, i;
+    int st, i, sline = cur_line;
     Value ret;
     if (call_depth >= MAX_DEPTH)
         throw_new(cls_RecursionError, "maximum recursion depth exceeded");
@@ -342,6 +342,8 @@ static Value call_func(Func *fn, int n, Value *a, int nk, Value *kw)
     fr.resuming = 0;
     fr.gp = fd->gpfx;
     fr.up = cur_frame;
+    fr.line = sline;
+    if (cur_frame) cur_frame->line = sline;
     cur_frame = &fr;
     call_depth++;
     GC_POINT();
@@ -349,6 +351,7 @@ static Value call_func(Func *fn, int n, Value *a, int nk, Value *kw)
     ret = st == ST_RETURN ? fr.ret : NONE_V;
     call_depth--;
     cur_frame = fr.up;
+    cur_line = sline;
     vsp = save;
     return ret;
 }
@@ -358,7 +361,7 @@ static int gen_resume(Gen *g, Value *out)
     Frame fr;
     Handler h;
     Value *save = vsp;
-    int depth = call_depth, st = 0;
+    int depth = call_depth, st = 0, sline = cur_line;
     if (g->done) return 0;
     if (g->running) throw_new(cls_ValueError, "generator already executing");
     if (call_depth >= MAX_DEPTH)
@@ -372,6 +375,8 @@ static int gen_resume(Gen *g, Value *out)
     fr.resuming = g->started;
     fr.gp = g->def->fd->gpfx;
     fr.up = cur_frame;
+    fr.line = sline;
+    if (cur_frame) cur_frame->line = sline;
     g->started = 1;
     g->running = 1;
     cur_frame = &fr;
@@ -395,6 +400,7 @@ static int gen_resume(Gen *g, Value *out)
     }
     call_depth = depth;
     cur_frame = fr.up;
+    cur_line = sline;
     vsp = save;
     g->running = 0;
     if (st == ST_YIELD) {
@@ -454,12 +460,42 @@ static void run_init(Value iv, Class *c, int n, Value *a, int nk, Value *kw)
         vsp = base;
     }
 }
-static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
+static Value type_create(Class *meta, Value namev, Value basesv, Value nsv, int nk, Value *kw);
+/* calling a class that derives from `type` (a metaclass): M(name, bases, ns) makes a class */
+static Value meta_call(Class *c, int n, Value *a, int nk, Value *kw)
+{
+    Value *nw = class_find(c, S_new), *ini, r;
+    Value *base = vsp;
+    int i;
+    if (nw && nw->t == T_FUNC) {
+        vcheck(n + 8);
+        VPUSH(*nw);
+        VPUSH(mkobj(c, T_CLASS));
+        for (i = 0; i < n; i++) VPUSH(a[i]);
+        r = call_value(*nw, n + 1, base + 1, nk, kw);
+        vsp = base;
+    } else {
+        if (n != 3) throw_new(cls_TypeError, "type() takes 1 or 3 arguments");
+        r = type_create(c, a[0], a[1], a[2], nk, kw);
+    }
+    ini = class_find(c, S_init);
+    if (ini && ini->t == T_FUNC && r.t == T_CLASS && class_isa(class_of(r), c)) {
+        VPUSH(r);
+        VPUSH(*ini);
+        VPUSH(r);
+        for (i = 0; i < n; i++) VPUSH(a[i]);
+        call_value(*ini, n + 1, base + 2, nk, kw);
+    }
+    vsp = base;
+    return r;
+}
+static Value call_class_plain(Class *c, int n, Value *a, int nk, Value *kw)
 {
     Inst *in;
     Value iv, *nw;
     Value *base = vsp;
     int i;
+    if (c != cls_type && class_isa(c, cls_type)) return meta_call(c, n, a, nk, kw);
     if (c->ctor) {
         Args x;
         x.n = n; x.a = a; x.nk = nk; x.kw = kw;
@@ -494,6 +530,25 @@ static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
     run_init(iv, c, n, a, nk, kw);
     vsp = base;
     return iv;
+}
+/* C(...): a metaclass __call__ written in Python takes over, otherwise type.__call__ */
+static Value call_class(Class *c, int n, Value *a, int nk, Value *kw)
+{
+    if (c->meta) {
+        Value *mc = class_find(c->meta, S_call);
+        if (mc && mc->t == T_FUNC) {
+            Value *base = vsp, r;
+            int i;
+            vcheck(n + 8);
+            VPUSH(*mc);
+            VPUSH(mkobj(c, T_CLASS));
+            for (i = 0; i < n; i++) VPUSH(a[i]);
+            r = call_value(*mc, n + 1, base + 1, nk, kw);
+            vsp = base;
+            return r;
+        }
+    }
+    return call_class_plain(c, n, a, nk, kw);
 }
 
 static Value call_value(Value fn, int n, Value *a, int nk, Value *kw)
@@ -1298,7 +1353,7 @@ static int exc_matches(Frame *f, Value exc, Node *tn)
     return 0;
 }
 
-static void do_raise(Value v)
+static void do_raise(Value v, int has_cause, Value cause)
 {
     if (v.t == T_CLASS) {
         if (!(AS_CLASS(v)->flags & CF_EXC))
@@ -1307,6 +1362,14 @@ static void do_raise(Value v)
     }
     if (v.t != T_INST || !(AS_INST(v)->cls->flags & CF_EXC))
         throw_new(cls_TypeError, "exceptions must derive from BaseException");
+    if (has_cause) {
+        if (cause.t == T_CLASS) cause = call0(cause);
+        if (cause.t != T_NONE && (cause.t != T_INST || !(AS_INST(cause)->cls->flags & CF_EXC)))
+            throw_new(cls_TypeError, "exception causes must derive from BaseException");
+        amap_set(&AS_INST(v)->a, S_cause, cause);
+        amap_set(&AS_INST(v)->a, S_suppress, TRUE_V);
+    }
+    tb_mode = 1;
     throw_val(v);
 }
 
@@ -1392,7 +1455,7 @@ static int exec_try(Frame *f, Node *n)
 {
     int phase = 0, pend = 0, st = 0, k;
     Value *sp0 = vsp, exc;
-    Value *slot;
+    Value *slot, h_entry = handled_exc;
     if (n->level) return exec_try_star(f, n);
     VPUSH(NONE_V);
     slot = sp0;
@@ -1405,8 +1468,8 @@ static int exec_try(Frame *f, Node *n)
         STATE(f, n, 1) = mkint(pend); STATE(f, n, 2) = *slot; } } while (0)
     if (phase == 0) {
         if (protected_block(f, n->a, &st, &exc)) {
-            Value saved_h = handled_exc;
             int matched = -1;
+            handled_exc = h_entry;      /* an exception that escaped an inner handler */
             *slot = exc;
             for (k = 0; k < n->n; k++) {
                 Node *h = n->list[k];
@@ -1419,9 +1482,9 @@ static int exec_try(Frame *f, Node *n)
             } else {
                 Node *h = n->list[matched];
                 phase = 10 + matched;
+                tb_attach(exc, f);
                 if (h->b) store_var(f, h->b->var, exc);
             }
-            (void)saved_h;
         } else if (st == ST_YIELD) {
             TRY_SAVE();
             vsp = sp0;
@@ -1571,6 +1634,8 @@ static Class *make_class(Str *name, Class **bl, int nb, Str *modname)
     c->flags = fl;
     c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL;
     c->modname = modname;
+    c->meta = NULL;
+    for (i = 0; i < nb && !c->meta; i++) c->meta = bl[i]->meta;
     c->bases = bl;
     c->nbases = nb;
     VPUSH(mkobj(c, T_CLASS));
@@ -1602,33 +1667,114 @@ static void finish_class(Class *c)
     if (amap_get(&c->ns, S_setattr)) c->flags |= CF_SETATTR;
     class_epoch++;
 }
-/* call __init_subclass__ of the first base (implicit classmethod) */
-static void run_init_subclass(Class *c, Class *base, Value cv)
+/* call __init_subclass__ of the next class in the MRO (an implicit classmethod) with the class
+   keywords kw (nk name/value pairs) */
+static void run_init_subclass(Class *c, Value cv, int nk, Value *kw)
 {
-    Value *m = class_find(base, intern_c("__init_subclass__"));
+    Value *m = class_find_after(c, c, S_init_subclass), fn;
+    Value *base = vsp;
     if (!m) return;
-    if (m->t == T_CMETH) call1(((Prop *)m->u.o)->get, cv);
-    else if (m->t == T_FUNC) call1(*m, cv);
-    (void)c;
+    fn = m->t == T_CMETH ? ((Prop *)m->u.o)->get : *m;
+    VPUSH(fn);
+    VPUSH(cv);
+    call_value(fn, 1, base + 1, nk, kw);
+    vsp = base;
+}
+/* the class statement is done: metaclass __new__ / __init__, __init_subclass__ */
+static Value class_complete(Class *c, Value cv, int nk, Value *kw)
+{
+    Value *base = vsp;
+    Value *m, nsv, bv, nmv, r = cv;
+    int i;
+    if (c->meta && c->meta != cls_type) {
+        m = class_find(c->meta, S_new);
+        if (m && m->t == T_FUNC) {
+            Dict *d = dict_new();
+            List *bt = tuple_new(c->nbases);
+            nsv = mkobj(d, T_DICT);
+            VPUSH(nsv);
+            bv = mkobj(bt, T_TUPLE);
+            for (i = 0; i < c->nbases; i++) bt->a[i] = mkobj(c->bases[i], T_CLASS);
+            VPUSH(bv);
+            for (i = 0; i < c->ns.n; i++) dict_set(d, mkobj(c->ns.k[i], T_STR), c->ns.v[i]);
+            nmv = mkobj(c->name, T_STR);
+            VPUSH(*m);
+            VPUSH(mkobj(c->meta, T_CLASS));
+            VPUSH(nmv); VPUSH(bv); VPUSH(nsv);
+            r = call_value(*m, 4, base + 3, nk, kw);
+        } else {
+            run_init_subclass(c, cv, nk, kw);
+        }
+        VPUSH(r);
+        m = class_find(c->meta, S_init);
+        if (m && m->t == T_FUNC && r.t == T_CLASS) {
+            Dict *d = dict_new();
+            List *bt = tuple_new(c->nbases);
+            Value *ap = vsp;
+            nsv = mkobj(d, T_DICT);
+            VPUSH(nsv);
+            bv = mkobj(bt, T_TUPLE);
+            for (i = 0; i < c->nbases; i++) bt->a[i] = mkobj(c->bases[i], T_CLASS);
+            VPUSH(bv);
+            for (i = 0; i < c->ns.n; i++) dict_set(d, mkobj(c->ns.k[i], T_STR), c->ns.v[i]);
+            VPUSH(*m);
+            VPUSH(r);
+            VPUSH(mkobj(c->name, T_STR)); VPUSH(bv); VPUSH(nsv);
+            call_value(*m, 4, ap + 3, 0, NULL);
+        }
+        vsp = base;
+        return r;
+    }
+    run_init_subclass(c, cv, nk, kw);
+    return r;
 }
 static void exec_class(Frame *f, Node *n)
 {
     FuncDef *fd = n->fd;
     Class *c;
     Value cv, *basev = vsp;
-    int i, nbases = n->n - n->op, nb = 0;
+    int i, nbases = n->n - n->op, nb = 0, sline = cur_line;
     Frame cf;
     Cell **cells = NULL;
     Class **bl;
+    Value metav = UNSET_V, *kwbase;
+    int nkw = 0;
     bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(nbases + 1));
     for (i = 0; i < nbases; i++) {
         Value b = eval(f, n->list[i]);
         VPUSH(b);
+        if (b.t == T_INST && AS_INST(b)->cls == cls_GenericAlias) {   /* class A(list[int]) */
+            Value *o = amap_get(&AS_INST(b)->a, intern_c("__origin__"));
+            if (o && o->t == T_CLASS) { b = *o; vsp[-1] = b; }
+        }
         if (b.t != T_CLASS) { free(bl); throw_new(cls_TypeError, "bases must be types"); }
         bl[nb++] = AS_CLASS(b);
     }
+    if (n->a) {   /* class keywords: metaclass=M and the arguments of __init_subclass__ */
+        for (i = 0; i < n->a->n; i++)
+            if (n->a->list[i]->name == S_metaclass) {
+                metav = eval(f, n->a->list[i]->a);
+                VPUSH(metav);
+                if (metav.t != T_CLASS) {
+                    free(bl);
+                    throw_new(cls_TypeError, "metaclass must be a type");
+                }
+            }
+        kwbase = vsp;
+        for (i = 0; i < n->a->n; i++) {
+            Node *k = n->a->list[i];
+            if (k->name != S_metaclass) {
+                Value xv = eval(f, k->a);
+                vcheck(4);
+                VPUSH(mkobj(k->name, T_STR));
+                VPUSH(xv);
+                nkw++;
+            }
+        }
+    } else kwbase = vsp;
     if (nb == 0) bl[nb++] = cls_object;
     c = make_class(n->name, bl, nb, modname_of_gp(f->gp));
+    if (metav.t == T_CLASS) c->meta = AS_CLASS(metav);
     cv = mkobj(c, T_CLASS);
     VPUSH(cv);
     if (fd->nfree > 0) {
@@ -1648,12 +1794,16 @@ static void exec_class(Frame *f, Node *n)
     cf.resuming = 0;
     cf.gp = fd->gpfx;
     cf.up = cur_frame;
+    cf.line = sline;
+    if (cur_frame) cur_frame->line = sline;
     cur_frame = &cf;
     exec_block(&cf, fd->body);
     cur_frame = cf.up;
+    cur_line = sline;
     free(cells);
     finish_class(c);
-    run_init_subclass(c, c->base, cv);
+    cv = class_complete(c, cv, nkw, kwbase);
+    vsp[-1] = cv;
     /* decorators (rare) */
     for (i = n->n - 1; i >= nbases; i--) {
         Value d = eval(f, n->list[i]);
@@ -1961,9 +2111,17 @@ static int exec(Frame *f, Node *n)
         return 0; }
     case S_TRY: return exec_try(f, n);
     case S_RAISE:
-        if (n->a) do_raise(eval(f, n->a));
+        if (n->a) {
+            Value rv = eval(f, n->a);
+            if (n->b) {
+                VPUSH(rv);
+                do_raise(rv, 1, eval(f, n->b));
+            }
+            do_raise(rv, 0, NONE_V);
+        }
         if (handled_exc.t == T_NONE || handled_exc.t == T_UNSET)
             throw_new(cls_RuntimeError, "No active exception to reraise");
+        tb_mode = 2;
         throw_val(handled_exc);
         return 0;
     case S_ASSERT:

@@ -180,16 +180,23 @@ def addLevelName(level, levelName):
         _levelToName[level] = levelName
         _nameToLevel[levelName] = level
 
-currentframe = lambda: None
-
-# no frame objects in this interpreter: caller information is not available
-_srcfile = None
+# frame objects (sys._getframe) are optional: without them caller information is not available
+if hasattr(sys, '_getframe'):
+    currentframe = lambda: sys._getframe(1)
+    _srcfile = addLevelName.__code__.co_filename
+else:
+    currentframe = lambda: None
+    _srcfile = None
 
 # The following is based on warnings._is_internal_frame. It makes sure that
 # frames of the import mechanism are skipped when logging at module level and
 # using a stacklevel value greater than one.
 def _is_internal_frame(frame):
-    return False
+    """Signal whether the frame is a CPython or logging module internal."""
+    filename = os.path.normcase(frame.f_code.co_filename)
+    return filename == _srcfile or (
+        "importlib" in filename and "_bootstrap" in filename
+    )
 
 
 def _checkLevel(level):

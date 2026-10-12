@@ -59,6 +59,8 @@ static void init_frame(Frame *fr, Str *gp)
 {
     fr->loc = NULL; fr->cells = NULL; fr->fn = NULL; fr->ret = NONE_V; fr->gen = NULL;
     fr->ns = NULL; fr->resuming = 0; fr->gp = gp; fr->up = cur_frame;
+    fr->line = cur_line;
+    if (cur_frame) cur_frame->line = cur_line;
 }
 static void run_block_in(Node *blk, Str *gp)
 {
@@ -70,6 +72,7 @@ static void run_block_in(Node *blk, Str *gp)
     exec_block(&fr, blk);
     call_depth--;
     cur_frame = fr.up;
+    if (cur_frame) cur_line = cur_frame->line;
 }
 
 /* ---- modules written in Python ---------------------------------------- */
@@ -255,23 +258,31 @@ static Value module_getattr_opt(Value mv, Str *nm)
     return UNSET_V;
 }
 
-/* native numpy falls back to the pure-Python overlay pylib/numpy/__init__.py (loaded once as the
-   hidden module numpy._overlay) for names it does not provide */
-static int overlay_state;   /* 0 not tried, 1 loading, 2 loaded, 3 unavailable */
-static Value overlay_mod;
+/* a native module falls back to the pure-Python overlay of the same name (pylib/numpy/__init__.py,
+   pylib/os.py, pylib/time.py), loaded once as the hidden module <name>._overlay, for the names it
+   does not provide */
+#define NOVERLAY 3
+static const char *overlay_names[NOVERLAY] = { "numpy", "os", "time" };
+static int overlay_state[NOVERLAY];   /* 0 not tried, 1 loading, 2 loaded, 3 unavailable */
+static Value overlay_mod[NOVERLAY];
 static int module_overlay(Module *md, Str *nm, Value *out)
 {
     Value r, full;
-    if (md->gp || md->name->len != 5 || memcmp(md->name->s, "numpy", 5) != 0) return 0;
-    if (nm->len == 8 && memcmp(nm->s, "__path__", 8) == 0) {
+    int oi = -1, k;
+    if (md->gp) return 0;
+    for (k = 0; k < NOVERLAY; k++)
+        if (md->name->len == (long)strlen(overlay_names[k]) &&
+            memcmp(md->name->s, overlay_names[k], (size_t)md->name->len) == 0) oi = k;
+    if (oi < 0) return 0;
+    if (oi == 0 && nm->len == 8 && memcmp(nm->s, "__path__", 8) == 0) {
         /* the native numpy behaves as a package: file submodules (numpy.fft ...) are looked up in
            <sys.path entry>/numpy; native submodules (linalg, random) are found in sys.modules */
         List *pl = list_new(4);
         Value plv = mklist(pl), sp;
-        long k;
+        long j;
         VPUSH(plv);
-        for (k = 0; k < AS_LIST(sys_path_v)->n; k++) {
-            sp = AS_LIST(sys_path_v)->a[k];
+        for (j = 0; j < AS_LIST(sys_path_v)->n; j++) {
+            sp = AS_LIST(sys_path_v)->a[j];
             if (sp.t == T_STR) list_push(pl, path_join_v(sp, "numpy"));
         }
         amap_set(&md->ns, nm, plv);
@@ -280,27 +291,30 @@ static int module_overlay(Module *md, Str *nm, Value *out)
         return 1;
     }
     if (nm->len >= 2 && nm->s[0] == '_' && nm->s[1] == '_') return 0;
-    if (overlay_state == 1 || overlay_state == 3) return 0;
-    if (overlay_state == 0) {
-        long k;
-        Str *ovn = intern_c("numpy._overlay");
-        Str *leaf = intern_c("numpy");
-        overlay_state = 1;
-        overlay_mod = UNSET_V;
-        for (k = 0; k < AS_LIST(sys_path_v)->n && overlay_mod.t == T_UNSET; k++) {
-            Value cand = AS_LIST(sys_path_v)->a[k];
+    if (overlay_state[oi] == 1 || overlay_state[oi] == 3) return 0;
+    if (overlay_state[oi] == 0) {
+        long j;
+        char ovb[32];
+        Str *ovn, *leaf = md->name;
+        sprintf(ovb, "%s._overlay", overlay_names[oi]);
+        ovn = intern_c(ovb);
+        overlay_state[oi] = 1;
+        overlay_mod[oi] = UNSET_V;
+        for (j = 0; j < AS_LIST(sys_path_v)->n && overlay_mod[oi].t == T_UNSET; j++) {
+            Value cand = AS_LIST(sys_path_v)->a[j];
             char pb[PY_PATHMAX];
             char *src = NULL;
             long len;
             if (cand.t != T_STR) continue;
-            if (host_module_path(pb, AS_STR(cand)->s, AS_STR(cand)->len, "numpy", 5, 1) >= 0)
+            if (host_module_path(pb, AS_STR(cand)->s, AS_STR(cand)->len, leaf->s, leaf->len,
+                                 oi == 0) >= 0)
                 src = read_whole(pb, &len);
-            if (src) { free(src); overlay_mod = try_dir(cand, leaf, ovn, NULL); }
+            if (src) { free(src); overlay_mod[oi] = try_dir(cand, leaf, ovn, NULL); }
         }
-        if (overlay_mod.t == T_UNSET) { overlay_state = 3; return 0; }
-        overlay_state = 2;
+        if (overlay_mod[oi].t == T_UNSET) { overlay_state[oi] = 3; return 0; }
+        overlay_state[oi] = 2;
     }
-    full = overlay_mod;
+    full = overlay_mod[oi];
     r = module_getattr_opt(full, nm);
     if (r.t == T_UNSET) return 0;
     amap_set(&md->ns, nm, r);
@@ -585,7 +599,7 @@ BI(bi_exc_info)
     if (handled_exc.t == T_INST) {
         r[0] = mkobj(AS_INST(handled_exc)->cls, T_CLASS);
         r[1] = handled_exc;
-        r[2] = NONE_V;
+        r[2] = get_attr(handled_exc, S_traceback);
     } else {
         r[0] = r[1] = r[2] = NONE_V;
     }
@@ -787,6 +801,11 @@ BI(osp_isabs)
     s = astr(A(0), "path");
     return mkbool(s->len > 0 && s->s[0] == '/');
 }
+BI(osp_normcase)
+{
+    need(x, 1, 1, "normcase");
+    return mkobj(astr(A(0), "path"), T_STR);
+}
 BI(osp_normpath)
 {
     Str *s;
@@ -888,20 +907,90 @@ BI(osp_getsize)
                   AS_STR(A(0))->s);
     return mkint(n);
 }
+/* a path argument: str, bytes or an object with __fspath__, as a str */
+static Str *fs_path(Value v, const char *what)
+{
+    if (v.t == T_INST && class_find(AS_INST(v)->cls, intern_c("__fspath__")))
+        v = call0(get_attr(v, intern_c("__fspath__")));
+    if (v.t == T_BYTES) v = mkstr(AS_STR(v)->s, AS_STR(v)->len);
+    return astr(v, what);
+}
 BI(os_remove)
 {
     need(x, 1, 1, "remove");
-    if (host_file_remove(astr(A(0), "path")->s) != 0)
-        throw_new(cls_FileNotFoundError, "[Errno 2] No such file or directory: '%.200s'",
-            AS_STR(A(0))->s);
+    errno = 0;
+    if (host_file_remove(fs_path(A(0), "path")->s) != 0)
+        throw_oserror(errno ? errno : ENOENT, A(0));
     return NONE_V;
 }
 BI(os_rename)
 {
     need(x, 2, 2, "rename");
-    if (host_file_rename(astr(A(0), "src")->s, astr(A(1), "dst")->s) != 0)
-        throw_new(cls_OSError, "rename failed: '%.200s'", AS_STR(A(0))->s);
+    errno = 0;
+    if (host_file_rename(fs_path(A(0), "src")->s, fs_path(A(1), "dst")->s) != 0)
+        throw_oserror(errno ? errno : ENOENT, A(0));
     return NONE_V;
+}
+/* names of a directory, in directory order */
+BI(os_listdir)
+{
+    Str *p = x->n > 0 && A(0).t != T_NONE ? fs_path(A(0), "path") : NULL;
+    char *buf = NULL;
+    long blen = 0, cnt, i, off = 0;
+    List *l;
+    Value lv;
+    errno = 0;
+    cnt = host_listdir(p ? p->s : ".", &buf, &blen);
+    if (cnt < 0) throw_oserror(errno ? errno : ENOENT, p ? A(0) : mkcstr("."));
+    l = list_new(cnt);
+    lv = mklist(l);
+    VPUSH(lv);
+    for (i = 0; i < cnt; i++) {
+        list_push(l, mkcstr(buf + off));
+        off += (long)strlen(buf + off) + 1;
+    }
+    free(buf);
+    vsp--;
+    return lv;
+}
+BI(os_mkdir)
+{
+    long mode = x->n > 1 ? to_index(A(1)) : 511L;
+    need(x, 1, 2, "mkdir");
+    errno = 0;
+    if (host_mkdir(fs_path(A(0), "path")->s, mode) != 0)
+        throw_oserror(errno ? errno : EACCES, A(0));
+    return NONE_V;
+}
+BI(os_rmdir)
+{
+    need(x, 1, 1, "rmdir");
+    errno = 0;
+    if (host_rmdir(fs_path(A(0), "path")->s) != 0) throw_oserror(errno ? errno : EACCES, A(0));
+    return NONE_V;
+}
+BI(os_chdir)
+{
+    need(x, 1, 1, "chdir");
+    errno = 0;
+    if (host_chdir(fs_path(A(0), "path")->s) != 0) throw_oserror(errno ? errno : ENOENT, A(0));
+    return NONE_V;
+}
+BI(os_getpid) { (void)x; return mkint(host_getpid()); }
+BI(os_getppid) { (void)x; return mkint(host_getppid()); }
+BI(os_urandom)
+{
+    long n;
+    unsigned char *b;
+    Value r;
+    need(x, 1, 1, "urandom");
+    n = to_index(A(0));
+    if (n < 0) throw_new(cls_ValueError, "negative argument not allowed");
+    b = (unsigned char *)xmalloc((size_t)n + 1);
+    host_urandom(b, n);
+    r = mkbytes((const char *)b, n);
+    free(b);
+    return r;
 }
 
 

@@ -335,8 +335,14 @@ static Node *parse_classdef(void)
     n->var->defined = 1;
     if (p_accept('(')) {
         while (!at(')')) {
-            if (at(TK_NAME) && toks[pp + 1].type == '=') { pp += 2; parse_test(); }
-            else node_add(n, parse_test());
+            if (at(TK_NAME) && toks[pp + 1].type == '=') {   /* metaclass=M, class keywords */
+                Node *kw = mk(N_KW);
+                kw->name = TOK.s;
+                pp += 2;
+                kw->a = parse_test();
+                if (!n->a) n->a = mk(N_TUPLE);
+                node_add(n->a, kw);
+            } else node_add(n, parse_test());
             if (!p_accept(',')) break;
         }
         expect(')', ")");
@@ -1280,7 +1286,7 @@ static Node *parse_simple(void)
             pp++;
             if (!at(TK_NEWLINE) && !at(';') && !at(TK_EOF)) {
                 n->a = parse_test();
-                if (accept_kw(KW_FROM)) parse_test();
+                if (accept_kw(KW_FROM)) n->b = parse_test();
             }
             return n;
         case KW_ASSERT:

@@ -18,7 +18,14 @@ class struct_time(tuple):
         t = tuple(seq)
         if len(t) < 9:
             raise TypeError("time.struct_time() takes an at least 9-sequence (%d-sequence given)" % len(t))
-        return tuple.__new__(cls, t[:9])
+        obj = tuple.__new__(cls, t[:9])
+        try:
+            # a 10th and 11th item (the interpreter's native localtime/gmtime) are tm_zone and tm_gmtoff
+            obj._zone = t[9] if len(t) > 9 else None
+            obj._off = t[10] if len(t) > 10 else None
+        except Exception:
+            pass
+        return obj
 
     tm_year = property(lambda self: self[0])
     tm_mon = property(lambda self: self[1])
@@ -29,8 +36,8 @@ class struct_time(tuple):
     tm_wday = property(lambda self: self[6])
     tm_yday = property(lambda self: self[7])
     tm_isdst = property(lambda self: self[8])
-    tm_zone = property(lambda self: 'UTC')
-    tm_gmtoff = property(lambda self: 0)
+    tm_zone = property(lambda self: getattr(self, '_zone', 'UTC'))
+    tm_gmtoff = property(lambda self: getattr(self, '_off', 0))
 
     def __repr__(self):
         return "time.struct_time(" + ", ".join("%s=%r" % (_FIELDS[i], self[i]) for i in range(9)) + ")"
@@ -73,7 +80,7 @@ def gmtime(*args):
     rem = secs - days * 86400
     y, m, d = _civil_from_days(days)
     yday = days - _days_from_civil(y, 1, 1) + 1
-    return struct_time((y, m, d, rem // 3600, (rem % 3600) // 60, rem % 60, (days + 3) % 7, yday, 0))
+    return struct_time((y, m, d, rem // 3600, (rem % 3600) // 60, rem % 60, (days + 3) % 7, yday, 0, 'UTC', 0))
 
 
 localtime = gmtime
@@ -123,6 +130,8 @@ def _iso(t):
 def strftime(fmt, t=None):
     if t is None:
         t = localtime()
+    zone = getattr(t, 'tm_zone', None)
+    gmtoff = getattr(t, 'tm_gmtoff', None)
     t = tuple(t)
     out = []
     i = 0
@@ -165,8 +174,10 @@ def strftime(fmt, t=None):
         elif c == 'V': s = '%02d' % _iso(t)[1]
         elif c == 'G': s = '%d' % _iso(t)[0]
         elif c == 'g': s = '%02d' % (_iso(t)[0] % 100)
-        elif c == 'Z': s = 'UTC'
-        elif c == 'z': s = '+0000'
+        elif c == 'Z': s = zone if zone else 'UTC'
+        elif c == 'z':
+            off = gmtoff or 0
+            s = '%s%02d%02d' % ('-' if off < 0 else '+', abs(off) // 3600, abs(off) % 3600 // 60)
         elif c == 'n': s = '\n'
         elif c == 't': s = '\t'
         elif c == '%': s = '%'

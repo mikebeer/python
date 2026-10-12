@@ -59,7 +59,7 @@ static Class *new_class(const char *name, Class *base, int flags)
     c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
     c->ctor = NULL;
     c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL;
-    c->modname = NULL;
+    c->modname = NULL; c->meta = NULL;
     c->flags = flags | (base ? (base->flags & CF_EXC) : 0);
     set_global(c->name, mkobj(c, T_CLASS));
     return c;
@@ -189,6 +189,18 @@ BI(bi_int)
     if (v.t == T_INST && AS_INST(v)->pay.t != T_UNSET && !class_find(AS_INST(v)->cls, S_int) &&
         !class_find(AS_INST(v)->cls, S_index))
         v = AS_INST(v)->pay;
+    if (v.t == T_BYTES || v.t == T_BARR) {   /* int(b"ff", 16): the text of a bytes-like object */
+        const char *bp;
+        long bn;
+        Value r;
+        bytes_get(v, &bp, &bn);
+        if (!parse_int(bp, bn, bv.t == T_UNSET ? 10 : base, &r)) {
+            Value q = py_repr(v);
+            throw_new(cls_ValueError, "invalid literal for int() with base %d: %.200s", base,
+                AS_STR(q)->s);
+        }
+        return r;
+    }
     if (v.t == T_STR) {
         Value r;
         if (!parse_int(AS_STR(v)->s, AS_STR(v)->len, bv.t == T_UNSET ? 10 : base, &r)) {
@@ -684,6 +696,10 @@ BI(bi_reversed)
         it->i = py_len(v) - 1;
         return mkobj(it, T_ITER);
     }
+    if (v.t == T_CLASS && AS_CLASS(v)->meta) {
+        Value *m = class_find(AS_CLASS(v)->meta, S_reversed);
+        if (m) return call1(*m, v);
+    }
     if (v.t == T_INST) {
         Value *m = class_find(AS_INST(v)->cls, intern_c("__reversed__"));
         if (m) return call1(*m, v);
@@ -921,47 +937,78 @@ BI(bi_issubclass)
     return NONE_V;
 }
 static Str *cur_gp(void);
+/* type(name, bases, ns) with metaclass `meta` (NULL: type): the class is made, its namespace filled
+   from ns, __init_subclass__ of the next base runs with the class keywords kw */
+static Value type_create(Class *meta, Value namev, Value basesv, Value nsv, int nk, Value *kw)
+{
+    Class **bl, *c;
+    List *bt;
+    Dict *ns;
+    long i, nb;
+    Value cv;
+    Str *nm = intern_str(astr(namev, "type.__new__() argument 1"));
+    if (basesv.t != T_TUPLE)
+        throw_new(cls_TypeError, "type.__new__() argument 2 must be tuple, not %.40s",
+        type_name(basesv));
+    if (nsv.t != T_DICT)
+        throw_new(cls_TypeError, "type.__new__() argument 3 must be dict, not %.40s",
+        type_name(nsv));
+    bt = AS_LIST(basesv);
+    ns = AS_DICT(nsv);
+    bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(bt->n + 1));
+    nb = 0;
+    for (i = 0; i < bt->n; i++) {
+        if (bt->a[i].t != T_CLASS) { free(bl);
+            throw_new(cls_TypeError, "bases must be types");
+        }
+        bl[nb++] = AS_CLASS(bt->a[i]);
+    }
+    if (nb == 0) bl[nb++] = cls_object;
+    c = make_class(nm, bl, (int)nb, modname_of_gp(cur_gp()));
+    if (meta && meta != cls_type) c->meta = meta;
+    cv = mkobj(c, T_CLASS);
+    VPUSH(cv);
+    for (i = 0; i < ns->used; i++) {
+        if (ns->e[i].k.t != T_STR) continue;
+        amap_set(&c->ns, intern_str(AS_STR(ns->e[i].k)), ns->e[i].v);
+    }
+    finish_class(c);
+    run_init_subclass(c, cv, nk, kw);
+    vsp--;
+    return cv;
+}
 BI(bi_type)
 {
     need(x, 1, 3, "type");
     if (x->n == 2) throw_new(cls_TypeError, "type() takes 1 or 3 arguments");
-    if (x->n == 3) {
-        Class **bl, *c;
-        List *bt;
-        Dict *ns;
-        long i, nb;
-        Value cv;
-        Str *nm = intern_str(astr(A(0), "type.__new__() argument 1"));
-        if (A(1).t != T_TUPLE)
-            throw_new(cls_TypeError, "type.__new__() argument 2 must be tuple, not %.40s",
-            type_name(A(1)));
-        if (A(2).t != T_DICT)
-            throw_new(cls_TypeError, "type.__new__() argument 3 must be dict, not %.40s",
-            type_name(A(2)));
-        bt = AS_LIST(A(1));
-        ns = AS_DICT(A(2));
-        bl = (Class **)xmalloc(sizeof(Class *) * (size_t)(bt->n + 1));
-        nb = 0;
-        for (i = 0; i < bt->n; i++) {
-            if (bt->a[i].t != T_CLASS) { free(bl);
-                throw_new(cls_TypeError, "bases must be types");
-            }
-            bl[nb++] = AS_CLASS(bt->a[i]);
-        }
-        if (nb == 0) bl[nb++] = cls_object;
-        c = make_class(nm, bl, (int)nb, modname_of_gp(cur_gp()));
-        cv = mkobj(c, T_CLASS);
-        VPUSH(cv);
-        for (i = 0; i < ns->used; i++) {
-            if (ns->e[i].k.t != T_STR) continue;
-            amap_set(&c->ns, intern_str(AS_STR(ns->e[i].k)), ns->e[i].v);
-        }
-        finish_class(c);
-        run_init_subclass(c, c->base, cv);
-        vsp--;
-        return cv;
-    }
+    if (x->n == 3) return type_create(NULL, A(0), A(1), A(2), x->nk, x->kw);
     return mkobj(class_of(A(0)), T_CLASS);
+}
+/* type.__new__(mcs, name, bases, ns, **kw), type.__call__(cls, *args), type.__init__(...) */
+BI(type_new)
+{
+    if (x->n != 4 || A(0).t != T_CLASS)
+        throw_new(cls_TypeError, "type.__new__() takes exactly 4 arguments (%d given)", x->n);
+    return type_create(AS_CLASS(A(0)), A(1), A(2), A(3), x->nk, x->kw);
+}
+BI(type_call)
+{
+    if (x->n < 1 || A(0).t != T_CLASS)
+        throw_new(cls_TypeError, "descriptor '__call__' needs a type");
+    return call_class_plain(AS_CLASS(A(0)), x->n - 1, x->a + 1, x->nk, x->kw);
+}
+BI(type_init)
+{
+    (void)x;
+    return NONE_V;
+}
+/* object.__init_subclass__(cls): takes no keyword arguments */
+BI(obj_init_subclass)
+{
+    if (x->nk > 0)
+        throw_new(cls_TypeError, "%.80s.__init_subclass__() takes no keyword arguments",
+            x->n > 0 && A(0).t == T_CLASS ? AS_CLASS(A(0))->name->s : "object");
+    return NONE_V;
 }
 static int try_attr(Value o, Str *nm, Value *out)
 {
@@ -1778,7 +1825,8 @@ BI(s_splitlines)
     List *l = list_new(8);
     Value lv = mklist(l);
     long i = 0, st = 0;
-    int keep = x->n > 1 && py_truthy(A(1));
+    Value kv = kwget(x, "keepends");
+    int keep = (x->n > 1 && py_truthy(A(1))) || (kv.t != T_UNSET && py_truthy(kv));
     VPUSH(lv);
     while (i < s->len) {
         if (s->s[i] == '\n' || s->s[i] == '\r') {
@@ -2635,6 +2683,46 @@ BI(g_close)
 }
 
 /* ---- files ------------------------------------------------------------ */
+/* the exception class for a host error number (errno) */
+static Class *oserror_class(int err)
+{
+    if (err == ENOENT) return cls_FileNotFoundError;
+    if (err == EACCES || err == EPERM) return cls_PermissionError;
+    if (err == EEXIST) return cls_FileExistsError;
+    if (err == EISDIR) return cls_IsADirectoryError;
+    if (err == ENOTDIR) return cls_NotADirectoryError;
+    return cls_OSError;
+}
+/* raise OSError(errno, strerror, filename) as the matching subclass */
+static void throw_oserror(int err, Value filename)
+{
+    Value v[3];
+    Class *c = oserror_class(err);
+    long n = 2;
+    v[0] = mkint(err);
+    v[1] = mkcstr(strerror(err));
+    if (filename.t != T_UNSET && filename.t != T_NONE) { v[2] = filename; n = 3; }
+    {
+        Value ev = new_exc_args(c, v, n);
+        VPUSH(ev);
+        amap_set(&AS_INST(ev)->a, intern_c("errno"), v[0]);
+        amap_set(&AS_INST(ev)->a, intern_c("strerror"), v[1]);
+        amap_set(&AS_INST(ev)->a, intern_c("filename"), n == 3 ? v[2] : NONE_V);
+        vsp--;
+        throw_val(ev);
+    }
+}
+static Value new_file_obj(FILE *fp, int out, int bin, Value name, const char *mode)
+{
+    File *f = (File *)gc_alloc(sizeof(File), T_FILE);
+    f->fp = fp;
+    f->closed = 0;
+    f->out = out;
+    f->bin = bin;
+    f->name = name.t == T_STR ? AS_STR(name) : NULL;
+    f->mode = intern_c(mode);
+    return mkobj(f, T_FILE);
+}
 static File *self_file(Args *x)
 {
     File *f;
@@ -2642,6 +2730,16 @@ static File *self_file(Args *x)
     f = (File *)A(0).u.o;
     if (f->closed) throw_new(cls_ValueError, "I/O operation on closed file");
     return f;
+}
+/* a chunk read from a file: str in text mode, bytes in binary mode */
+static Value file_value(File *f, Buf *b)
+{
+    if (f->bin) {
+        Value r = mkbytes(b->s, b->n);
+        buf_free(b);
+        return r;
+    }
+    return buf_value(b);
 }
 static Value file_readline(File *f)
 {
@@ -2652,43 +2750,68 @@ static Value file_readline(File *f)
         buf_addc(&b, c);
         if (c == '\n') break;
     }
-    return buf_value(&b);
+    return file_value(f, &b);
+}
+static long file_value_len(Value v)
+{
+    return v.t == T_BYTES || v.t == T_STR ? AS_STR(v)->len : 0;
 }
 BI(bi_open)
 {
-    File *f;
     Str *path, *mode;
     FILE *fp;
     char m[8];
-    int k = 0, i;
+    int k = 0, i, bin = 0, plus = 0, excl = 0;
+    char base = 'r';
     need(x, 1, 2, "open");
+    if (A(0).t == T_INST && class_find(AS_INST(A(0))->cls, intern_c("__fspath__"))) {
+        Value fs = call0(get_attr(A(0), intern_c("__fspath__")));
+        if (fs.t == T_STR) x->a[0] = fs;
+    }
     path = astr(A(0), "file");
     mode = x->n > 1 ? astr(A(1), "mode") : NULL;
     if (!mode && kwget(x, "mode").t == T_STR) mode = AS_STR(kwget(x, "mode"));
-    m[k++] = 'r';
     if (mode) {
-        k = 0;
-        for (i = 0; i < mode->len && k < 3; i++) {
-            if (mode->s[i] == 'r' || mode->s[i] == 'w' || mode->s[i] == 'a' || mode->s[i] == '+')
-                m[k++] = mode->s[i];
+        int seen = 0;
+        for (i = 0; i < mode->len; i++) {
+            char ch = mode->s[i];
+            if (ch == 'r' || ch == 'w' || ch == 'a' || ch == 'x') {
+                if (seen)
+                    throw_new(cls_ValueError,
+                              "must have exactly one of create/read/write/append mode");
+                base = ch; seen = 1;
+            } else if (ch == '+') plus = 1;
+            else if (ch == 'b') bin = 1;
+            else if (ch != 't' && ch != 'U')
+                throw_new(cls_ValueError, "invalid mode: '%.20s'", mode->s);
         }
-        if (k == 0) m[k++] = 'r';
+        if (!seen) base = 'r';
     }
+    if (base == 'x') {
+        if (host_file_exists(path->s)) throw_oserror(EEXIST, A(0));
+        base = 'w';
+        excl = 1;
+    }
+    m[k++] = base;
+    if (plus) m[k++] = '+';
+    if (bin) m[k++] = 'b';
     m[k] = 0;
+    errno = 0;
     fp = host_fopen(path->s, m);
-    if (!fp) {
-        Value v[2];
-        Value q = py_repr(A(0));
-        char msg[300];
-        sprintf(msg, "[Errno 2] No such file or directory: %.200s", AS_STR(q)->s);
-        v[0] = mkcstr(msg);
-        throw_val(new_exc_args(cls_FileNotFoundError, v, 1));
+    if (!fp) throw_oserror(errno ? errno : ENOENT, A(0));
+    if (base == 'r' && !plus && host_file_isdir(path->s)) {
+        fclose(fp);
+        throw_oserror(EISDIR, A(0));
     }
-    f = (File *)gc_alloc(sizeof(File), T_FILE);
-    f->fp = fp;
-    f->closed = 0;
-    f->out = 0;
-    return mkobj(f, T_FILE);
+    {
+        char md[8];
+        k = 0;
+        md[k++] = excl ? 'x' : base;
+        if (plus) md[k++] = '+';
+        if (bin) md[k++] = 'b';
+        md[k] = 0;
+        return new_file_obj(fp, 0, bin ? (base == 'r' && !plus ? 1 : 2) : 0, A(0), md);
+    }
 }
 BI(fl_read)
 {
@@ -2697,8 +2820,12 @@ BI(fl_read)
     int c;
     long n = x->n > 1 && A(1).t != T_NONE ? to_index(A(1)) : -1;
     buf_init(&b);
-    while ((n < 0 || b.n < n) && (c = getc(f->fp)) != EOF) buf_addc(&b, c);
-    return buf_value(&b);
+    if (n < 0) {
+        while ((c = getc(f->fp)) != EOF) buf_addc(&b, c);
+    } else {
+        while (b.n < n && (c = getc(f->fp)) != EOF) buf_addc(&b, c);
+    }
+    return file_value(f, &b);
 }
 BI(fl_readline) { return file_readline(self_file(x)); }
 BI(fl_readlines)
@@ -2709,19 +2836,36 @@ BI(fl_readlines)
     VPUSH(lv);
     for (;;) {
         ln = file_readline(f);
-        if (AS_STR(ln)->len == 0) break;
+        if (file_value_len(ln) == 0) break;
         list_push(l, ln);
     }
     vsp--;
     return lv;
 }
+/* the bytes of a binary write, or the text of a text write */
+static void file_put(File *f, Value v)
+{
+    const char *p;
+    long n = 0;
+    if (f->bin) {
+        if (!bytes_get(v, &p, &n))
+            throw_new(cls_TypeError, "a bytes-like object is required, not '%.40s'", type_name(v));
+        fwrite(p, 1, (size_t)n, f->fp);
+    } else {
+        Str *s = astr(v, "write() argument");
+        fwrite(s->s, 1, (size_t)s->len, f->fp);
+    }
+}
 BI(fl_write)
 {
     File *f = self_file(x);
-    Str *s = astr(A(1), "write() argument");
+    const char *p;
+    long n = 0;
+    need(x, 2, 2, "write");
     if (f->fp == stderr) fflush(stdout);
-    fwrite(s->s, 1, (size_t)s->len, f->fp);
-    return mkint(s->len);
+    file_put(f, A(1));
+    if (f->bin) { bytes_get(A(1), &p, &n); return mkint(n); }
+    return mkint(AS_STR(A(1).t == T_INST ? AS_INST(A(1))->pay : A(1))->len);
 }
 BI(fl_writelines)
 {
@@ -2729,7 +2873,7 @@ BI(fl_writelines)
     Value it, y;
     it = get_iter(A(1));
     VPUSH(it);
-    while (iter_next(it, &y)) fwrite(astr(y, "item")->s, 1, (size_t)AS_STR(y)->len, f->fp);
+    while (iter_next(it, &y)) file_put(f, y);
     vsp--;
     return NONE_V;
 }
@@ -2745,13 +2889,97 @@ BI(fl_close)
     f->closed = 1;
     return NONE_V;
 }
-BI(fl_enter) { return A(0); }
+BI(fl_enter)
+{
+    (void)self_file(x);
+    return A(0);
+}
 BI(fl_exit)
 {
     File *f = (File *)A(0).u.o;
     if (!f->closed && !f->out) fclose(f->fp);
     f->closed = 1;
     return FALSE_V;
+}
+BI(fl_seek)
+{
+    File *f = self_file(x);
+    long off = to_index(A(1)), wh = x->n > 2 ? to_index(A(2)) : 0;
+    need(x, 2, 3, "seek");
+    if (wh < 0 || wh > 2)
+        throw_new(cls_ValueError, "invalid whence (%ld, should be 0, 1 or 2)", wh);
+    if (fseek(f->fp, off, wh == 0 ? SEEK_SET : (wh == 1 ? SEEK_CUR : SEEK_END)) != 0)
+        throw_oserror(errno ? errno : EINVAL, NONE_V);
+    return mkint(ftell(f->fp));
+}
+BI(fl_tell)
+{
+    File *f = self_file(x);
+    long p = ftell(f->fp);
+    if (p < 0) throw_oserror(errno ? errno : ESPIPE, NONE_V);
+    return mkint(p);
+}
+BI(fl_readable)
+{
+    File *f = self_file(x);
+    const char *m = f->mode->s;
+    return mkbool(m[0] == 'r' || strchr(m, '+') != NULL);
+}
+BI(fl_writable)
+{
+    File *f = self_file(x);
+    const char *m = f->mode->s;
+    return mkbool(m[0] != 'r' || strchr(m, '+') != NULL);
+}
+BI(fl_seekable)
+{
+    File *f = self_file(x);
+    return mkbool(f->fp != stdin && f->fp != stdout && f->fp != stderr);
+}
+BI(fl_isatty)
+{
+    (void)self_file(x);
+    return FALSE_V;
+}
+BI(fl_fileno)
+{
+    File *f = self_file(x);
+    int fd = host_fileno(f->fp);
+    if (fd < 0) throw_new(cls_OSError, "fileno() is not available");
+    return mkint(fd);
+}
+/* readinto(bytearray): fills the buffer, returns the number of bytes read */
+BI(fl_readinto)
+{
+    File *f = self_file(x);
+    size_t got;
+    need(x, 2, 2, "readinto");
+    if (A(1).t != T_BARR) throw_new(cls_TypeError, "readinto() argument must be a bytearray");
+    got = fread(AS_BARR(A(1))->s, 1, (size_t)AS_BARR(A(1))->n, f->fp);
+    return mkint((long)got);
+}
+/* attributes of file objects: name, mode, closed, encoding, buffer */
+static int file_attr(File *f, Str *nm, Value *out)
+{
+    const char *a = nm->s;
+    if (strcmp(a, "closed") == 0) { *out = mkbool(f->closed); return 1; }
+    if (strcmp(a, "mode") == 0) {
+        *out = mkcstr(f->mode ? f->mode->s : "r");
+        return 1;
+    }
+    if (strcmp(a, "name") == 0) {
+        if (f->name) *out = mkobj(f->name, T_STR);
+        else *out = mkcstr(f->fp == stdin ? "<stdin>" :
+                           (f->fp == stdout ? "<stdout>" : "<stderr>"));
+        return 1;
+    }
+    if (strcmp(a, "encoding") == 0 && !f->bin) { *out = mkcstr("utf-8"); return 1; }
+    if (strcmp(a, "errors") == 0 && !f->bin) { *out = mkcstr("strict"); return 1; }
+    if (strcmp(a, "buffer") == 0 && !f->bin) {
+        *out = new_file_obj(f->fp, 1, f->fp == stdin ? 1 : 2, NONE_V, f->fp == stdin ? "rb" : "wb");
+        return 1;
+    }
+    return 0;
 }
 
 /* ---- protocol methods of the native base types (list dict set tuple str) ----------

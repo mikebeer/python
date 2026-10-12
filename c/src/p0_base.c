@@ -86,6 +86,7 @@ typedef struct Dict {
     long fill;       /* table mode: active + dummy slots */
     long finger;     /* table mode: set.pop() search position */
     int frozen;      /* frozenset */
+    struct Inst *owner;  /* the __dict__ of this instance: changes are mirrored into it */
 } Dict;
 
 typedef struct AMap {
@@ -116,6 +117,7 @@ typedef struct Class {
     int nbases;
     struct Class *paycls; /* native base type (list dict set tuple str) holding the payload */
     Str *modname;        /* defining module, NULL for builtins */
+    struct Class *meta;  /* metaclass (a subclass of type) or NULL */
 } Class;
 #define CF_EXC 1
 #define CF_PROPS 2
@@ -123,7 +125,7 @@ typedef struct Class {
 #define CF_SETATTR 8
 #define CF_NPABS 16   /* numpy abstract scalar type (np.floating ...): isinstance by value type */
 
-typedef struct Inst { Hdr h; Class *cls; AMap a; Value pay; } Inst;
+typedef struct Inst { Hdr h; Class *cls; AMap a; Value pay; Dict *dct; } Inst;
 
 typedef struct Cell { Hdr h; Value v; } Cell;
 
@@ -169,7 +171,8 @@ typedef struct Cplx { Hdr h; double re, im; } Cplx;          /* complex */
 typedef struct Prop { Hdr h; Value get, set, del; } Prop;
 typedef struct DView { Hdr h; Value d; int what; } DView;   /* what: 0 keys 1 values 2 items */
 typedef struct Super { Hdr h; Class *start; Value obj; } Super;
-typedef struct File { Hdr h; FILE *fp; int closed; int out; } File;
+typedef struct File { Hdr h; FILE *fp; int closed; int out; int bin; Str *name; Str *mode; } File;
+/* bin: 0 text, 1 binary reading, 2 binary writing */
 
 typedef struct Gen {
     Hdr h;
@@ -276,6 +279,7 @@ typedef struct Frame {
     int resuming;
     Str *gp;             /* global prefix of the module this frame runs in */
     struct Frame *up;
+    int line;            /* line of the call being made from this frame (tracebacks) */
 } Frame;
 
 typedef struct Handler {
@@ -296,6 +300,16 @@ static int call_depth;
 static int cur_line;
 static Value cur_exc;
 static Value handled_exc;
+/* exception tracebacks (p6_obj.c): the frames between the raise point and the innermost handler,
+   innermost first, recorded when an exception is thrown */
+typedef struct TBEnt {
+    struct Func *fn; Str *gp; struct Class *ns; int line; struct Frame *frame;
+} TBEnt;
+static TBEnt *tb_buf;
+static int tb_n, tb_cap;
+static int tb_mode;      /* next throw: 0 propagate on, 1 fresh (raise statement), 2 bare raise */
+static int tb_live;      /* tb_buf describes the exception tb_excv still in flight */
+static Value tb_excv;
 static int class_epoch = 1;
 
 /* memory */
@@ -319,7 +333,11 @@ static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, 
     *cls_tuple, *cls_dict, *cls_set, *cls_range, *cls_none, *cls_func, *cls_builtin,
     *cls_method, *cls_gen, *cls_module, *cls_iter, *cls_prop, *cls_file, *cls_cell,
     *cls_smeth, *cls_cmeth, *cls_super, *cls_ndarray, *cls_slice, *cls_dview[3], *cls_notimpl,
+    *cls_fileb, *cls_filew,
         *cls_bytes, *cls_bytearray, *cls_complex, *cls_frozenset;
+static Class *cls_GenericAlias, *cls_code, *cls_frame, *cls_tb;
+static Class *cls_PermissionError, *cls_FileExistsError, *cls_IsADirectoryError,
+    *cls_NotADirectoryError;
 static Class *cls_MemoryError, *cls_BaseExceptionGroup, *cls_ExceptionGroup;
 static Class *cls_BaseException, *cls_Exception, *cls_ArithmeticError, *cls_ZeroDivisionError,
     *cls_OverflowError, *cls_LookupError, *cls_IndexError, *cls_KeyError, *cls_ValueError,
@@ -339,6 +357,9 @@ static Str *S_init, *S_str, *S_repr, *S_eq, *S_ne, *S_lt, *S_le, *S_gt, *S_ge, *
     *S_index, *S_pos, *S_invert, *S_and, *S_or, *S_xor, *S_lshift, *S_rshift, *S_dict,
     *S_mro, *S_doc, *S_setter, *S_main, *S_getattr, *S_format, *S_self, *S_super, *S_setattr,
     *S_new, *S_module, *S_reversed;
+static Str *S_tbraw,           /* hidden attribute: raw traceback entries of a caught exception */
+    *S_traceback, *S_cause, *S_context, *S_suppress, *S_init_subclass, *S_class_getitem,
+    *S_metaclass;
 
 static unsigned char ch_digit[256], ch_alpha[256], ch_alnum[256], ch_space[256],
     ch_upper[256], ch_lower[256], ch_hex[256], ch_print[256];
@@ -377,6 +398,11 @@ static Value *class_find(Class *c, Str *nm);
 static int class_isa(Class *c, Class *base);
 static int npabs_has(Class *abs, Class *k);
 static Value new_exc(Class *c, const char *msg);
+/* runtime introspection (p7_rt.c) */
+static Value generic_alias(Value origin, Value params);
+static int rt_inst_attr(Inst *in, Str *nm, Value *out);
+static int func_special_attr(Value fn, Str *nm, Value *out);
+static int file_attr(File *f, Str *nm, Value *out);
 
 /* numpy subset (p7_np.c) hooks */
 static Value nd_binop(int op, Value a, Value b);
@@ -730,7 +756,7 @@ static Dict *dict_new_t(int type)
 {
     Dict *d = (Dict *)gc_alloc(sizeof(Dict), type);
     d->n = 0; d->used = 0; d->cap = 0; d->e = NULL; d->idx = NULL; d->isz = 0;
-    d->fill = 0; d->finger = 0; d->frozen = 0;
+    d->fill = 0; d->finger = 0; d->frozen = 0; d->owner = NULL;
     return d;
 }
 static Dict *dict_new(void)
@@ -789,10 +815,12 @@ static int dict_get(Dict *d, Value k, Value *out)
     *out = d->e[e].v;
     return 1;
 }
+static void inst_dict_mirror(Dict *d, Value k, Value v, int del);
 static void dict_set_h(Dict *d, Value k, Value v, unsigned long h)
 {
     long e = dict_find(d, k, h);
     long i;
+    if (d->owner) inst_dict_mirror(d, k, v, 0);
     if (e >= 0) { d->e[e].v = v; return; }
     if (d->used >= d->cap) {
         if (d->n * 2 < d->used) dict_rebuild(d, d->cap);
@@ -816,6 +844,7 @@ static int dict_del_h(Dict *d, Value k, unsigned long h)
     long e = dict_find(d, k, h);
     long i;
     if (e < 0) return 0;
+    if (d->owner) inst_dict_mirror(d, k, NONE_V, 1);
     i = (long)(h % (unsigned long)d->isz);
     while (d->idx[i] != e) i = (i + 1) % d->isz;
     d->idx[i] = -2;
@@ -830,6 +859,7 @@ static int dict_del(Dict *d, Value k)
 }
 static void dict_clear(Dict *d)
 {
+    if (d->owner) inst_dict_mirror(d, NONE_V, NONE_V, 2);
     free(d->e); free(d->idx);
     d->e = NULL; d->idx = NULL; d->n = d->used = d->cap = d->isz = 0;
     d->fill = 0;
@@ -1196,6 +1226,7 @@ static void gc_scan(Hdr *h)
         Dict *d = (Dict *)h;
         for (i = 0; i < d->used; i++)
             if (d->e[i].k.t != T_UNSET) { gc_push(d->e[i].k); gc_push(d->e[i].v); }
+        gc_pushp(d->owner, T_INST);
         break; }
     case T_CLASS: {
         Class *c = (Class *)h;
@@ -1203,11 +1234,15 @@ static void gc_scan(Hdr *h)
         gc_pushp(c->name, T_STR); gc_pushp(c->base, T_CLASS); gc_mark_amap(&c->ns);
         for (k = 0; k < c->nmro; k++) gc_pushp(c->mro[k], T_CLASS);
         for (k = 0; k < c->nbases; k++) gc_pushp(c->bases[k], T_CLASS);
-        gc_pushp(c->paycls, T_CLASS); gc_pushp(c->modname, T_STR);
+        gc_pushp(c->paycls, T_CLASS); gc_pushp(c->modname, T_STR); gc_pushp(c->meta, T_CLASS);
+        break; }
+    case T_FILE: {
+        File *f = (File *)h;
+        gc_pushp(f->name, T_STR); gc_pushp(f->mode, T_STR);
         break; }
     case T_INST: {
         Inst *n = (Inst *)h;
-        gc_pushp(n->cls, T_CLASS); gc_mark_amap(&n->a); gc_push(n->pay);
+        gc_pushp(n->cls, T_CLASS); gc_mark_amap(&n->a); gc_push(n->pay); gc_pushp(n->dct, T_DICT);
         break; }
     case T_FUNC: {
         Func *f = (Func *)h;
@@ -1302,6 +1337,12 @@ static void gc_collect(void)
     }
     gc_push(cur_exc);
     gc_push(handled_exc);
+    gc_push(tb_excv);
+    for (i = 0; i < tb_n; i++) {
+        gc_pushp(tb_buf[i].fn, T_FUNC);
+        gc_pushp(tb_buf[i].gp, T_STR);
+        gc_pushp(tb_buf[i].ns, T_CLASS);
+    }
     while (ngray > 0) gc_scan(gray[--ngray]);
     live = 0;
     pp = &heap_list;

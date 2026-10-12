@@ -17,7 +17,7 @@ static Class *class_of(Value v)
     case T_RANGE: return cls_range;
     case T_FUNC: return cls_func;
     case T_BUILTIN: return cls_builtin;
-    case T_CLASS: return cls_type;
+    case T_CLASS: return AS_CLASS(v)->meta ? AS_CLASS(v)->meta : cls_type;
     case T_INST: return AS_INST(v)->cls;
     case T_BOUND: return cls_method;
     case T_GEN: return cls_gen;
@@ -27,7 +27,8 @@ static Class *class_of(Value v)
     case T_SMETH: return cls_smeth;
     case T_CMETH: return cls_cmeth;
     case T_SUPER: return cls_super;
-    case T_FILE: return cls_file;
+    case T_FILE: return ((File *)v.u.o)->bin == 0 ? cls_file :
+        (((File *)v.u.o)->bin == 1 ? cls_fileb : cls_filew);
     case T_CELL: return cls_cell;
     case T_ND: return cls_ndarray;
     case T_SLICE: return cls_slice;
@@ -121,6 +122,7 @@ static Inst *new_inst(Class *c)
     in->cls = c;
     in->a.k = NULL; in->a.v = NULL; in->a.n = in->a.cap = 0;
     in->pay = UNSET_V;
+    in->dct = NULL;
     return in;
 }
 static Value new_bound(Value self, Value fn)
@@ -152,10 +154,89 @@ static Value new_exc_args(Class *c, Value *args, long n)
     return iv;
 }
 static int exc_line;
+/* ---- tracebacks: the frames are recorded when the exception is thrown (the C frames are gone
+   once the handler runs); tb_attach turns the part between the catching frame and the raise point
+   into the hidden attribute __tbraw__ of the exception (flat tuple: fn, module prefix, class body
+   name, line for every frame, outermost first); `e.__traceback__` builds objects from it */
+static void tb_add(Frame *f, int line)
+{
+    if (tb_n >= tb_cap) {
+        tb_cap = tb_cap ? tb_cap * 2 : 32;
+        tb_buf = (TBEnt *)xrealloc(tb_buf, sizeof(TBEnt) * (size_t)tb_cap);
+    }
+    tb_buf[tb_n].fn = f->fn;
+    tb_buf[tb_n].gp = f->gp;
+    tb_buf[tb_n].ns = f->ns;
+    tb_buf[tb_n].line = line;
+    tb_buf[tb_n].frame = f;
+    tb_n++;
+}
+static void tb_snapshot(Value exc)
+{
+    Frame *f, *stop = cur_handler ? cur_handler->frame : NULL;
+    int line = cur_line;
+    if (tb_mode == 0 && tb_live && tb_excv.u.o == exc.u.o && tb_n > 0 && cur_frame &&
+        tb_buf[tb_n - 1].frame == cur_frame) {
+        /* the same exception propagates on (finally, import cleanup): extend the record */
+        if (cur_frame == stop) return;
+        f = cur_frame->up;
+        line = f ? f->line : 0;
+    } else {
+        tb_n = 0;
+        f = cur_frame;
+        if (tb_mode == 2 && f) {   /* bare raise: the frame keeps the entry it already has */
+            if (f == stop) return;
+            f = f->up;
+            line = f ? f->line : 0;
+        }
+    }
+    for (; f; f = f->up) {
+        tb_add(f, line);
+        if (f == stop) break;
+        line = f->up ? f->up->line : 0;
+    }
+}
+/* the exception was caught by an except clause of frame f */
+static void tb_attach(Value exc, Frame *f)
+{
+    Inst *in;
+    Value *old;
+    List *raw;
+    int k, nnew = 0, nold = 0, i, j, total;
+    if (exc.t != T_INST || tb_excv.u.o != exc.u.o || !tb_live) return;
+    tb_live = 0;
+    in = AS_INST(exc);
+    for (k = 0; k < tb_n; k++) if (tb_buf[k].frame == f) { nnew = k + 1; break; }
+    old = amap_get(&in->a, S_tbraw);
+    if (old && old->t == T_TUPLE) nold = (int)(AS_LIST(*old)->n / 4);
+    total = nnew + nold;
+    if (total > 100) { nold -= total - 100; total = 100; }
+    if (total <= 0) return;
+    raw = tuple_new(4L * total);
+    j = 0;
+    for (i = nnew - 1; i >= 0; i--) {   /* outermost first */
+        raw->a[j++] = tb_buf[i].fn ? mkobj(tb_buf[i].fn, T_FUNC) : NONE_V;
+        raw->a[j++] = tb_buf[i].gp ? mkobj(tb_buf[i].gp, T_STR) : NONE_V;
+        raw->a[j++] = tb_buf[i].ns ? mkobj(tb_buf[i].ns->name, T_STR) : NONE_V;
+        raw->a[j++] = mkint(tb_buf[i].line);
+    }
+    for (i = 0; i < nold * 4; i++) raw->a[j++] = AS_LIST(*old)->a[i];
+    amap_set(&in->a, S_tbraw, mkobj(raw, T_TUPLE));
+    amap_del(&in->a, S_traceback);
+}
 static void throw_val(Value exc)
 {
     cur_exc = exc;
     exc_line = cur_line;
+    if (exc.t == T_INST) {
+        tb_snapshot(exc);
+        if (handled_exc.t == T_INST && handled_exc.u.o != exc.u.o &&
+            !amap_get(&AS_INST(exc)->a, S_context))
+            amap_set(&AS_INST(exc)->a, S_context, handled_exc);
+    }
+    tb_mode = 0;
+    tb_live = 1;
+    tb_excv = exc;
     if (!cur_handler) {
         fflush(stdout);
         fprintf(stderr, "fatal: uncaught exception outside handler\n");
@@ -266,6 +347,16 @@ static long py_len(Value v)
     case T_RANGE: return range_len((Range *)v.u.o);
     case T_ND: return nd_len(v);
     case T_DVIEW: return AS_DICT(((DView *)v.u.o)->d)->n;
+    case T_CLASS: {
+        Value *m = AS_CLASS(v)->meta ? class_find(AS_CLASS(v)->meta, S_len) : NULL;
+        if (m) {
+            Value r = call1(*m, v);
+            if (r.t != T_INT)
+                throw_new(cls_TypeError, "'%.40s' object cannot be interpreted as an integer",
+                type_name(r));
+            return r.u.i;
+        }
+        break; }
     case T_INST: {
         Value *m = class_find(AS_INST(v)->cls, S_len);
         if (m) {
@@ -904,6 +995,10 @@ static void repr_buf(Value v, Buf *b, int depth)
     case T_CLASS:
         buf_add(b, "<class '");
         if (!(AS_CLASS(v)->flags & CF_BUILTIN)) buf_add(b, "__main__.");
+        else if (AS_CLASS(v)->modname && strcmp(AS_CLASS(v)->modname->s, "builtins") != 0) {
+            buf_add(b, AS_CLASS(v)->modname->s);
+            buf_addc(b, '.');
+        }
         buf_add(b, AS_CLASS(v)->name->s);
         buf_add(b, "'>");
         break;
@@ -1167,6 +1262,64 @@ static void c3_build(Class *c, Class **bases, int nb)
     c->mro = res;
     c->nmro = nres;
 }
+/* obj.__dict__: one dict per instance, refreshed from the attributes at every access; changes made
+   through it (update, item assignment, del, clear) are mirrored into the attributes (Dict.owner) */
+static Value inst_dict_get(Inst *in)
+{
+    Dict *d = in->dct;
+    int i;
+    if (!d) { d = dict_new(); in->dct = d; }
+    d->owner = NULL;
+    dict_clear(d);
+    for (i = 0; i < in->a.n; i++)
+        if (in->a.k[i] != S_tbraw && in->a.k[i] != S_traceback && in->a.k[i] != S_cause &&
+            in->a.k[i] != S_context && in->a.k[i] != S_suppress)
+            dict_set(d, mkobj(in->a.k[i], T_STR), in->a.v[i]);
+    d->owner = in;
+    return mkobj(d, T_DICT);
+}
+static void inst_attrs_clear(Inst *in)
+{
+    int i, j = 0;
+    for (i = 0; i < in->a.n; i++)   /* keep the hidden traceback attribute */
+        if (in->a.k[i] == S_tbraw || in->a.k[i] == S_cause || in->a.k[i] == S_context ||
+            in->a.k[i] == S_suppress) { in->a.k[j] = in->a.k[i]; in->a.v[j++] = in->a.v[i]; }
+    in->a.n = j;
+}
+static void inst_dict_mirror(Dict *d, Value k, Value v, int del)
+{
+    Inst *in = d->owner;
+    if (del == 2) { inst_attrs_clear(in); return; }
+    if (k.t != T_STR) return;
+    if (del) amap_del(&in->a, intern_str(AS_STR(k)));
+    else amap_set(&in->a, intern_str(AS_STR(k)), v);
+}
+/* obj.__dict__ = d */
+static void inst_dict_assign(Inst *in, Value v)
+{
+    Dict *d;
+    long i;
+    if (v.t != T_DICT)
+        throw_new(cls_TypeError, "__dict__ must be set to a dictionary, not a '%.60s'",
+                  type_name(v));
+    d = AS_DICT(v);
+    inst_attrs_clear(in);
+    for (i = 0; i < d->used; i++)
+        if (d->e[i].k.t == T_STR) amap_set(&in->a, intern_str(AS_STR(d->e[i].k)), d->e[i].v);
+    if (in->dct && in->dct != d) in->dct->owner = NULL;
+    in->dct = d;
+    d->owner = in;
+}
+/* the class whose MRO a super object searches: the type of the object, or for a class the class
+   itself (classmethods) unless the starting class is one of its metaclasses (metaclass methods) */
+static Class *super_type(Super *s)
+{
+    if (s->obj.t != T_CLASS) return class_of(s->obj);
+    if (AS_CLASS(s->obj)->meta && !class_isa(AS_CLASS(s->obj), s->start) &&
+        class_isa(AS_CLASS(s->obj)->meta, s->start))
+        return AS_CLASS(s->obj)->meta;
+    return AS_CLASS(s->obj);
+}
 static Value get_attr(Value o, Str *nm)
 {
     Value *p;
@@ -1178,14 +1331,12 @@ static Value get_attr(Value o, Str *nm)
         p = class_find(in->cls, nm);
         if (p) return bind_class_attr(o, p, in->cls);
         if (nm == S_class) return mkobj(in->cls, T_CLASS);
-        if (nm == S_dict) {
-            Dict *d = dict_new();
-            int i;
-            Value dv = mkobj(d, T_DICT);
-            VPUSH(dv);
-            for (i = 0; i < in->a.n; i++) dict_set(d, mkobj(in->a.k[i], T_STR), in->a.v[i]);
-            vsp--;
-            return dv;
+        if (nm == S_dict) return inst_dict_get(in);
+        if ((in->cls->flags & CF_EXC) && (nm == S_cause || nm == S_context)) return NONE_V;
+        if ((in->cls->flags & CF_EXC) && nm == S_suppress) return FALSE_V;
+        if ((in->cls->flags & CF_EXC) ? nm == S_traceback : in->cls == cls_frame) {
+            Value r;
+            if (rt_inst_attr(in, nm, &r)) return r;
         }
         p = class_find(in->cls, S_getattr);
         if (p) return call2(*p, o, mkobj(nm, T_STR));
@@ -1196,7 +1347,13 @@ static Value get_attr(Value o, Str *nm)
         if (p) {
             if (p->t == T_CMETH) return new_bound(o, ((Prop *)p->u.o)->get);
             if (p->t == T_SMETH) return ((Prop *)p->u.o)->get;
+            if (p->t == T_FUNC && (nm == S_init_subclass || nm == S_class_getitem))
+                return new_bound(o, *p);   /* implicit classmethods */
             return *p;
+        }
+        if (c->meta) {   /* attributes (methods, properties) of the metaclass */
+            p = class_find(c->meta, nm);
+            if (p) return bind_class_attr(o, p, c->meta);
         }
         if (nm == S_name) return mkobj(c->name, T_STR);
         if (nm == S_dict) {
@@ -1212,7 +1369,7 @@ static Value get_attr(Value o, Str *nm)
         if (nm == S_module) return c->modname ? mkobj(c->modname, T_STR) : mkcstr("builtins");
         if (nm == S_mro) return class_mro_tuple(c);
         if (nm == S_doc) return NONE_V;
-        if (nm == S_class) return mkobj(cls_type, T_CLASS);
+        if (nm == S_class) return mkobj(c->meta ? c->meta : cls_type, T_CLASS);
         if (nm == intern_c("__bases__")) {
             Value bv[1];
             int k;
@@ -1247,12 +1404,14 @@ static Value get_attr(Value o, Str *nm)
         break; }
     case T_SUPER: {
         Super *s = (Super *)o.u.o;
-        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start,
-            nm);
+        p = class_find_after(super_type(s), s->start, nm);
         if (p) {
-            if (s->obj.t == T_CLASS) {
+            if (s->obj.t == T_CLASS &&
+                (AS_CLASS(s->obj)->meta == NULL || class_isa(AS_CLASS(s->obj), s->start))) {
                 if (p->t == T_CMETH) return new_bound(s->obj, ((Prop *)p->u.o)->get);
                 if (p->t == T_SMETH) return ((Prop *)p->u.o)->get;
+                if (p->t == T_FUNC && (nm == S_init_subclass || nm == S_class_getitem))
+                    return new_bound(s->obj, *p);
                 return *p;
             }
             return bind_class_attr(s->obj, p, class_of(s->obj));
@@ -1264,6 +1423,7 @@ static Value get_attr(Value o, Str *nm)
     case T_FUNC:
         p = amap_get(&AS_FUNC(o)->attrs, nm);
         if (p) return *p;
+        { Value r; if (func_special_attr(o, nm, &r)) return r; }
         if (nm == intern_c("__annotations__")) {
             Value av = mkobj(dict_new(), T_DICT);
             amap_set(&AS_FUNC(o)->attrs, nm, av);
@@ -1276,6 +1436,7 @@ static Value get_attr(Value o, Str *nm)
             VPUSH(dv);
             for (k = 0; k < AS_FUNC(o)->attrs.n; k++) {
                 if (AS_FUNC(o)->attrs.k[k] == intern_c("__annotations__")) continue;
+                if (AS_FUNC(o)->attrs.k[k] == intern_c("__code__")) continue;
                 dict_set(d, mkobj(AS_FUNC(o)->attrs.k[k], T_STR), AS_FUNC(o)->attrs.v[k]);
             }
             vsp--;
@@ -1311,6 +1472,10 @@ static Value get_attr(Value o, Str *nm)
     case T_ND: {
         Value r;
         if (nd_getattr(o, nm, &r)) return r;
+        break; }
+    case T_FILE: {
+        Value r;
+        if (file_attr((File *)o.u.o, nm, &r)) return r;
         break; }
     default: break;
     }
@@ -1373,8 +1538,7 @@ static int lookup_method(Value *o, Str *nm, Value *out, Node *cache)
         break; }
     case T_SUPER: {
         Super *s = (Super *)o->u.o;
-        p = class_find_after(s->obj.t == T_CLASS ? AS_CLASS(s->obj) : class_of(s->obj), s->start,
-            nm);
+        p = class_find_after(super_type(s), s->start, nm);
         if (p && (p->t == T_FUNC || p->t == T_BUILTIN) && s->obj.t != T_CLASS) {
             *out = *p;
             *o = s->obj;
@@ -1405,6 +1569,7 @@ static void set_attr(Value o, Str *nm, Value v)
     switch (o.t) {
     case T_INST: {
         Inst *in = AS_INST(o);
+        if (nm == S_dict) { inst_dict_assign(in, v); return; }
         if (in->cls->flags & CF_SETATTR) {
             Value *sa = class_find(in->cls, S_setattr);
             if (sa && sa->t == T_FUNC) {
@@ -1426,6 +1591,11 @@ static void set_attr(Value o, Str *nm, Value v)
             }
         }
         amap_set(&in->a, nm, v);
+        if (in->dct) {
+            in->dct->owner = NULL;
+            dict_set(in->dct, mkobj(nm, T_STR), v);
+            in->dct->owner = in;
+        }
         return; }
     case T_CLASS:
         amap_set(&AS_CLASS(o)->ns, nm, v);
@@ -1458,7 +1628,15 @@ static void del_attr(Value o, Str *nm)
             return;
         }
     }
-    if (o.t == T_INST && amap_del(&AS_INST(o)->a, nm)) return;
+    if (o.t == T_INST && amap_del(&AS_INST(o)->a, nm)) {
+        Inst *in = AS_INST(o);
+        if (in->dct) {
+            in->dct->owner = NULL;
+            dict_del(in->dct, mkobj(nm, T_STR));
+            in->dct->owner = in;
+        }
+        return;
+    }
     if (o.t == T_FUNC && amap_del(&AS_FUNC(o)->attrs, nm)) return;
     if (o.t == T_CLASS && amap_del(&AS_CLASS(o)->ns, nm)) { class_epoch++; return; }
     attr_error(o, nm);
@@ -1674,6 +1852,17 @@ static Value subscr(Value o, Value idx)
         throw_new(cls_TypeError, "range indices must be integers or slices, not %.40s",
             type_name(idx));
         break;
+    case T_CLASS: {
+        Class *c = AS_CLASS(o);
+        Value *m = class_find(c, S_class_getitem);
+        if (m) return call2(m->t == T_CMETH ? ((Prop *)m->u.o)->get : *m, o, idx);
+        m = c->meta ? class_find(c->meta, S_getitem) : NULL;
+        if (m) return call2(*m, o, idx);
+        if (c == cls_list || c == cls_dict || c == cls_set || c == cls_frozenset ||
+            c == cls_tuple || c == cls_type)
+            return generic_alias(o, idx);
+        throw_new(cls_TypeError, "type '%.60s' is not subscriptable", c->name->s);
+        break; }
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_getitem);
         if (m && m->t == T_BUILTIN && AS_INST(o)->pay.t == T_DICT) {
@@ -1963,6 +2152,10 @@ static Value get_iter(Value o)
     case T_ND:
         nd_len(o);
         it = iter_new(IK_ND); it->a = o; return mkobj(it, T_ITER);
+    case T_CLASS: {
+        Value *m = AS_CLASS(o)->meta ? class_find(AS_CLASS(o)->meta, S_iter) : NULL;
+        if (m) return call1(*m, o);
+        break; }
     case T_INST: {
         Value *m = class_find(AS_INST(o)->cls, S_iter);
         if (m) return call1(*m, o);
@@ -2234,11 +2427,18 @@ static int contains(Value c, Value x)
         Value *m = class_find(AS_INST(c)->cls, S_contains);
         if (m) return py_truthy(call2(*m, c, x));
         break; }
+    case T_CLASS: {
+        Value *m = AS_CLASS(c)->meta ? class_find(AS_CLASS(c)->meta, S_contains) : NULL;
+        if (m) return py_truthy(call2(*m, c, x));
+        if (AS_CLASS(c)->meta && class_find(AS_CLASS(c)->meta, S_iter)) break;
+        throw_new(cls_TypeError, "argument of type 'type' is not iterable");
+        break; }
     default: break;
     }
     {
         Value it, y;
-        if (c.t != T_DVIEW && c.t != T_INST && c.t != T_GEN && c.t != T_ITER && c.t != T_ND)
+        if (c.t != T_DVIEW && c.t != T_INST && c.t != T_CLASS && c.t != T_GEN &&
+            c.t != T_ITER && c.t != T_ND)
             throw_new(cls_TypeError, "argument of type '%.60s' is not iterable", type_name(c));
         it = get_iter(c);
         VPUSH(it);

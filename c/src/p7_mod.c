@@ -601,11 +601,7 @@ BI(m_dist)
 /* ---- sys / time ------------------------------------------------------- */
 static Value std_file(FILE *fp, int out)
 {
-    File *f = (File *)gc_alloc(sizeof(File), T_FILE);
-    f->fp = fp;
-    f->closed = 0;
-    f->out = out;
-    return mkobj(f, T_FILE);
+    return new_file_obj(fp, out, 0, NONE_V, fp == stdin ? "r" : "w");
 }
 BI(t_time)
 {
@@ -633,6 +629,53 @@ BI(t_clock_ns)
 {
     (void)x;
     return ns_value(host_clock());
+}
+/* _gmtime(secs) / _localtime(secs): (year, month, day, hour, minute, second, weekday, yearday,
+   isdst, zone, offset) like the sequence of time.struct_time; the pure Python overlay pylib/time.py
+   wraps them */
+static Value tm_tuple(Args *x, int local)
+{
+    long f[10];
+    char zone[64];
+    Value v[11];
+    double secs;
+    int i;
+    need(x, 1, 1, "gmtime");
+    secs = floor(dbl_arg(x, 0));
+    if (!host_timeparts(secs, local, f, zone, (int)sizeof(zone)))
+        throw_new(cls_OverflowError, "timestamp out of range for platform time_t");
+    for (i = 0; i < 9; i++) v[i] = mkint(f[i]);
+    v[9] = mkcstr(zone);
+    v[10] = mkint(f[9]);
+    return mktuple_from(v, 11);
+}
+BI(t_gmtime_raw) { return tm_tuple(x, 0); }
+BI(t_localtime_raw) { return tm_tuple(x, 1); }
+BI(t_mktime_raw)
+{
+    long f[9];
+    double out;
+    int i;
+    Value t;
+    need(x, 1, 1, "mktime");
+    t = unpay(A(0));
+    if (t.t != T_TUPLE || AS_LIST(t)->n < 9)
+        throw_new(cls_TypeError, "mktime(): illegal time tuple argument");
+    for (i = 0; i < 9; i++) f[i] = to_index(AS_LIST(t)->a[i]);
+    if (!host_mktime(f, &out)) throw_new(cls_OverflowError, "mktime argument out of range");
+    return mkfloat(out);
+}
+BI(t_tzinfo_raw)
+{
+    long tz, alt;
+    int dst;
+    char sn[64], dn[64];
+    Value v[5];
+    (void)x;
+    if (!host_tzinfo(&tz, &alt, &dst, sn, dn, (int)sizeof(sn)))
+        throw_new(cls_OSError, "time zone information is not available");
+    v[0] = mkint(tz); v[1] = mkint(alt); v[2] = mkint(dst); v[3] = mkcstr(sn); v[4] = mkcstr(dn);
+    return mktuple_from(v, 5);
 }
 BI(t_sleep)
 {
@@ -691,10 +734,10 @@ static struct { const char *name; Class **var; Class **base; } exc_table[] = {
     { "BufferError", &cls_dummy_exc[6], &cls_Exception },
     { "SystemError", &cls_dummy_exc[7], &cls_Exception },
     { "StopAsyncIteration", &cls_dummy_exc[8], &cls_Exception },
-    { "PermissionError", &cls_dummy_exc[9], &cls_OSError },
-    { "FileExistsError", &cls_dummy_exc[10], &cls_OSError },
-    { "IsADirectoryError", &cls_dummy_exc[11], &cls_OSError },
-    { "NotADirectoryError", &cls_dummy_exc[12], &cls_OSError },
+    { "PermissionError", &cls_PermissionError, &cls_OSError },
+    { "FileExistsError", &cls_FileExistsError, &cls_OSError },
+    { "IsADirectoryError", &cls_IsADirectoryError, &cls_OSError },
+    { "NotADirectoryError", &cls_NotADirectoryError, &cls_OSError },
     { "TimeoutError", &cls_TimeoutError, &cls_OSError },
     { "ConnectionError", &cls_ConnectionError, &cls_OSError },
     { "ConnectionRefusedError", &cls_ConnectionRefusedError, &cls_ConnectionError },
@@ -762,6 +805,10 @@ static void init_runtime(int argc, char **argv)
     SN(S_getattr, "__getattr__"); SN(S_format, "__format__"); SN(S_self, "self");
     SN(S_super, "super"); SN(S_setattr, "__setattr__"); SN(S_new, "__new__");
     SN(S_module, "__module__"); SN(S_reversed, "__reversed__");
+    SN(S_tbraw, "__tbraw__"); SN(S_traceback, "__traceback__");
+    SN(S_cause, "__cause__"); SN(S_context, "__context__"); SN(S_suppress, "__suppress_context__");
+    SN(S_init_subclass, "__init_subclass__"); SN(S_class_getitem, "__class_getitem__");
+    SN(S_metaclass, "metaclass");
 #undef SN
     /* classes */
     cls_object = new_class("object", NULL, CF_BUILTIN);
@@ -785,6 +832,8 @@ static void init_runtime(int argc, char **argv)
     cls_iter = mk_type("iterator", cls_object, NULL);
     cls_prop = mk_type("property", cls_object, bi_property);
     cls_file = mk_type("TextIOWrapper", cls_object, NULL);
+    cls_fileb = mk_type("BufferedReader", cls_object, NULL);
+    cls_filew = mk_type("BufferedWriter", cls_object, NULL);
     cls_cell = mk_type("cell", cls_object, NULL);
     cls_smeth = mk_type("staticmethod", cls_object, bi_staticmethod);
     cls_cmeth = mk_type("classmethod", cls_object, bi_classmethod);
@@ -838,6 +887,10 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_object, "__new__", nat_new);
     def_bi(cls_object, "__setattr__", obj_setattr);
     obj_str_v = *amap_get(&cls_object->ns, S_str);
+    amap_set(&cls_type->ns, S_new, mkbuiltin("__new__", type_new));
+    def_bi(cls_type, "__call__", type_call); def_bi(cls_type, "__init__", type_init);
+    amap_set(&cls_object->ns, S_init_subclass,
+             mk_prop(T_CMETH, mkbuiltin("__init_subclass__", obj_init_subclass), UNSET_V));
 
     /* str */
     def_bi(cls_str, "upper", s_upper); def_bi(cls_str, "lower", s_lower);
@@ -990,6 +1043,24 @@ static void init_runtime(int argc, char **argv)
     def_bi(cls_file, "writelines", fl_writelines); def_bi(cls_file, "flush", fl_flush);
     def_bi(cls_file, "close", fl_close); def_bi(cls_file, "__enter__", fl_enter);
     def_bi(cls_file, "__exit__", fl_exit);
+    {
+        Class *fk[3];
+        int k;
+        fk[0] = cls_file; fk[1] = cls_fileb; fk[2] = cls_filew;
+        for (k = 0; k < 3; k++) {
+            if (k) {
+                def_bi(fk[k], "read", fl_read); def_bi(fk[k], "readline", fl_readline);
+                def_bi(fk[k], "readlines", fl_readlines); def_bi(fk[k], "write", fl_write);
+                def_bi(fk[k], "writelines", fl_writelines); def_bi(fk[k], "flush", fl_flush);
+                def_bi(fk[k], "close", fl_close); def_bi(fk[k], "__enter__", fl_enter);
+                def_bi(fk[k], "__exit__", fl_exit);
+            }
+            def_bi(fk[k], "seek", fl_seek); def_bi(fk[k], "tell", fl_tell);
+            def_bi(fk[k], "readable", fl_readable); def_bi(fk[k], "writable", fl_writable);
+            def_bi(fk[k], "seekable", fl_seekable); def_bi(fk[k], "isatty", fl_isatty);
+            def_bi(fk[k], "fileno", fl_fileno); def_bi(fk[k], "readinto", fl_readinto);
+        }
+    }
 
     bytes_init();
     set_global(intern_c("bytearray"), mkobj(cls_bytearray, T_CLASS));
@@ -1067,12 +1138,15 @@ static void init_runtime(int argc, char **argv)
     struct_init();
     cmath_init();
     sock_init();
+    introspect_init();
     m = new_module("time");
     mod_def(m, "time", t_time); mod_def(m, "perf_counter", t_clock);
     mod_def(m, "monotonic", t_clock); mod_def(m, "process_time", t_clock);
     mod_def(m, "sleep", t_sleep);
     mod_def(m, "time_ns", t_time_ns); mod_def(m, "perf_counter_ns", t_clock_ns);
     mod_def(m, "monotonic_ns", t_clock_ns); mod_def(m, "process_time_ns", t_clock_ns);
+    mod_def(m, "_gmtime", t_gmtime_raw); mod_def(m, "_localtime", t_localtime_raw);
+    mod_def(m, "_mktime", t_mktime_raw); mod_def(m, "_tzinfo", t_tzinfo_raw);
     m = new_module("sys");
     sys_mod = m;
     av = list_new(argc + 1);
@@ -1087,6 +1161,7 @@ static void init_runtime(int argc, char **argv)
     mod_val(m, "version", mkcstr("3.12.0 (C89 subset interpreter)"));
     mod_val(m, "platform", mkcstr("c89"));
     mod_def(m, "exc_info", bi_exc_info);
+    mod_def(m, "_getframe", sys_getframe);
     mod_val(m, "modules", sys_modules_v);
     init_sys_path(sargv0);
     mod_val(m, "path", sys_path_v);
@@ -1111,6 +1186,10 @@ static void init_runtime(int argc, char **argv)
         mod_def(m, "getenv", os_getenv); mod_def(m, "getcwd", os_getcwd);
         mod_def(m, "remove", os_remove); mod_def(m, "unlink", os_remove);
         mod_def(m, "rename", os_rename);
+        mod_def(m, "urandom", os_urandom);
+        mod_def(m, "listdir", os_listdir); mod_def(m, "mkdir", os_mkdir);
+        mod_def(m, "rmdir", os_rmdir); mod_def(m, "chdir", os_chdir);
+        mod_def(m, "getpid", os_getpid); mod_def(m, "getppid", os_getppid);
         mod_val(m, "sep", mkcstr("/")); mod_val(m, "pathsep", mkcstr(":"));
         mod_val(m, "linesep", mkcstr("\n")); mod_val(m, "name", mkcstr("posix"));
         mod_val(m, "curdir", mkcstr(".")); mod_val(m, "pardir", mkcstr(".."));
@@ -1120,6 +1199,7 @@ static void init_runtime(int argc, char **argv)
         mod_def(pm, "join", osp_join); mod_def(pm, "exists", osp_exists);
         mod_def(pm, "basename", osp_basename); mod_def(pm, "dirname", osp_dirname);
         mod_def(pm, "split", osp_split); mod_def(pm, "splitext", osp_splitext);
+        mod_def(pm, "normcase", osp_normcase);
         mod_def(pm, "isabs", osp_isabs); mod_def(pm, "normpath", osp_normpath);
         mod_def(pm, "abspath", osp_abspath); mod_def(pm, "expanduser", osp_expanduser);
         mod_def(pm, "isdir", osp_isdir); mod_def(pm, "isfile", osp_isfile);

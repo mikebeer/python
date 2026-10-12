@@ -1120,7 +1120,7 @@ static Class *mod_class(const char *name, Class *base, const char *modname)
     c->ns.k = NULL; c->ns.v = NULL; c->ns.n = c->ns.cap = 0;
     c->ctor = NULL;
     c->mro = NULL; c->nmro = 0; c->bases = NULL; c->nbases = 0; c->paycls = NULL;
-    c->modname = intern_c(modname);
+    c->modname = intern_c(modname); c->meta = NULL;
     c->flags = CF_BUILTIN | (base ? (base->flags & CF_EXC) : 0);
     return c;
 }

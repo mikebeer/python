@@ -61,7 +61,12 @@ import time as _time
 
 
 def _urandom(n):
-    # no operating system entropy source in the interpreters: derive bytes from the clock
+    try:
+        import os as _os
+        return _os.urandom(n)
+    except (ImportError, AttributeError):
+        pass
+    # no operating system entropy source: derive bytes from the clock
     x = _time.time_ns() ^ (id(object()) << 20) ^ 0x9E3779B97F4A7C15
     out = bytearray()
     while len(out) < n:
