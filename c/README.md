@@ -385,7 +385,12 @@ append take logical_* exp2 expm1 log1p cbrt degrees radians ...`.
 ## subprocess (src/p7_sock.c `_proc`, host adapter `host_proc_run` in src/p0_os.c, pylib/subprocess.py)
 
 `import subprocess` (POSIX builds only): `run`, `call`, `check_call`, `check_output`, `CompletedProcess`,
-`CalledProcessError`, `TimeoutExpired`, `PIPE`, `STDOUT`, `DEVNULL`, and a deferred `Popen` whose
-`communicate()/wait()/poll()` run the child to completion (no interactive pipes). Native part:
+`CalledProcessError`, `TimeoutExpired`, `PIPE`, `STDOUT`, `DEVNULL`, and `Popen`: deferred (the child runs to
+completion at `communicate()/wait()/poll()`) unless `stdin=PIPE, stdout=PIPE` are both given, then it is live:
+the child starts at once in its own process group, `p.stdin.write(...)`, `p.stdout.read1(n, timeout)` /
+`p.read_nonblock(timeout)` (None = nothing yet, empty = end of file), `send_signal/terminate/kill`, `poll/wait`.
+Natives `_proc.spawn(argv, cwd, merge) -> (pid, in_fd, out_fd, err_fd)`, `read(fd, n, timeout)`, `write`, `close`,
+`kill(pid, sig)` (process group), `wait(pid, nohang) -> (done, rc)`; host adapters `host_proc_spawn/read/write/
+close/signal/wait` (select on the fds; ENOSYS elsewhere). Test 72. Native part:
 `_proc.run(argv, input, timeout, cwd) -> (status, rc, stdout, stderr)` using fork/execvp/pipe/select;
 without `-DPY_POSIX` it reports ENOSYS (OSError).
