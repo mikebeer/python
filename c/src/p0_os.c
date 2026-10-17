@@ -1012,3 +1012,146 @@ static int host_proc_run(char **argv, const char *in, long inlen, double timeout
     return 2;
 }
 #endif
+
+/* ---- live child processes (persistent sessions) ---------------------------
+   host_proc_spawn starts argv[0] with stdin and stdout (and stderr when merge is 0; 1 merges it
+   into stdout, 2 leaves the parent's stderr) connected to pipes held by the parent and returns at once.
+   Returns 0 and fills *pid and fds[0..2] (stdin, stdout, stderr; -1 unless merge is 0), or an errno.
+   host_proc_read waits at most timeout seconds (< 0 forever) for data on fd: returns the
+   bytes read (> 0), 0 at end of file, -1 on timeout, -2 on error.  host_proc_write writes
+   all bytes (blocking), returns 0 or an errno.  host_proc_signal sends a signal to the
+   child's process group.  host_proc_wait reaps the child: returns 0 still running (nohang),
+   1 finished (*rc is the exit status or 128+signal), -1 error.  POSIX only; other hosts
+   return ENOSYS (38) / -2. */
+#ifdef PY_POSIX
+static int host_proc_spawn(char **argv, const char *cwd, int merge, int *pid, int *fds)
+{
+    int pin[2], pout[2], perr[2], pst[2], en = 0;
+    pid_t c;
+    signal(SIGPIPE, SIG_IGN);
+    if (pipe(pin) < 0) return errno;
+    if (pipe(pout) < 0) return errno;
+    if (merge == 0 && pipe(perr) < 0) return errno;
+    if (pipe(pst) < 0) return errno;
+    fcntl(pst[1], F_SETFD, FD_CLOEXEC);
+    fcntl(pin[1], F_SETFD, FD_CLOEXEC);
+    fcntl(pout[0], F_SETFD, FD_CLOEXEC);
+    if (merge == 0) fcntl(perr[0], F_SETFD, FD_CLOEXEC);
+    c = fork();
+    if (c < 0) return errno;
+    if (c == 0) {
+        setpgid(0, 0);
+        dup2(pin[0], 0); dup2(pout[1], 1);
+        if (merge == 1) dup2(pout[1], 2);
+        else if (merge == 0) dup2(perr[1], 2);
+        if (pin[0] > 2) close(pin[0]);
+        if (pout[1] > 2) close(pout[1]);
+        if (merge == 0 && perr[1] > 2) close(perr[1]);
+        if (cwd && chdir(cwd) < 0) {
+            en = errno;
+            if (write(pst[1], &en, sizeof(en)) < 0) { /* nothing to do */ }
+            _exit(127);
+        }
+        execvp(argv[0], argv);
+        en = errno;
+        if (write(pst[1], &en, sizeof(en)) < 0) { /* nothing to do */ }
+        _exit(127);
+    }
+    close(pin[0]); close(pout[1]); close(pst[1]);
+    if (merge == 0) close(perr[1]);
+    if (read(pst[0], &en, sizeof(en)) == (long)sizeof(en)) {
+        int st;
+        close(pst[0]); close(pin[1]); close(pout[0]);
+        if (merge == 0) close(perr[0]);
+        waitpid(c, &st, 0);
+        return en;
+    }
+    close(pst[0]);
+    *pid = (int)c;
+    fds[0] = pin[1]; fds[1] = pout[0]; fds[2] = merge == 0 ? perr[0] : -1;
+    return 0;
+}
+static long host_proc_read(int fd, char *buf, long max, double timeout)
+{
+    for (;;) {
+        fd_set rs;
+        struct timeval tv, *tvp = NULL;
+        int r;
+        long k;
+        FD_ZERO(&rs); FD_SET(fd, &rs);
+        if (timeout >= 0) {
+            tv.tv_sec = (long)timeout;
+            tv.tv_usec = (long)((timeout - (double)tv.tv_sec) * 1e6);
+            tvp = &tv;
+        }
+        r = select(fd + 1, &rs, NULL, NULL, tvp);
+        if (r < 0) { if (errno == EINTR) continue; return -2; }
+        if (r == 0) return -1;
+        k = (long)read(fd, buf, (size_t)max);
+        if (k < 0) { if (errno == EINTR || errno == EAGAIN) continue; return -2; }
+        return k;
+    }
+}
+static int host_proc_write(int fd, const char *buf, long n)
+{
+    long done = 0;
+    while (done < n) {
+        long k = (long)write(fd, buf + done, (size_t)(n - done));
+        if (k < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN) {
+                fd_set ws;
+                FD_ZERO(&ws); FD_SET(fd, &ws);
+                select(fd + 1, NULL, &ws, NULL, NULL);
+                continue;
+            }
+            return errno;
+        }
+        done += k;
+    }
+    return 0;
+}
+static void host_proc_close(int fd)
+{
+    if (fd >= 0) close(fd);
+}
+static int host_proc_signal(int pid, int sig)
+{
+    if (kill(-(pid_t)pid, sig) == 0) return 0;
+    return kill((pid_t)pid, sig) == 0 ? 0 : errno;
+}
+static int host_proc_wait(int pid, int nohang, int *rc)
+{
+    int st = 0;
+    pid_t r;
+    do r = waitpid((pid_t)pid, &st, nohang ? WNOHANG : 0); while (r < 0 && errno == EINTR);
+    if (r < 0) return -1;
+    if (r == 0) return 0;
+    if (WIFEXITED(st)) *rc = WEXITSTATUS(st);
+    else if (WIFSIGNALED(st)) *rc = 128 + WTERMSIG(st);
+    return 1;
+}
+#else
+static int host_proc_spawn(char **argv, const char *cwd, int merge, int *pid, int *fds)
+{
+    (void)argv; (void)cwd; (void)merge; (void)pid; (void)fds;
+    return 38;
+}
+static long host_proc_read(int fd, char *buf, long max, double timeout)
+{
+    (void)fd; (void)buf; (void)max; (void)timeout;
+    return -2;
+}
+static int host_proc_write(int fd, const char *buf, long n)
+{
+    (void)fd; (void)buf; (void)n;
+    return 38;
+}
+static void host_proc_close(int fd) { (void)fd; }
+static int host_proc_signal(int pid, int sig) { (void)pid; (void)sig; return 38; }
+static int host_proc_wait(int pid, int nohang, int *rc)
+{
+    (void)pid; (void)nohang; (void)rc;
+    return -1;
+}
+#endif

@@ -1,0 +1,15 @@
+None
+'one\n'
+'two\n'
+None
+''
+0
+'start\n'
+'42\noops\n'
+None
+None
+True
+True
+(b'ABC', None) 0
+('out\n', 'err\n') 4
+fnf

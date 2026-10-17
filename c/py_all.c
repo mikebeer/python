@@ -1014,6 +1014,149 @@ static int host_proc_run(char **argv, const char *in, long inlen, double timeout
     return 2;
 }
 #endif
+
+/* ---- live child processes (persistent sessions) ---------------------------
+   host_proc_spawn starts argv[0] with stdin and stdout (and stderr when merge is 0; 1 merges it
+   into stdout, 2 leaves the parent's stderr) connected to pipes held by the parent and returns at once.
+   Returns 0 and fills *pid and fds[0..2] (stdin, stdout, stderr; -1 unless merge is 0), or an errno.
+   host_proc_read waits at most timeout seconds (< 0 forever) for data on fd: returns the
+   bytes read (> 0), 0 at end of file, -1 on timeout, -2 on error.  host_proc_write writes
+   all bytes (blocking), returns 0 or an errno.  host_proc_signal sends a signal to the
+   child's process group.  host_proc_wait reaps the child: returns 0 still running (nohang),
+   1 finished (*rc is the exit status or 128+signal), -1 error.  POSIX only; other hosts
+   return ENOSYS (38) / -2. */
+#ifdef PY_POSIX
+static int host_proc_spawn(char **argv, const char *cwd, int merge, int *pid, int *fds)
+{
+    int pin[2], pout[2], perr[2], pst[2], en = 0;
+    pid_t c;
+    signal(SIGPIPE, SIG_IGN);
+    if (pipe(pin) < 0) return errno;
+    if (pipe(pout) < 0) return errno;
+    if (merge == 0 && pipe(perr) < 0) return errno;
+    if (pipe(pst) < 0) return errno;
+    fcntl(pst[1], F_SETFD, FD_CLOEXEC);
+    fcntl(pin[1], F_SETFD, FD_CLOEXEC);
+    fcntl(pout[0], F_SETFD, FD_CLOEXEC);
+    if (merge == 0) fcntl(perr[0], F_SETFD, FD_CLOEXEC);
+    c = fork();
+    if (c < 0) return errno;
+    if (c == 0) {
+        setpgid(0, 0);
+        dup2(pin[0], 0); dup2(pout[1], 1);
+        if (merge == 1) dup2(pout[1], 2);
+        else if (merge == 0) dup2(perr[1], 2);
+        if (pin[0] > 2) close(pin[0]);
+        if (pout[1] > 2) close(pout[1]);
+        if (merge == 0 && perr[1] > 2) close(perr[1]);
+        if (cwd && chdir(cwd) < 0) {
+            en = errno;
+            if (write(pst[1], &en, sizeof(en)) < 0) { /* nothing to do */ }
+            _exit(127);
+        }
+        execvp(argv[0], argv);
+        en = errno;
+        if (write(pst[1], &en, sizeof(en)) < 0) { /* nothing to do */ }
+        _exit(127);
+    }
+    close(pin[0]); close(pout[1]); close(pst[1]);
+    if (merge == 0) close(perr[1]);
+    if (read(pst[0], &en, sizeof(en)) == (long)sizeof(en)) {
+        int st;
+        close(pst[0]); close(pin[1]); close(pout[0]);
+        if (merge == 0) close(perr[0]);
+        waitpid(c, &st, 0);
+        return en;
+    }
+    close(pst[0]);
+    *pid = (int)c;
+    fds[0] = pin[1]; fds[1] = pout[0]; fds[2] = merge == 0 ? perr[0] : -1;
+    return 0;
+}
+static long host_proc_read(int fd, char *buf, long max, double timeout)
+{
+    for (;;) {
+        fd_set rs;
+        struct timeval tv, *tvp = NULL;
+        int r;
+        long k;
+        FD_ZERO(&rs); FD_SET(fd, &rs);
+        if (timeout >= 0) {
+            tv.tv_sec = (long)timeout;
+            tv.tv_usec = (long)((timeout - (double)tv.tv_sec) * 1e6);
+            tvp = &tv;
+        }
+        r = select(fd + 1, &rs, NULL, NULL, tvp);
+        if (r < 0) { if (errno == EINTR) continue; return -2; }
+        if (r == 0) return -1;
+        k = (long)read(fd, buf, (size_t)max);
+        if (k < 0) { if (errno == EINTR || errno == EAGAIN) continue; return -2; }
+        return k;
+    }
+}
+static int host_proc_write(int fd, const char *buf, long n)
+{
+    long done = 0;
+    while (done < n) {
+        long k = (long)write(fd, buf + done, (size_t)(n - done));
+        if (k < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN) {
+                fd_set ws;
+                FD_ZERO(&ws); FD_SET(fd, &ws);
+                select(fd + 1, NULL, &ws, NULL, NULL);
+                continue;
+            }
+            return errno;
+        }
+        done += k;
+    }
+    return 0;
+}
+static void host_proc_close(int fd)
+{
+    if (fd >= 0) close(fd);
+}
+static int host_proc_signal(int pid, int sig)
+{
+    if (kill(-(pid_t)pid, sig) == 0) return 0;
+    return kill((pid_t)pid, sig) == 0 ? 0 : errno;
+}
+static int host_proc_wait(int pid, int nohang, int *rc)
+{
+    int st = 0;
+    pid_t r;
+    do r = waitpid((pid_t)pid, &st, nohang ? WNOHANG : 0); while (r < 0 && errno == EINTR);
+    if (r < 0) return -1;
+    if (r == 0) return 0;
+    if (WIFEXITED(st)) *rc = WEXITSTATUS(st);
+    else if (WIFSIGNALED(st)) *rc = 128 + WTERMSIG(st);
+    return 1;
+}
+#else
+static int host_proc_spawn(char **argv, const char *cwd, int merge, int *pid, int *fds)
+{
+    (void)argv; (void)cwd; (void)merge; (void)pid; (void)fds;
+    return 38;
+}
+static long host_proc_read(int fd, char *buf, long max, double timeout)
+{
+    (void)fd; (void)buf; (void)max; (void)timeout;
+    return -2;
+}
+static int host_proc_write(int fd, const char *buf, long n)
+{
+    (void)fd; (void)buf; (void)n;
+    return 38;
+}
+static void host_proc_close(int fd) { (void)fd; }
+static int host_proc_signal(int pid, int sig) { (void)pid; (void)sig; return 38; }
+static int host_proc_wait(int pid, int nohang, int *rc)
+{
+    (void)pid; (void)nohang; (void)rc;
+    return -1;
+}
+#endif
 /* ===== p0_base.c ===== */
 /* =========================================================================
    Python 3 subset interpreter in portable C89.
@@ -35629,6 +35772,86 @@ BI(proc_run)
     return out[0];
 }
 
+/* live children: _proc.spawn(argv, cwd, merge)  merge 0 own stderr pipe, 1 into stdout, 2 inherit -> (pid, stdin_fd, stdout_fd, stderr_fd)
+   _proc.read(fd, n, timeout) -> bytes | b"" at end of file | None on timeout
+   _proc.write(fd, bytes), _proc.close(fd), _proc.kill(pid, sig), _proc.wait(pid, nohang)
+   -> (done, rc).  Used by Popen with pipes in pylib/subprocess.py. */
+BI(proc_spawn)
+{
+    Value out[4];
+    List *l;
+    char **av;
+    const char *cwd = NULL;
+    long i, n;
+    int pid = 0, fds[3], merge = 0, e;
+    need(x, 1, 3, "spawn");
+    if (A(0).t != T_LIST) throw_new(cls_TypeError, "argv must be a list");
+    l = AS_LIST(A(0));
+    n = l->n;
+    if (n < 1) throw_new(cls_ValueError, "empty argv");
+    for (i = 0; i < n; i++)
+        if (l->a[i].t != T_STR) throw_new(cls_TypeError, "argv items must be str");
+    if (x->n > 1 && A(1).t == T_STR) cwd = AS_STR(A(1))->s;
+    if (x->n > 2) merge = A(2).t == T_BOOL ? (int)(A(2).u.i != 0) : (int)need_long(A(2), "merge");
+    av = (char **)xmalloc((size_t)(n + 1) * sizeof(char *));
+    for (i = 0; i < n; i++) av[i] = AS_STR(l->a[i])->s;
+    av[n] = NULL;
+    fds[0] = fds[1] = fds[2] = -1;
+    e = host_proc_spawn(av, cwd, merge, &pid, fds);
+    free(av);
+    if (e) throw_new(cls_OSError, "cannot start '%s' (errno %d)", AS_STR(l->a[0])->s, e);
+    out[0] = mkint(pid); out[1] = mkint(fds[0]); out[2] = mkint(fds[1]); out[3] = mkint(fds[2]);
+    return mktuple_from(out, 4);
+}
+BI(proc_read)
+{
+    char buf[4096];
+    long k, max;
+    double to = -1.0;
+    need(x, 2, 3, "read");
+    max = need_long(A(1), "n");
+    if (max < 1) max = 1;
+    if (max > (long)sizeof(buf)) max = (long)sizeof(buf);
+    if (x->n > 2 && A(2).t != T_NONE) to = to_dbl(A(2));
+    k = host_proc_read((int)need_long(A(0), "fd"), buf, max, to);
+    if (k == -1) return NONE_V;
+    if (k < 0) throw_new(cls_OSError, "read failed");
+    return mkbytes(buf, k);
+}
+BI(proc_write)
+{
+    const char *ip = "";
+    long il = 0;
+    int e;
+    need(x, 2, 2, "write");
+    if (!bytes_get(A(1), &ip, &il)) throw_new(cls_TypeError, "data must be bytes");
+    e = host_proc_write((int)need_long(A(0), "fd"), ip, il);
+    if (e) throw_new(cls_OSError, "write failed (errno %d)", e);
+    return mkint(il);
+}
+BI(proc_close)
+{
+    need(x, 1, 1, "close");
+    host_proc_close((int)need_long(A(0), "fd"));
+    return NONE_V;
+}
+BI(proc_kill)
+{
+    need(x, 2, 2, "kill");
+    return mkbool(host_proc_signal((int)need_long(A(0), "pid"), (int)need_long(A(1), "sig")) == 0);
+}
+BI(proc_wait)
+{
+    Value out[2];
+    int rc = 0, r;
+    need(x, 1, 2, "wait");
+    r = host_proc_wait((int)need_long(A(0), "pid"),
+                       x->n > 1 && A(1).t != T_NONE && need_long(A(1), "nohang") != 0, &rc);
+    if (r < 0) throw_new(cls_OSError, "wait failed");
+    out[0] = mkbool(r == 1); out[1] = mkint(rc);
+    return mktuple_from(out, 2);
+}
+
 /* ---- initialisation --------------------------------------------------- */
 static void sock_init(void)
 {
@@ -35687,6 +35910,9 @@ static void sock_init(void)
     mod_def(m, "socketpair", m_socketpair);
     sm = new_module("_proc");
     mod_def(sm, "run", proc_run);
+    mod_def(sm, "spawn", proc_spawn); mod_def(sm, "read", proc_read);
+    mod_def(sm, "write", proc_write); mod_def(sm, "close", proc_close);
+    mod_def(sm, "kill", proc_kill); mod_def(sm, "wait", proc_wait);
     sm = new_module("select");
     mod_def(sm, "select", sel_select);
 }

@@ -830,6 +830,86 @@ BI(proc_run)
     return out[0];
 }
 
+/* live children: _proc.spawn(argv, cwd, merge)  merge 0 own stderr pipe, 1 into stdout, 2 inherit -> (pid, stdin_fd, stdout_fd, stderr_fd)
+   _proc.read(fd, n, timeout) -> bytes | b"" at end of file | None on timeout
+   _proc.write(fd, bytes), _proc.close(fd), _proc.kill(pid, sig), _proc.wait(pid, nohang)
+   -> (done, rc).  Used by Popen with pipes in pylib/subprocess.py. */
+BI(proc_spawn)
+{
+    Value out[4];
+    List *l;
+    char **av;
+    const char *cwd = NULL;
+    long i, n;
+    int pid = 0, fds[3], merge = 0, e;
+    need(x, 1, 3, "spawn");
+    if (A(0).t != T_LIST) throw_new(cls_TypeError, "argv must be a list");
+    l = AS_LIST(A(0));
+    n = l->n;
+    if (n < 1) throw_new(cls_ValueError, "empty argv");
+    for (i = 0; i < n; i++)
+        if (l->a[i].t != T_STR) throw_new(cls_TypeError, "argv items must be str");
+    if (x->n > 1 && A(1).t == T_STR) cwd = AS_STR(A(1))->s;
+    if (x->n > 2) merge = A(2).t == T_BOOL ? (int)(A(2).u.i != 0) : (int)need_long(A(2), "merge");
+    av = (char **)xmalloc((size_t)(n + 1) * sizeof(char *));
+    for (i = 0; i < n; i++) av[i] = AS_STR(l->a[i])->s;
+    av[n] = NULL;
+    fds[0] = fds[1] = fds[2] = -1;
+    e = host_proc_spawn(av, cwd, merge, &pid, fds);
+    free(av);
+    if (e) throw_new(cls_OSError, "cannot start '%s' (errno %d)", AS_STR(l->a[0])->s, e);
+    out[0] = mkint(pid); out[1] = mkint(fds[0]); out[2] = mkint(fds[1]); out[3] = mkint(fds[2]);
+    return mktuple_from(out, 4);
+}
+BI(proc_read)
+{
+    char buf[4096];
+    long k, max;
+    double to = -1.0;
+    need(x, 2, 3, "read");
+    max = need_long(A(1), "n");
+    if (max < 1) max = 1;
+    if (max > (long)sizeof(buf)) max = (long)sizeof(buf);
+    if (x->n > 2 && A(2).t != T_NONE) to = to_dbl(A(2));
+    k = host_proc_read((int)need_long(A(0), "fd"), buf, max, to);
+    if (k == -1) return NONE_V;
+    if (k < 0) throw_new(cls_OSError, "read failed");
+    return mkbytes(buf, k);
+}
+BI(proc_write)
+{
+    const char *ip = "";
+    long il = 0;
+    int e;
+    need(x, 2, 2, "write");
+    if (!bytes_get(A(1), &ip, &il)) throw_new(cls_TypeError, "data must be bytes");
+    e = host_proc_write((int)need_long(A(0), "fd"), ip, il);
+    if (e) throw_new(cls_OSError, "write failed (errno %d)", e);
+    return mkint(il);
+}
+BI(proc_close)
+{
+    need(x, 1, 1, "close");
+    host_proc_close((int)need_long(A(0), "fd"));
+    return NONE_V;
+}
+BI(proc_kill)
+{
+    need(x, 2, 2, "kill");
+    return mkbool(host_proc_signal((int)need_long(A(0), "pid"), (int)need_long(A(1), "sig")) == 0);
+}
+BI(proc_wait)
+{
+    Value out[2];
+    int rc = 0, r;
+    need(x, 1, 2, "wait");
+    r = host_proc_wait((int)need_long(A(0), "pid"),
+                       x->n > 1 && A(1).t != T_NONE && need_long(A(1), "nohang") != 0, &rc);
+    if (r < 0) throw_new(cls_OSError, "wait failed");
+    out[0] = mkbool(r == 1); out[1] = mkint(rc);
+    return mktuple_from(out, 2);
+}
+
 /* ---- initialisation --------------------------------------------------- */
 static void sock_init(void)
 {
@@ -888,6 +968,9 @@ static void sock_init(void)
     mod_def(m, "socketpair", m_socketpair);
     sm = new_module("_proc");
     mod_def(sm, "run", proc_run);
+    mod_def(sm, "spawn", proc_spawn); mod_def(sm, "read", proc_read);
+    mod_def(sm, "write", proc_write); mod_def(sm, "close", proc_close);
+    mod_def(sm, "kill", proc_kill); mod_def(sm, "wait", proc_wait);
     sm = new_module("select");
     mod_def(sm, "select", sel_select);
 }
