@@ -6,6 +6,9 @@
 # The interpreter is compiled to bytecode on first use (about a minute),
 # afterwards it starts quickly.  Set CREXX to the crexx driver if it is not on your PATH.
 DIR=$(cd "$(dirname "$0")" && pwd)
+# sys.executable: absolute path of this launcher (read by pylib/sys.py)
+PY_EXECUTABLE=$DIR/py
+export PY_EXECUTABLE
 # CREXX_VM: path to the crexx driver of a patched build (see STARTUP.md); it wins over CREXX.
 CREXX=${CREXX_VM:-${CREXX:-crexx}}
 if [ ! -f "$DIR/py.rxbin" ] || [ "$DIR/py.crexx" -nt "$DIR/py.rxbin" ]; then

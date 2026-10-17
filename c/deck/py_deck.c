@@ -41952,6 +41952,61 @@ static void repl(int prompt)
     if (prompt) fputc('\n', stdout);
 }
 
+/* argv[0] made absolute (sys.executable): relative paths are joined to
+   the working directory, a bare name is looked up on PATH. Falls back
+   to argv[0] itself. */
+static char exe_abs[PY_PATHMAX];
+static const char *absolute_exe(const char *a0)
+{
+    char cwd[PY_PATHMAX];
+    long n, i;
+    if (!a0 || !*a0 || a0[0] == '/') return a0;
+    if (strchr(a0, '/')) {
+        if (!host_getcwd(cwd, (long)sizeof cwd)) return a0;
+        while (a0[0] == '.' && a0[1] == '/') a0 += 2;
+        if ((long)strlen(cwd) + (long)strlen(a0) + 2
+            > (long)sizeof exe_abs) return a0;
+        n = (long)strlen(cwd);
+        memcpy(exe_abs, cwd, (size_t)n);
+        exe_abs[n] = '/';
+        strcpy(exe_abs + n + 1, a0);
+        return exe_abs;
+    } else {
+        const char *path = host_getenv("PATH");
+        long len = (long)strlen(a0);
+        if (!path) return a0;
+        for (i = 0; path[i];) {
+            n = 0;
+            while (path[i + n] && path[i + n] != ':') n++;
+            if (n > 0 && n + len + 2 <= (long)sizeof exe_abs) {
+                FILE *f;
+                memcpy(exe_abs, path + i, (size_t)n);
+                exe_abs[n] = '/';
+                strcpy(exe_abs + n + 1, a0);
+                f = fopen(exe_abs, "rb");
+                if (f) {
+                    fclose(f);
+                    if (exe_abs[0] != '/'
+                        && host_getcwd(cwd, (long)sizeof cwd)) {
+                        long m = (long)strlen(cwd),
+                            k = (long)strlen(exe_abs);
+                        if (m + k + 2 <= (long)sizeof exe_abs) {
+                            memmove(exe_abs + m + 1, exe_abs,
+                                (size_t)k + 1);
+                            memcpy(exe_abs, cwd, (size_t)m);
+                            exe_abs[m] = '/';
+                        }
+                    }
+                    return exe_abs;
+                }
+            }
+            i += n;
+            if (path[i] == ':') i++;
+        }
+    }
+    return a0;
+}
+
 int main(int argc, char **argv)
 {
     const char *code = NULL, *file = NULL;
@@ -41991,7 +42046,7 @@ int main(int argc, char **argv)
         sargv = dummy;
         sargc = 1;
     }
-    exe_path = argv[0];
+    exe_path = absolute_exe(argv[0]);
     init_runtime(sargc, sargv);
     if (code) {
         script_name = "<string>";

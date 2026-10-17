@@ -151,7 +151,32 @@ bi_dir: procedure = .int
   else if k = K_MODULE then do
     if ob_x[x % 2] > 0 then d = mod_dict(ob_x[x % 2])
   end
+  else do
+    /* built-in values: the public method names of the type (the methods are dispatched by name) */
+    v = dir_builtin_names(k)
+    do i = 1 to words(v)
+      call dset d, mkstr(word(v, i)), TRUE_OOP
+    end
+  end
   return dict_sorted_keys(d)
+
+/* public method names of the built-in value kinds, for dir() */
+dir_builtin_names: procedure = .string
+  arg k = .int
+  select
+    when k = K_STR then return "capitalize casefold center count encode endswith expandtabs find format format_map index isalnum isalpha isascii isdecimal isdigit isidentifier islower isnumeric isprintable isspace istitle isupper join ljust lower lstrip maketrans partition removeprefix removesuffix replace rfind rindex rjust rpartition rsplit rstrip split splitlines startswith strip swapcase title translate upper zfill"
+    when k = K_LIST then return "append clear copy count extend index insert pop remove reverse sort"
+    when k = K_TUPLE then return "count index"
+    when k = K_DICT then return "clear copy fromkeys get items keys pop popitem setdefault update values"
+    when k = K_SET then return "add clear copy difference difference_update discard intersection intersection_update isdisjoint issubset issuperset pop remove symmetric_difference symmetric_difference_update union update"
+    when k = K_INT | k = K_BIG | k = K_BOOL then return "as_integer_ratio bit_count bit_length conjugate denominator from_bytes imag is_integer numerator real to_bytes"
+    when k = K_FLOAT then return "as_integer_ratio conjugate fromhex hex imag is_integer real"
+    when k = K_BYTES then return "capitalize center count decode endswith expandtabs find fromhex hex index isalnum isalpha isascii isdigit islower isspace istitle isupper join ljust lower lstrip maketrans partition removeprefix removesuffix replace rfind rindex rjust rpartition rsplit rstrip split splitlines startswith strip swapcase title translate upper zfill"
+    when k = K_COMPLEX then return "conjugate imag real"
+    when k = K_RANGE then return "count index start step stop"
+    otherwise nop
+  end
+  return ""
 
 /* copy every entry of dict s into dict d */
 dict_copy_into: procedure = .void
@@ -183,6 +208,7 @@ ns_exec: procedure = .int
   sv_pe = .int
   if mode = 1 then src = "__eval_result__ = (" || src || '0a'x || ")"
   mi = new_module("<string>", "<string>", 0, "")
+  mod_nsd[mi] = nsd
   parse_dyn_init = 1
   body = parse_module(src, mi)
   parse_dyn_init = 0
@@ -279,7 +305,9 @@ bi_evalexec: procedure = .int
   if na >= 3 then l = ast[base + 3]
   if na >= 4 then modlvl = ival(ast[base + 4])
   if g = NONE_OOP then do
-    nsd = mod_dict(cur_mi)
+    /* an exec() inside exec()'d code shares the namespace of the outer exec */
+    if mod_nsd[cur_mi] > 0 then nsd = mod_nsd[cur_mi]
+    else nsd = mod_dict(cur_mi)
     if l \= NONE_OOP & kind_of(l) = K_DICT then call dict_copy_into l, nsd
     r = ns_exec(ob_s[src % 2], mode, nsd)
     if r = 0 then return 0

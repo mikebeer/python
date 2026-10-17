@@ -6,6 +6,8 @@ and passes the tests in `../tests` (stage 1 and the language / import / linalg s
     ./py script.py [args]     run a script
     ./py -c "print(1+2)"      run a command string
     ./py                      read the program from stdin
+    ./py -i                   interactive loop on stdin: prompts `>>> ` / `... `, expression values echoed,
+                              tracebacks on stderr (same protocol as `c/py -i`; the loop is `pylib/_repl.py`)
 
 Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
 `py.crexx` to bytecode (about 5 to 7 minutes); later runs start in about 2 s with a stock VM, 0.45 s with the patched one (see `STARTUP.md`, `CREXX_VM`).
@@ -24,6 +26,13 @@ Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
 - `src/consts.txt`, `classes.txt`, `builtins.txt`: tables that `build.py` turns into symbolic constants.
 - `build.py`: `python3 build.py` regenerates `py.crexx`.
 - `py`: launcher.
+
+`sys.executable` is the absolute path of the `py` launcher (exported as `PY_EXECUTABLE`, read by `pylib/sys.py`).
+`dir()` of built-in values (`str list tuple dict set int float bytes complex range`) lists the public method names.
+An `exec()` inside exec'd code shares the outer namespace, so `exec("exec('x = 1')")` defines `x` (the `-i` loop relies on it).
+Limit of `-i` and `exec()`: every exec'd chunk is parsed as its own module, so a function defined in one chunk reads
+globals from that chunk's frame and does not see later rebinding of a global made by another chunk (CPython shares one
+globals dict). Simple REPL use is fine; the Workbench probes this and replays history instead of keeping a live session.
 
 ## Design
 

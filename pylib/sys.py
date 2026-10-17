@@ -3,7 +3,12 @@ version_info = (3, 13, 0, "final", 0)
 version = "3.13.0 (crexx-py)"
 byteorder = "little"
 maxunicode = 1114111
-executable = "py"
+try:
+    import os as _os
+    executable = _os.environ.get("PY_EXECUTABLE") or "py"
+    del _os
+except Exception:
+    executable = "py"
 hexversion = 0x030D00F0
 implementation = None
 

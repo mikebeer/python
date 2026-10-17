@@ -19,6 +19,10 @@ One amalgamated source file (`py_all.c`, generated from `src/*.c` by
 
 Uncaught exceptions print a traceback and exit with status 1.
 
+`sys.executable` is the absolute path of the binary (argv[0] joined to the working directory, or looked up on `PATH`
+for a bare name; hosts without a working directory keep argv[0]). On the CREXX interpreter the launcher exports
+`PY_EXECUTABLE`, which `pylib/sys.py` reads.
+
 ## Layout
 
     src/p0_os.c     standard headers and ALL host/OS dependencies (host_* adapter functions)

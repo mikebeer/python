@@ -12,9 +12,9 @@ import rxsocket
 import rxplatform
 import rxfs
 import _rxsysb
-namespace py expose rc_exit obuf h_out h_err h_in stdin_eof rnd_s nsargs,
-   sargs wsch nameboot clsboot bboot aliasboot kwlist ops2 tx tlen tp,
-   lx_brk lx_nind lnum ntk tk_t tk_s tk_i tk_l tk_f ind_s tpp pe pe_msg,
+namespace py expose rc_exit repl_mode obuf h_out h_err h_in stdin_eof rnd_s,
+   nsargs sargs wsch nameboot clsboot bboot aliasboot kwlist ops2 tx tlen,
+   tp lx_brk lx_nind lnum ntk tk_t tk_s tk_i tk_l tk_f ind_s tpp pe pe_msg,
    nnode pm_cnt sp_m sp_r n_t n_a n_b n_c n_d n_e n_y n_s n_ln n_ic n_ig,
    n_iv nal al psp ps nsc cursc sc_kind sc_par sc_n sc_fl sc_id sc_rf0,
    sc_cd scm nrf rf_node rf_sc rf_dep ncv cv_name cv_slot cv_scope,
@@ -36,12 +36,12 @@ namespace py expose rc_exit obuf h_out h_err h_in stdin_eof rnd_s nsargs,
    fl_mstr fl_name bin_ok bq brm sg mg sq sr fx_d fx_q fx_e fx_m fx_k c52f,
    c53f c85f cmnf lm lmn lr lrn fovf hxv rg_sa rg_sb rg_sc rg_idx fr_m fr_e,
    fs_p fs_n fs_sp fs_inf fs_nf fneg_max nmod pypath script_dir mod_name,
-   mod_file mod_pkg mod_pdir mod_ispkg mod_sc mod_fb mod_obj mod_dyn modx,
-   hyb cur_mi parse_mi parse_dyn cur_msc ndyn dyn_mi dyn_slot dyn_val nbn,
-   bn_sc bn_name bn_slot sys_modules syspath nsyspath imp_file imp_ispkg,
-   imp_pdir imp_quiet natives shadow cl_mod cl_bt cl_meta nckw kw_cd,
-   kw_name kw_node cl_ms cl_mn cl_bs cl_bn mro_a bs_a nmro nbs nca ca_c,
-   ca_n nis is_c is_n is_s gn_ret gen_throw mod_fsz parse_dyn_init,
+   mod_file mod_pkg mod_pdir mod_ispkg mod_sc mod_fb mod_obj mod_dyn,
+   mod_nsd modx hyb cur_mi parse_mi parse_dyn cur_msc ndyn dyn_mi dyn_slot,
+   dyn_val nbn bn_sc bn_name bn_slot sys_modules syspath nsyspath imp_file,
+   imp_ispkg imp_pdir imp_quiet natives shadow cl_mod cl_bt cl_meta nckw,
+   kw_cd kw_name kw_node cl_ms cl_mn cl_bs cl_bn mro_a bs_a nmro nbs nca,
+   ca_c ca_n nis is_c is_n is_s gn_ret gen_throw mod_fsz parse_dyn_init,
    fmt_nested fmt_auto_in fmt_auto_out fnattr dd_own bl_a bl_n sq_a sq_s,
    sq_e sq_p sup_c npn nfh npf npta nptb nptc npsel np_sc nprs nprn npcat,
    npco npcc npcd npcs npit npax npnb npes npip npfp npxp npnf npls npstr,
@@ -60,6 +60,7 @@ if av.0 >= 1 then do
 end
 script = ""
 code = ""
+want_repl = 0
 have_code = 0
 nfiles = 0
 ia = 1
@@ -89,6 +90,7 @@ do while ia <= av.0
     nsargs = nsargs + 1
     sargs[nsargs] = "-c"
   end
+  else if oa == "-i" & nfiles = 0 & have_code = 0 then want_repl = 1
   else if (oa == "-h" | oa == "--help") & nfiles = 0 & have_code = 0 then do
     say "usage: py [-c code | file.py] [arg ...]"
     exit 0
@@ -117,6 +119,35 @@ else if nfiles = 1 then do
     rc_exit = 2
   end
   else rc_exit = run_source(utxt, script)
+end
+else if want_repl = 1 then do
+  /* interactive mode: the loop is pylib/_repl.py, run as the main module with dynamic names */
+  rp = .string
+  rd = .string
+  rip = .int
+  rtxt = .string
+  rtxt = ""
+  rp = pypath
+  do while length(rp) > 0 & rtxt == ""
+    rip = pos(":", rp)
+    if rip = 0 then do
+      rd = rp
+      rp = ""
+    end
+    else do
+      rd = left(rp, rip - 1)
+      rp = substr(rp, rip + 1)
+    end
+    if length(rd) > 0 then rtxt = read_file(rd || "/_repl.py")
+  end
+  if rtxt == "" then do
+    call errs "py: -i needs pylib/_repl.py on the library path" || '0a'x
+    rc_exit = 2
+  end
+  else do
+    repl_mode = 1
+    rc_exit = run_source(rtxt, "<stdin>")
+  end
 end
 else do
   utxt = ""
@@ -202,7 +233,9 @@ run_source: procedure = .int
   i = .int
   mi = new_module("__main__", name, 0, "")
   call reg_module "__main__", mod_obj[mi]
+  if repl_mode = 1 then parse_dyn_init = 1
   body = parse_module(src, mi)
+  parse_dyn_init = 0
   if pe = 1 then do
     call errs "  File " || '"' || name || '"' || '0a'x || pe_msg || '0a'x
     return 1
@@ -254,6 +287,7 @@ run_source: procedure = .int
    --------------------------------------------------------------------- */
 init: procedure = .void
   rc_exit = 0
+  repl_mode = 0
   obuf = ""
   h_out = _open("stdout", "w")
   h_err = _open("stderr", "w")
@@ -605,6 +639,7 @@ init: procedure = .void
   mod_fb = .int[]
   mod_obj = .int[]
   mod_dyn = .int[]
+  mod_nsd = .int[]
   modx = .stem()
   hyb = .stem()
   cur_mi = 0
@@ -16575,6 +16610,7 @@ new_module: procedure = .int
   mod_sc[nmod] = 0
   mod_fb[nmod] = 0
   mod_dyn[nmod] = 0
+  mod_nsd[nmod] = 0
   if ispkg = 1 then mod_pkg[nmod] = name
   else do
     p = lastpos(".", name)
@@ -17505,7 +17541,32 @@ bi_dir: procedure = .int
   else if k = 18 then do
     if ob_x[x % 2] > 0 then d = mod_dict(ob_x[x % 2])
   end
+  else do
+    /* built-in values: the public method names of the type (the methods are dispatched by name) */
+    v = dir_builtin_names(k)
+    do i = 1 to words(v)
+      call dset d, mkstr(word(v, i)), 4
+    end
+  end
   return dict_sorted_keys(d)
+
+/* public method names of the built-in value kinds, for dir() */
+dir_builtin_names: procedure = .string
+  arg k = .int
+  select
+    when k = 6 then return "capitalize casefold center count encode endswith expandtabs find format format_map index isalnum isalpha isascii isdecimal isdigit isidentifier islower isnumeric isprintable isspace istitle isupper join ljust lower lstrip maketrans partition removeprefix removesuffix replace rfind rindex rjust rpartition rsplit rstrip split splitlines startswith strip swapcase title translate upper zfill"
+    when k = 7 then return "append clear copy count extend index insert pop remove reverse sort"
+    when k = 8 then return "count index"
+    when k = 9 then return "clear copy fromkeys get items keys pop popitem setdefault update values"
+    when k = 10 then return "add clear copy difference difference_update discard intersection intersection_update isdisjoint issubset issuperset pop remove symmetric_difference symmetric_difference_update union update"
+    when k = 3 | k = 4 | k = 2 then return "as_integer_ratio bit_count bit_length conjugate denominator from_bytes imag is_integer numerator real to_bytes"
+    when k = 5 then return "as_integer_ratio conjugate fromhex hex imag is_integer real"
+    when k = 31 then return "capitalize center count decode endswith expandtabs find fromhex hex index isalnum isalpha isascii isdigit islower isspace istitle isupper join ljust lower lstrip maketrans partition removeprefix removesuffix replace rfind rindex rjust rpartition rsplit rstrip split splitlines startswith strip swapcase title translate upper zfill"
+    when k = 32 then return "conjugate imag real"
+    when k = 11 then return "count index start step stop"
+    otherwise nop
+  end
+  return ""
 
 /* copy every entry of dict s into dict d */
 dict_copy_into: procedure = .void
@@ -17537,6 +17598,7 @@ ns_exec: procedure = .int
   sv_pe = .int
   if mode = 1 then src = "__eval_result__ = (" || src || '0a'x || ")"
   mi = new_module("<string>", "<string>", 0, "")
+  mod_nsd[mi] = nsd
   parse_dyn_init = 1
   body = parse_module(src, mi)
   parse_dyn_init = 0
@@ -17633,7 +17695,9 @@ bi_evalexec: procedure = .int
   if na >= 3 then l = ast[base + 3]
   if na >= 4 then modlvl = ival(ast[base + 4])
   if g = 2 then do
-    nsd = mod_dict(cur_mi)
+    /* an exec() inside exec()'d code shares the namespace of the outer exec */
+    if mod_nsd[cur_mi] > 0 then nsd = mod_nsd[cur_mi]
+    else nsd = mod_dict(cur_mi)
     if l \= 2 & kind_of(l) = 9 then call dict_copy_into l, nsd
     r = ns_exec(ob_s[src % 2], mode, nsd)
     if r = 0 then return 0

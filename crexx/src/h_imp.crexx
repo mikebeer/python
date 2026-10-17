@@ -14,6 +14,7 @@ new_module: procedure = .int
   mod_sc[nmod] = 0
   mod_fb[nmod] = 0
   mod_dyn[nmod] = 0
+  mod_nsd[nmod] = 0
   if ispkg = 1 then mod_pkg[nmod] = name
   else do
     p = lastpos(".", name)
