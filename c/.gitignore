@@ -5,3 +5,4 @@ py_embed_all.c
 deck/py_deck_embed.c
 py_deck
 py_deck_embed
+py_cms
