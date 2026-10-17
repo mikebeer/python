@@ -1,0 +1,8 @@
+none
+NotImplementedError
+fake
+b''
+24 ' HELLO' ' cmd' (2, 6)
+[125, 193, 216, 17, 193, 209, 131, 148, 132, 147, 162]
+[125, 193, 213]
+ValueError unknown 3270 command X'01'

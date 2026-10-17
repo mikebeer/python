@@ -394,3 +394,16 @@ Natives `_proc.spawn(argv, cwd, merge) -> (pid, in_fd, out_fd, err_fd)`, `read(f
 close/signal/wait` (select on the fds; ENOSYS elsewhere). Test 72. Native part:
 `_proc.run(argv, input, timeout, cwd) -> (status, rc, stdout, stderr)` using fork/execvp/pipe/select;
 without `-DPY_POSIX` it reports ENOSYS (OSError).
+
+## Optional native hook `_cms` (src/p7_cms.c, `make cms`, `-DPY_CMS`)
+
+Not part of the default build. `make cms` builds `py_cms` with `-DPY_POSIX -DPY_CMS`; `make cms-test` also runs
+`tests/cms/*.py`. The module `_cms` is the place for host primitives that exist only on VM/370 CMS:
+`_cms.diag58(subcode, data) -> bytes` (DIAGNOSE X'58', 3270 virtual console: data is the command byte, F5 Erase/Write or
+F6 Read Modified, followed by the data stream). On a host without the primitive it raises `NotImplementedError`
+(`host_diag58` returns 1; under `PY_HOST_CMS` the assembler stub still has to be written, see PORTING.md).
+For tests the module has a fake in-memory 3270 host, selected with `_cms.fake()` or `PY_CMS_FAKE=1`: it decodes the
+Erase/Write stream into a 24x80 buffer (`fake_screen()`, `fake_cursor()`) and answers Read Modified from replies queued
+with `fake_push(aid, row, typed, crow, ccol)`. `workbench/screen_cms3270.py` runs end to end on it
+(`PY=c/py_cms sh tests/run_tests.sh`, test `t_cmsnative`). Strict C89 like the rest; `make strict` also checks
+the `-DPY_CMS` variants.

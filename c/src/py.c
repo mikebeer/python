@@ -22,4 +22,7 @@
 #include "p7_re.c"
 #include "p7_json.c"
 #include "p7_sock.c"
+#ifdef PY_CMS
+#include "p7_cms.c"
+#endif
 #include "p8_main.c"

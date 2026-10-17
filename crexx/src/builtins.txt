@@ -54,6 +54,7 @@ _identity
 _decorator
 _second
 _sock
+_sys
 # library functions: the order of the math block matters (one-float functions first)
 math.sqrt
 math.floor

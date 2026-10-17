@@ -367,6 +367,21 @@ based, not host-character based:
   commit 6e4a7a5; its complete result is not recorded here. Otherwise not run on any
   non-x86-64 platform.
 
+### The native hook `_cms` (optional, `-DPY_CMS`)
+
+`src/p7_cms.c` is compiled only with `-DPY_CMS` (not by default; `make cms`, `make cms-test`). It registers the module
+`_cms`; the first primitive is `_cms.diag58(subcode, data)`, DIAGNOSE X'58', the 3270 virtual console interface that
+`workbench/screen_cms3270.py` expects. The only host-specific piece is `host_diag58(sub, in, inl, out, outl)` at the top
+of the file: it returns 1 (not available) everywhere, which becomes `NotImplementedError`, and also under `PY_HOST_CMS`
+until the stub is written. To finish it on CMS: put the command and data stream in a buffer below the line, load
+R1 with its address, R2 with the length and the sub code, issue `DIAG X'58'` from a small assembler routine (or GCC inline
+asm of the cross compiler), copy the reply (Read Modified: AID, cursor address, SBA + field data) into `out`, set `*outl`
+and return 0. Check the exact register conventions in the VM/370plus CP programming documentation first; nothing here
+has been run on CMS. For development the module carries a fake in-memory 3270 host (`_cms.fake()`, `PY_CMS_FAKE=1`,
+`fake_push`, `fake_screen`, `fake_cursor`) so the whole path Python screen backend -> `_cms.diag58` -> data stream
+decoding is tested on any host (`tests/cms/01_cms_native.py`, workbench `t_cmsnative`). The file is strict C89 and
+`tools/strict.sh` checks it for `-DPY_CMS` with and without `PY_POSIX` / `PY_HOST_CMS`.
+
 ## 9. VM/370 checklist (host-independent part is automated)
 
 Run `make vm370check` (`python3 tools/vm370_check.py`; `--no-nm` without a compiler,

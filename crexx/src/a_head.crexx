@@ -693,7 +693,7 @@ boot: procedure = .void
     ob_x[o % 2] = i
     bi_oop[i] = o
     if p > 0 then modattr[nm] = o as .string
-    else if left(nm, 1) \== "_" | nm == "__import__" | nm == "_sock" then bimap[nm] = o as .string
+    else if left(nm, 1) \== "_" | nm == "__import__" | nm == "_sock" | nm == "_sys" then bimap[nm] = o as .string
   end
   do i = 1 to words(aliasboot)
     spec = word(aliasboot, i)

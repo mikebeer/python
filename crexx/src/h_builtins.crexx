@@ -1603,6 +1603,7 @@ bcall: procedure = .int
       return sl[ob_p[ast[base + 1] % 2] + 1]
     end
     when bid = BI__SOCK then return sock_call(base, na)
+    when bid = BI__SYS then return sys_call(base, na)
     when bid = BI__IDENTITY then do
       if na >= 1 then return ast[base + 1]
       return NONE_OOP

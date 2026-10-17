@@ -4,6 +4,9 @@
 static void re_init(void);
 static void json_init(void);
 static void sock_init(void);
+#ifdef PY_CMS
+static void cms_init(void);
+#endif
 static Module *new_module(const char *name)
 {
     Module *m = (Module *)gc_alloc(sizeof(Module), T_MODULE);
@@ -1138,6 +1141,9 @@ static void init_runtime(int argc, char **argv)
     struct_init();
     cmath_init();
     sock_init();
+#ifdef PY_CMS
+    cms_init();
+#endif
     introspect_init();
     m = new_module("time");
     mod_def(m, "time", t_time); mod_def(m, "perf_counter", t_clock);

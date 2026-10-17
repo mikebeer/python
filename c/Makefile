@@ -21,6 +21,16 @@ py: py_all.c
 posix: py_all.c
 	$(CC) $(STD) $(CFLAGS) $(POSIX) $(LIBFLAG) -o py py_all.c -lm
 
+# optional native hook module _cms (DIAGNOSE X'58' skeleton + fake 3270 host), not part of the default build
+cms: py_all.c
+	$(CC) $(STD) $(CFLAGS) $(POSIX) -DPY_CMS $(LIBFLAG) -o py_cms py_all.c -lm
+
+cms-test: cms
+	@pass=0; fail=0; for f in ../tests/cms/*.py; do n=$${f%.py}; \
+	  if [ "$$(./py_cms $$f 2>&1)" = "$$(cat $$n.out)" ]; then echo "ok   $$(basename $$n)"; pass=$$((pass+1)); \
+	  else echo "FAIL $$(basename $$n)"; fail=$$((fail+1)); fi; done; \
+	  echo "passed $$pass, failed $$fail"; [ $$fail -eq 0 ]
+
 # the pure-Python library tree compiled into the binary (no pylib directory needed)
 embed: py_embed_all.c
 	$(CC) $(STD) $(CFLAGS) $(POSIX) -DPY_EMBED_LIBS $(LIBFLAG) -o py_embed py_embed_all.c -lm
@@ -92,7 +102,7 @@ bench: py
 	sh bench/run.sh
 
 clean:
-	rm -f py py_embed py_deck py_deck_embed strict_san
+	rm -f py py_embed py_deck py_deck_embed py_cms strict_san
 
-.PHONY: vm370check posix embed deck deck-embed deckcheck linecheck test deck-test embed-test deck-embed-test \
+.PHONY: cms cms-test vm370check posix embed deck deck-embed deckcheck linecheck test deck-test embed-test deck-embed-test \
         strict bench clean

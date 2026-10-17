@@ -182,6 +182,7 @@ import_mod: procedure = .int
     return o
   end
   found = 0
+  call sync_syspath
   if parent == "" then do
     do i = 1 to nsyspath
       if found = 0 then found = imp_find(syspath[i], leaf)
@@ -520,6 +521,31 @@ addpaths: procedure = .void
       end
     end
   end
+  return
+
+/* re-read sys.path (the Python list) into syspath[]: runtime sys.path.insert / append / assignment take effect */
+sync_syspath: procedure = .void
+  s = .string
+  l = .int
+  i = .int
+  n = .int
+  v = .int
+  k = .int
+  s = modattr["sys.path"]
+  if s == "" then return
+  l = s as .int
+  if l = 0 then return
+  if kind_of(l) \= K_LIST then return
+  n = ob_n[l % 2]
+  k = 0
+  do i = 1 to n
+    v = list_get(l, i - 1)
+    if kind_of(v) = K_STR then do
+      k = k + 1
+      syspath[k] = ob_s[v % 2]
+    end
+  end
+  nsyspath = k
   return
 
 setup_path: procedure = .void

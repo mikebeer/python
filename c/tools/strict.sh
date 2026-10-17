@@ -10,7 +10,7 @@ fail=0
 for cc in gcc clang; do
   command -v $cc >/dev/null 2>&1 || { echo "skip $cc (not installed)"; continue; }
   for src in py_all.c deck/py_deck.c; do
-    for d in "" "-DPY_POSIX" "-DPY_HOST_CMS"; do
+    for d in "" "-DPY_POSIX" "-DPY_HOST_CMS" "-DPY_POSIX -DPY_CMS" "-DPY_HOST_CMS -DPY_CMS"; do
       out=$($cc $STRICT $d -fsyntax-only $src 2>&1)
       if [ -n "$out" ]; then echo "FAIL $cc $d $src"; echo "$out" | head -8; fail=1
       else echo "ok   $cc $d $src"; fi

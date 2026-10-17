@@ -42,3 +42,18 @@ sock_call: procedure = .int
     otherwise nop
   end
   return NONE_OOP
+
+/* ---------------------------------------------------------------------
+   _sys(cmd): run a shell command line with ADDRESS SYSTEM (sh -c); its output goes to the
+   inherited streams unless the command redirects it. Returns the exit status. Used by pylib/_proc.py.
+   --------------------------------------------------------------------- */
+sys_call: procedure = .int
+  arg base = .int, na = .int
+  cmd = .string
+  r = .int
+  if na < 1 then return raise_exc(C_TYPEERROR, "_sys() needs a command string")
+  if kind_of(ast[base + 1]) \= K_STR then return raise_exc(C_TYPEERROR, "_sys() needs a command string")
+  cmd = ob_s[ast[base + 1] % 2]
+  address system cmd
+  r = rc
+  return mkint(r)

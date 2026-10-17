@@ -91,6 +91,23 @@ numpy's pairwise summation so results agree to the last digit.
   pending byte count; a listening socket is readable when a connection is waiting (it is accepted with a short
   timeout and kept for the next `accept()`). `time.sleep` really sleeps (`rxplatform..sleep`).
 
+## Files, sys.path, subprocess
+
+- Text files: `open(name)` / `open(name, "r", encoding=...)` reads the bytes and decodes them (utf-8 default, `ascii`,
+  `latin-1`; `errors=` as for `bytes.decode`), so non-ASCII text round-trips through `write` / `read` / `print`,
+  `str.encode` / `bytes.decode("utf-8")` and binary mode (test 73). Invalid UTF-8 raises `UnicodeDecodeError` as in CPython.
+- `sys.path` is live: `sys.path.insert/append/remove` and assignment take effect for the next `import` (`sync_syspath`
+  in `h_imp.crexx` re-reads the list before every module search; test 74).
+- `subprocess` (test 71, 72): `pylib/subprocess.py` runs unchanged on top of `crexx/pylib/_proc.py`, which uses one
+  primitive, the builtin `_sys(cmd)` (`l_sock.crexx`: `ADDRESS SYSTEM`, i.e. `sh -c`, returns the exit status). Streams
+  go through files in a private directory under `$TMPDIR` (`/tmp`), so output is byte exact. `run/call/check_call/
+  check_output/Popen(...).communicate()` work with `input`, `cwd`, `shell`, `timeout` (via `timeout(1)`), `stderr=STDOUT`.
+  `Popen(stdin=PIPE, stdout=PIPE)` is live: a feeder loop in the child's shell picks up numbered chunk files that
+  `p.stdin.write()` renames into place (latency about 30 ms), the child output file is polled by
+  `p.stdout.read1(n, timeout)` / `p.read_nonblock(timeout)`; `kill` signals the child's process group
+  (ADDRESS SYSTEM ends the command's own process group, so the supervisor runs under `setsid`). Needs a POSIX `sh`,
+  `timeout` and `setsid`; each spawn costs a few milliseconds of shell start.
+
 ## Modules and libraries
 
 `import` of Python files works as in CPython: packages with `__init__.py`, `import a.b`, `from a.b import c as d`,

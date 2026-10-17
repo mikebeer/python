@@ -293,8 +293,8 @@ init: procedure = .void
   clsboot = clsboot || " ndarray/1/1/0 AxisError/36/3/0 frozenset/1/1/1 BaseExceptionGroup/28/3/1 ExceptionGroup/98/3/1"
   bboot = "print len isinstance min max abs sum sorted enumerate zip map filter repr ascii any all round divmod pow chr ord hex oct bin issubclass getattr"
   bboot = bboot || " hasattr setattr delattr callable next iter id hash input open reversed format super exit quit globals eval exec vars dir __import__ _exc_init"
-  bboot = bboot || " _obj_init _eg_split _eg_subgroup _identity _decorator _second _sock math.sqrt math.floor math.ceil math.trunc math.fabs math.pow math.sin math.cos"
-  bboot = bboot || " math.tan math.asin math.acos math.atan math.atan2 math.sinh math.cosh math.exp math.log math.log10 math.log2 math.hypot math.tanh math.isnan"
+  bboot = bboot || " _obj_init _eg_split _eg_subgroup _identity _decorator _second _sock _sys math.sqrt math.floor math.ceil math.trunc math.fabs math.pow math.sin"
+  bboot = bboot || " math.cos math.tan math.asin math.acos math.atan math.atan2 math.sinh math.cosh math.exp math.log math.log10 math.log2 math.hypot math.tanh math.isnan"
   bboot = bboot || " math.isinf math.isfinite math.degrees math.radians math.copysign math.fmod math.cbrt math.fsum math.prod math.gcd math.lcm math.factorial math.isqrt"
   bboot = bboot || " math.comb math.perm random.seed random.random random.randint random.randrange random.uniform random.choice random.shuffle random.sample time.time"
   bboot = bboot || " time.perf_counter time.monotonic time.process_time time.sleep itertools.chain itertools.count itertools.islice itertools.takewhile itertools.product"
@@ -308,8 +308,8 @@ init: procedure = .void
   bboot = bboot || " numpy.cumsum numpy.maximum numpy.minimum numpy.power numpy.clip numpy.any numpy.all numpy.allclose numpy.array_equal numpy.median numpy.std numpy.var"
   bboot = bboot || " numpy.round numpy.sum numpy.mean numpy.min numpy.max numpy.prod numpy.argmax numpy.argmin numpy.reshape numpy.ravel"
   aliasboot = "functools.lru_cache=53 functools.cache=53 functools.wraps=53 sys.exit=40 warnings.warn=52 warnings.simplefilter=52 warnings.filterwarnings=52"
-  aliasboot = aliasboot || " warnings.resetwarnings=52 abc.abstractmethod=52 abc.abstractproperty=52 os.unlink=140 sys.setrecursionlimit=52 numpy.absolute=160 numpy.around=195"
-  aliasboot = aliasboot || " numpy.amax=199 numpy.amin=198"
+  aliasboot = aliasboot || " warnings.resetwarnings=52 abc.abstractmethod=52 abc.abstractproperty=52 os.unlink=141 sys.setrecursionlimit=52 numpy.absolute=161 numpy.around=196"
+  aliasboot = aliasboot || " numpy.amax=200 numpy.amin=199"
   kwlist = " False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield "
   ops2 = " == != <= >= ** // << >> += -= *= /= %= &= |= ^= @= -> := "
   /* ---- lexer ---- */
@@ -771,7 +771,7 @@ boot: procedure = .void
     ob_x[o % 2] = i
     bi_oop[i] = o
     if p > 0 then modattr[nm] = o as .string
-    else if left(nm, 1) \== "_" | nm == "__import__" | nm == "_sock" then bimap[nm] = o as .string
+    else if left(nm, 1) \== "_" | nm == "__import__" | nm == "_sock" | nm == "_sys" then bimap[nm] = o as .string
   end
   do i = 1 to words(aliasboot)
     spec = word(aliasboot, i)
@@ -12548,7 +12548,7 @@ bi_abs: procedure = .int
     end
     when ob_k[x % 2] = 2 then return mkint(ival(x))
     when ob_k[x % 2] = 32 then return cplx_abs(x)
-    when ob_k[x % 2] = 29 then return np_math1(160, x)
+    when ob_k[x % 2] = 29 then return np_math1(161, x)
     otherwise nop
   end
   if kind_of(x) = 17 then do
@@ -13946,6 +13946,7 @@ bcall: procedure = .int
       return sl[ob_p[ast[base + 1] % 2] + 1]
     end
     when bid = 55 then return sock_call(base, na)
+    when bid = 56 then return sys_call(base, na)
     when bid = 52 then do
       if na >= 1 then return ast[base + 1]
       return 2
@@ -13956,7 +13957,7 @@ bcall: procedure = .int
     end
     otherwise nop
   end
-  if bid >= 56 then return bcall_mod(bid, base, na, nk)
+  if bid >= 57 then return bcall_mod(bid, base, na, nk)
   return raise_exc(38, "unsupported built-in function")
 
 /* ---------------------------------------------------------------------
@@ -15503,6 +15504,7 @@ bi_open: procedure = .int
   id = .int
   v = .int
   plus = .int
+  enc = .string
   if na < 1 then return nargs_err("open", na, 1, 2)
   if kind_of(ast[base + 1]) \= 6 then return raise_exc(38, "expected str, bytes or os.PathLike object, not " || type_name(ast[base + 1]))
   fn = ob_s[ast[base + 1] % 2]
@@ -15578,6 +15580,17 @@ bi_open: procedure = .int
         nl = eof + 2
       end
       acc = chunk || substr(acc, nl)
+    end
+    /* the file holds bytes; text mode decodes them (utf-8 unless encoding= says otherwise) */
+    enc = enc_arg(base, na, nk, 4)
+    if unw > 0 then do
+      nfl = nfl - 1
+      return 0
+    end
+    acc = str_decode(acc, enc, err_arg(base, na, nk, 6))
+    if unw > 0 then do
+      nfl = nfl - 1
+      return 0
     end
     fl_txt[id] = acc
     fl_h[id] = 0
@@ -16052,12 +16065,12 @@ bcall_mod: procedure = .int
   a = .int
   b = .int
   st = .int
-  if bid >= 146 then return bcall_np(bid, base, na, nk)
-  if bid >= 122 & bid <= 145 then return bcall_os(bid, base, na, nk)
-  if bid <= 92 & na >= 1 then do
+  if bid >= 147 then return bcall_np(bid, base, na, nk)
+  if bid >= 123 & bid <= 146 then return bcall_os(bid, base, na, nk)
+  if bid <= 93 & na >= 1 then do
     /* functions of one or two floats */
-    if bid <= 76 | bid = 75 then do
-      if numkind(ast[base + 1]) = 2 & (bid = 57 | bid = 58 | bid = 59 | bid = 72 | bid = 73 | bid = 74) then x = 0.0
+    if bid <= 77 | bid = 76 then do
+      if numkind(ast[base + 1]) = 2 & (bid = 58 | bid = 59 | bid = 60 | bid = 73 | bid = 74 | bid = 75) then x = 0.0
       else x = mf(ast[base + 1])
       if unw > 0 then return 0
       if na >= 2 then do
@@ -16067,11 +16080,11 @@ bcall_mod: procedure = .int
     end
   end
   select
-    when bid = 56 then do
+    when bid = 57 then do
       if x < 0.0 then return domain_err()
       return mkfloat(rxfloat..sqrt(x))
     end
-    when bid = 57 | bid = 58 | bid = 59 then do
+    when bid = 58 | bid = 59 | bid = 60 then do
       v = ast[base + 1]
       if numkind(v) = 2 then return v
       if numkind(v) = 1 then return mkint(ival(v))
@@ -16084,61 +16097,61 @@ bcall_mod: procedure = .int
       end
       if x \= x then return raise_exc(36, "cannot convert float NaN to integer")
       if finf(x) \= 0 then return raise_exc(31, "cannot convert float infinity to integer")
-      if bid = 57 then return float_to_int(rxfloat..floor(x))
-      if bid = 58 then return float_to_int(rxfloat..ceil(x))
+      if bid = 58 then return float_to_int(rxfloat..floor(x))
+      if bid = 59 then return float_to_int(rxfloat..ceil(x))
       return float_to_int(rxfloat..trunc(x))
     end
-    when bid = 60 then return mkfloat(rxfloat..fabs(x))
-    when bid = 61 then do
+    when bid = 61 then return mkfloat(rxfloat..fabs(x))
+    when bid = 62 then do
       if x = 0.0 & y < 0.0 then return domain_err()
       if x < 0.0 & y \= rxfloat..floor(y) then return domain_err()
       return mkfloat(rxfloat..pow(x, y))
     end
-    when bid = 62 then return mkfloat(rxfloat..sin(x))
-    when bid = 63 then return mkfloat(rxfloat..cos(x))
-    when bid = 64 then return mkfloat(rxfloat..tan(x))
-    when bid = 65 then do
+    when bid = 63 then return mkfloat(rxfloat..sin(x))
+    when bid = 64 then return mkfloat(rxfloat..cos(x))
+    when bid = 65 then return mkfloat(rxfloat..tan(x))
+    when bid = 66 then do
       if x > 1.0 | x < -1.0 then return domain_err()
       return mkfloat(rxfloat..asin(x))
     end
-    when bid = 66 then do
+    when bid = 67 then do
       if x > 1.0 | x < -1.0 then return domain_err()
       return mkfloat(rxfloat..acos(x))
     end
-    when bid = 67 then return mkfloat(rxfloat..atan(x))
-    when bid = 68 then return mkfloat(rxfloat..atan2(x, y))
-    when bid = 69 then return mkfloat(rxfloat..sinh(x))
-    when bid = 70 then return mkfloat(rxfloat..cosh(x))
-    when bid = 76 then return mkfloat(rxfloat..tanh(x))
-    when bid = 71 then do
+    when bid = 68 then return mkfloat(rxfloat..atan(x))
+    when bid = 69 then return mkfloat(rxfloat..atan2(x, y))
+    when bid = 70 then return mkfloat(rxfloat..sinh(x))
+    when bid = 71 then return mkfloat(rxfloat..cosh(x))
+    when bid = 77 then return mkfloat(rxfloat..tanh(x))
+    when bid = 72 then do
       z = rxfloat..exp(x)
       if finf(z) = 1 & x < 1000000.0 then return raise_exc(31, "math range error")
       return mkfloat(z)
     end
-    when bid = 72 | bid = 73 | bid = 74 then do
+    when bid = 73 | bid = 74 | bid = 75 then do
       if numkind(ast[base + 1]) = 2 then do
         s = ob_s[ast[base + 1] % 2]
         if left(s, 1) == "-" then return domain_err()
         if big_float_ovf(s) = 0 then do
           x = big_tofloat(s)
-          if bid = 73 then z = rxfloat..log10(x)
-          else if bid = 74 then z = rxfloat..log2(x)
+          if bid = 74 then z = rxfloat..log10(x)
+          else if bid = 75 then z = rxfloat..log2(x)
           else z = rxfloat..log(x)
         end
         else do
           /* too large for a float: log(m * 2**e) = log(m) + e * log(2) with m in [0.5, 1) */
           call big_frexp s
           z = fr_m
-          if bid = 73 then z = rxfloat..log10(z) + (fr_e as .float) * rxfloat..log10(2.0)
-          else if bid = 74 then z = rxfloat..log2(z) + (fr_e as .float)
+          if bid = 74 then z = rxfloat..log10(z) + (fr_e as .float) * rxfloat..log10(2.0)
+          else if bid = 75 then z = rxfloat..log2(z) + (fr_e as .float)
           else z = rxfloat..log(z) + (fr_e as .float) * rxfloat..log(2.0)
         end
-        if bid \= 72 | na < 2 then return mkfloat(z)
+        if bid \= 73 | na < 2 then return mkfloat(z)
       end
       else do
         if x <= 0.0 then return domain_err()
-        if bid = 73 then return mkfloat(rxfloat..log10(x))
-        if bid = 74 then return mkfloat(rxfloat..log2(x))
+        if bid = 74 then return mkfloat(rxfloat..log10(x))
+        if bid = 75 then return mkfloat(rxfloat..log2(x))
         z = rxfloat..log(x)
       end
       if na >= 2 then do
@@ -16147,49 +16160,49 @@ bcall_mod: procedure = .int
       end
       return mkfloat(z)
     end
-    when bid = 75 then return mkfloat(rxfloat..hypot(x, y))
-    when bid = 77 then do
+    when bid = 76 then return mkfloat(rxfloat..hypot(x, y))
+    when bid = 78 then do
       x = mf(ast[base + 1])
       if x \= x then return 4
       return 6
     end
-    when bid = 78 then do
+    when bid = 79 then do
       x = mf(ast[base + 1])
       if finf(x) \= 0 then return 4
       return 6
     end
-    when bid = 79 then do
+    when bid = 80 then do
       x = mf(ast[base + 1])
       if x \= x then return 6
       if finf(x) \= 0 then return 6
       return 4
     end
-    when bid = 80 then do
+    when bid = 81 then do
       x = mf(ast[base + 1])
       return mkfloat(x * 180.0 / 3.141592653589793)
     end
-    when bid = 81 then do
+    when bid = 82 then do
       x = mf(ast[base + 1])
       return mkfloat(x * 3.141592653589793 / 180.0)
     end
-    when bid = 82 then do
+    when bid = 83 then do
       x = mf(ast[base + 1])
       y = mf(ast[base + 2])
       x = rxfloat..fabs(x)
       if y < 0.0 | fl_negzero(y) = 1 then x = 0.0 - x
       return mkfloat(x)
     end
-    when bid = 83 then do
+    when bid = 84 then do
       x = mf(ast[base + 1])
       y = mf(ast[base + 2])
       if y = 0.0 then return domain_err()
       return mkfloat(rxfloat..fmod(x, y))
     end
-    when bid = 84 then do
+    when bid = 85 then do
       x = mf(ast[base + 1])
       return mkfloat(rxfloat..cbrt(x))
     end
-    when bid = 85 then do
+    when bid = 86 then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
       call fsum_start
@@ -16202,7 +16215,7 @@ bcall_mod: procedure = .int
       if unw > 0 then return 0
       return mkfloat(fsum_result())
     end
-    when bid = 86 then do
+    when bid = 87 then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
       acc = mkint(1)
@@ -16216,13 +16229,13 @@ bcall_mod: procedure = .int
       if unw > 0 then return 0
       return acc
     end
-    when bid = 87 | bid = 88 then do
+    when bid = 88 | bid = 89 then do
       acc = mkint(0)
-      if bid = 88 then acc = mkint(1)
+      if bid = 89 then acc = mkint(1)
       do i = 1 to na
         v = ast[base + i]
         if numkind(v) \= 1 & numkind(v) \= 2 then return raise_exc(38, "'" || type_name(v) || "' object cannot be interpreted as an integer")
-        if bid = 87 then acc = gcd2(acc, v)
+        if bid = 88 then acc = gcd2(acc, v)
         else do
           if num_str(acc) == "0" | num_str(v) == "0" then acc = mkint(0)
           else do
@@ -16233,7 +16246,7 @@ bcall_mod: procedure = .int
       end
       return acc
     end
-    when bid = 89 then do
+    when bid = 90 then do
       v = ast[base + 1]
       if numkind(v) \= 1 then return raise_exc(38, "'" || type_name(v) || "' object cannot be interpreted as an integer")
       n = ival(v)
@@ -16244,7 +16257,7 @@ bcall_mod: procedure = .int
       end
       return acc
     end
-    when bid = 90 then do
+    when bid = 91 then do
       v = ast[base + 1]
       if numkind(v) \= 1 & numkind(v) \= 2 then return raise_exc(38, "'" || type_name(v) || "' object cannot be interpreted as an integer")
       if left(num_str(v), 1) == "-" then return raise_exc(36, "isqrt() argument must be nonnegative")
@@ -16267,32 +16280,32 @@ bcall_mod: procedure = .int
       end
       return a
     end
-    when bid = 91 | bid = 92 then do
+    when bid = 92 | bid = 93 then do
       if numkind(ast[base + 1]) \= 1 | numkind(ast[base + 2]) \= 1 then return raise_exc(38, "comb() arguments must be integers")
       n = ival(ast[base + 1])
       i = ival(ast[base + 2])
       if n < 0 | i < 0 then return raise_exc(36, "n must be a non-negative integer")
       if i > n then return mkint(0)
-      if bid = 91 & i > n - i then i = n - i
+      if bid = 92 & i > n - i then i = n - i
       acc = mkint(1)
       do w = 0 to i - 1
         acc = arith(3, acc, mkint(n - w))
-        if bid = 91 then acc = arith(5, acc, mkint(w + 1))
+        if bid = 92 then acc = arith(5, acc, mkint(w + 1))
       end
       return acc
     end
-    when bid = 93 then do
+    when bid = 94 then do
       if na >= 1 & numkind(ast[base + 1]) = 1 then rnd_s = (abs(ival(ast[base + 1])) // 2147483646) + 1
       else if na >= 1 then rnd_s = (strhash(str_of(ast[base + 1])) // 2147483646) + 1
       else rnd_s = (time("US") as .int) // 2147483646 + 1
       return 2
     end
-    when bid = 94 then return mkfloat(rnd_float())
-    when bid = 95 & (numkind(ast[base + 1]) = 2 | numkind(ast[base + 2]) = 2) then do
+    when bid = 95 then return mkfloat(rnd_float())
+    when bid = 96 & (numkind(ast[base + 1]) = 2 | numkind(ast[base + 2]) = 2) then do
       if numcmp(ast[base + 2], ast[base + 1]) < 0 then return raise_exc(36, "empty range in randrange()")
       return arith(1, ast[base + 1], rnd_below_o(arith(1, arith(2, ast[base + 2], ast[base + 1]), mkint(1))))
     end
-    when bid = 96 & na <= 2 & (numkind(ast[base + 1]) = 2 | (na = 2 & numkind(ast[base + 2]) = 2)) then do
+    when bid = 97 & na <= 2 & (numkind(ast[base + 1]) = 2 | (na = 2 & numkind(ast[base + 2]) = 2)) then do
       if na = 1 then do
         a = mkint(0)
         b = ast[base + 1]
@@ -16304,14 +16317,14 @@ bcall_mod: procedure = .int
       if numcmp(b, a) <= 0 then return raise_exc(36, "empty range in randrange()")
       return arith(1, a, rnd_below_o(arith(2, b, a)))
     end
-    when bid = 95 then do
+    when bid = 96 then do
       if chk_int(ast[base + 1]) = 0 | chk_int(ast[base + 2]) = 0 then return 0
       a = ival(ast[base + 1])
       b = ival(ast[base + 2])
       if b < a then return raise_exc(36, "empty range for randrange() (" || a || ", " || (b + 1) || ", " || (b + 1 - a) || ")")
       return mkint(a + rnd_below(b - a + 1))
     end
-    when bid = 96 then do
+    when bid = 97 then do
       if chk_int(ast[base + 1]) = 0 then return 0
       a = 0
       st = 1
@@ -16327,19 +16340,19 @@ bcall_mod: procedure = .int
       if n <= 0 then return raise_exc(36, "empty range in randrange(" || a || ", " || b || ")")
       return mkint(a + st * rnd_below(n))
     end
-    when bid = 97 then do
+    when bid = 98 then do
       x = mf(ast[base + 1])
       y = mf(ast[base + 2])
       return mkfloat(x + (y - x) * rnd_float())
     end
-    when bid = 98 then do
+    when bid = 99 then do
       l = iter_list(ast[base + 1])
       if l = 0 then return 0
       n = ob_n[l % 2]
       if n = 0 then return raise_exc(34, "Cannot choose from an empty sequence")
       return sl[ob_p[l % 2] + rnd_below(n)]
     end
-    when bid = 99 then do
+    when bid = 100 then do
       l = ast[base + 1]
       if kind_of(l) \= 7 then return raise_exc(38, "shuffle() requires a list")
       n = ob_n[l % 2]
@@ -16351,7 +16364,7 @@ bcall_mod: procedure = .int
       end
       return 2
     end
-    when bid = 100 then do
+    when bid = 101 then do
       l = iter_list(ast[base + 1])
       if l = 0 then return 0
       if chk_int(ast[base + 2]) = 0 then return 0
@@ -16370,16 +16383,16 @@ bcall_mod: procedure = .int
       end
       return o
     end
-    when bid = 101 then do
+    when bid = 102 then do
       z = ((date("UN") as .int) * 86400) as .float
       z = z + ((time("US") as .int) as .float) / 1000000.0
       return mkfloat(z)
     end
-    when bid = 102 | bid = 103 | bid = 104 then do
+    when bid = 103 | bid = 104 | bid = 105 then do
       z = ((time("US") as .int) as .float) / 1000000.0
       return mkfloat(z)
     end
-    when bid = 105 then do
+    when bid = 106 then do
       if na \= 1 then return nargs_err("sleep", na, 1, 1)
       if numkind(ast[base + 1]) = 0 then return raise_exc(38, "'" || type_name(ast[base + 1]) || "' object cannot be interpreted as an integer")
       z = tofloat(ast[base + 1])
@@ -16388,19 +16401,19 @@ bcall_mod: procedure = .int
       if n > 0 then st = rxplatform..sleep(n)
       return 2
     end
-    when bid = 106 then do
+    when bid = 107 then do
       o = mkiter(15, 0, 0)
       ob_c[o % 2] = tup_from_ast(base + 1, base + na)
       return o
     end
-    when bid = 107 then do
+    when bid = 108 then do
       a = 0
       b = 1
       if na >= 1 then a = ival(ast[base + 1])
       if na >= 2 then b = ival(ast[base + 2])
       return mkiter(16, a, b)
     end
-    when bid = 108 then do
+    when bid = 109 then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
       a = 0
@@ -16421,14 +16434,14 @@ bcall_mod: procedure = .int
       sl[ob_p[o % 2] + 2] = 0
       return o
     end
-    when bid = 109 then do
+    when bid = 110 then do
       it = iter_new(ast[base + 2])
       if it = 0 then return 0
       o = mkiter(17, ast[base + 1], it)
       ob_c[o % 2] = 0
       return o
     end
-    when bid = 110 then do
+    when bid = 111 then do
       v = kwarg(base, na, nk, "repeat")
       if v \= 0 then do
         l = iter_list(ast[base + 1])
@@ -16442,16 +16455,16 @@ bcall_mod: procedure = .int
       end
       return it_product(base, na)
     end
-    when bid = 111 | bid = 112 then do
+    when bid = 112 | bid = 113 then do
       l = iter_list(ast[base + 1])
       if l = 0 then return 0
       n = ob_n[l % 2]
       b = n
       if na >= 2 then b = ival(ast[base + 2])
-      if bid = 111 then return it_combin(1, l, b)
+      if bid = 112 then return it_combin(1, l, b)
       return it_combin(2, l, b)
     end
-    when bid = 113 then do
+    when bid = 114 then do
       it = iter_new(ast[base + 1])
       if it = 0 then return 0
       o = mklist(8)
@@ -16473,7 +16486,7 @@ bcall_mod: procedure = .int
       if unw > 0 then return 0
       return mkiter(1, o, 0)
     end
-    when bid = 114 then do
+    when bid = 115 then do
       if na < 2 then return nargs_err("reduce", na, 2, 3)
       it = iter_new(ast[base + 2])
       if it = 0 then return 0
@@ -16495,18 +16508,18 @@ bcall_mod: procedure = .int
       if unw > 0 then return 0
       return acc
     end
-    when bid = 115 then do
+    when bid = 116 then do
       if na \= 2 then return raise_exc(38, "partial() supports one bound argument")
       return mkbmeth(ast[base + 1], ast[base + 2])
     end
-    when bid = 116 then do
+    when bid = 117 then do
       o = dict_new(9)
       if na >= 1 then do
         if ast[base + 1] \= 2 then ob_y[o % 2] = ast[base + 1]
       end
       return o
     end
-    when bid = 117 then do
+    when bid = 118 then do
       o = dict_new(9)
       if na >= 1 then do
         it = iter_new(ast[base + 1])
@@ -16522,12 +16535,12 @@ bcall_mod: procedure = .int
       end
       return o
     end
-    when bid = 118 then return ctor_dict(base, na, nk)
-    when bid = 119 then do
+    when bid = 119 then return ctor_dict(base, na, nk)
+    when bid = 120 then do
       if na = 0 then return mklist(4)
       return iter_list(ast[base + 1])
     end
-    when bid = 120 then do
+    when bid = 121 then do
       v = ast[base + 1]
       if kind_of(v) = 7 then return iter_list(v)
       if kind_of(v) = 9 then return dict_copy(v)
@@ -16541,7 +16554,7 @@ bcall_mod: procedure = .int
       end
       return v
     end
-    when bid = 121 then return deep_copy(ast[base + 1])
+    when bid = 122 then return deep_copy(ast[base + 1])
     otherwise nop
   end
   return raise_exc(38, "unsupported library function")
@@ -16730,6 +16743,7 @@ import_mod: procedure = .int
     return o
   end
   found = 0
+  call sync_syspath
   if parent == "" then do
     do i = 1 to nsyspath
       if found = 0 then found = imp_find(syspath[i], leaf)
@@ -17070,6 +17084,31 @@ addpaths: procedure = .void
   end
   return
 
+/* re-read sys.path (the Python list) into syspath[]: runtime sys.path.insert / append / assignment take effect */
+sync_syspath: procedure = .void
+  s = .string
+  l = .int
+  i = .int
+  n = .int
+  v = .int
+  k = .int
+  s = modattr["sys.path"]
+  if s == "" then return
+  l = s as .int
+  if l = 0 then return
+  if kind_of(l) \= 7 then return
+  n = ob_n[l % 2]
+  k = 0
+  do i = 1 to n
+    v = list_get(l, i - 1)
+    if kind_of(v) = 6 then do
+      k = k + 1
+      syspath[k] = ob_s[v % 2]
+    end
+  end
+  nsyspath = k
+  return
+
 setup_path: procedure = .void
   i = .int
   l = .int
@@ -17165,29 +17204,29 @@ os_fs: procedure = .int
   ents = .string[]
   if na < 1 then return nargs_err("os function", na, 1, 2)
   if kind_of(ast[base + 1]) \= 6 then do
-    if bid = 142 & ast[base + 1] = 2 then s = "."
+    if bid = 143 & ast[base + 1] = 2 then s = "."
     else return raise_exc(38, "expected str, bytes or os.PathLike object, not " || type_name(ast[base + 1]))
   end
   else s = ob_s[ast[base + 1] % 2]
-  if bid = 138 then do
+  if bid = 139 then do
     if file_exists(s) = 1 then return os_err(76, 17, "File exists", s)
     r = rxfs..mkdir(s)
     if r \= 0 then return os_err(54, 2, "No such file or directory", s)
     return 2
   end
-  if bid = 139 then do
+  if bid = 140 then do
     if file_exists(s) = 0 then return os_err(54, 2, "No such file or directory", s)
     r = rxfs..rmdir(s)
     if r \= 0 then return os_err(53, 39, "Directory not empty", s)
     return 2
   end
-  if bid = 140 then do
+  if bid = 141 then do
     if file_exists(s) = 0 then return os_err(54, 2, "No such file or directory", s)
     r = rxfs..delete(s)
     if r \= 0 then return os_err(53, 1, "Operation not permitted", s)
     return 2
   end
-  if bid = 141 then do
+  if bid = 142 then do
     if na < 2 | kind_of(ast[base + 2]) \= 6 then return raise_exc(38, "rename: src and dst should be str")
     t = ob_s[ast[base + 2] % 2]
     if file_exists(s) = 0 then return os_err(54, 2, "No such file or directory", s)
@@ -17212,7 +17251,7 @@ bcall_os: procedure = .int
   i = .int
   v = .int
   z = .float
-  if bid = 122 then do
+  if bid = 123 then do
     if na < 1 then return nargs_err("getenv", na, 1, 2)
     s = getenv(ob_s[ast[base + 1] % 2])
     if s == "" then do
@@ -17221,14 +17260,14 @@ bcall_os: procedure = .int
     end
     return mkstr(s)
   end
-  if bid = 123 then do
+  if bid = 124 then do
     s = getenv("PWD")
     if s == "" then s = "."
     return mkstr(s)
   end
-  if bid = 145 then return mkint(900)
-  if bid = 143 then return bi_exc_info()
-  if bid = 144 then do
+  if bid = 146 then return mkint(900)
+  if bid = 144 then return bi_exc_info()
+  if bid = 145 then do
     i = 0
     if na >= 1 then do
       if ast[base + 1] // 2 = 0 then return raise_exc(38, "an integer is required")
@@ -17236,34 +17275,34 @@ bcall_os: procedure = .int
     end
     return bi_getframe(i)
   end
-  if bid = 138 | bid = 139 | bid = 140 | bid = 141 | bid = 142 then return os_fs(bid, base, na)
-  if bid = 135 then do
+  if bid = 139 | bid = 140 | bid = 141 | bid = 142 | bid = 143 then return os_fs(bid, base, na)
+  if bid = 136 then do
     z = ((date("UN") as .int) * 86400) as .float
     z = z * 1000000000.0 + ((time("US") as .int) as .float) * 1000.0
     return float_to_int(z)
   end
-  if bid = 136 then return mkint((time("US") as .int) * 1000)
+  if bid = 137 then return mkint((time("US") as .int) * 1000)
   /* the os.path functions take strings */
   if na < 1 then return nargs_err("path function", na, 1, 2)
   do i = 1 to na
     if kind_of(ast[base + i]) \= 6 then return raise_exc(38, "expected str, bytes or os.PathLike object, not " || type_name(ast[base + i]))
   end
   s = ob_s[ast[base + 1] % 2]
-  if bid = 124 then do
+  if bid = 125 then do
     do i = 2 to na
       s = path_join2(s, ob_s[ast[base + i] % 2])
     end
     return mkstr(s)
   end
-  if bid = 125 | bid = 129 | bid = 130 then do
+  if bid = 126 | bid = 130 | bid = 131 then do
     if s == "" then return 6
-    if bid = 130 then return mkbool(rxfs..isdir(s))
-    if bid = 129 then do
+    if bid = 131 then return mkbool(rxfs..isdir(s))
+    if bid = 130 then do
       if rxfs..isdir(s) = 1 then return 6
     end
     return mkbool(file_exists(s))
   end
-  if bid = 126 | bid = 127 | bid = 132 then do
+  if bid = 127 | bid = 128 | bid = 133 then do
     p = lastpos("/", s)
     t = left(s, p)
     if t \== "" & t \== copies("/", length(t)) then do
@@ -17271,14 +17310,14 @@ bcall_os: procedure = .int
         t = left(t, length(t) - 1)
       end
     end
-    if bid = 126 then return mkstr(substr(s, p + 1))
-    if bid = 127 then return mkstr(t)
+    if bid = 127 then return mkstr(substr(s, p + 1))
+    if bid = 128 then return mkstr(t)
     v = mktuple(2)
     sl[ob_p[v % 2]] = mkstr(t)
     sl[ob_p[v % 2] + 1] = mkstr(substr(s, p + 1))
     return v
   end
-  if bid = 128 then do
+  if bid = 129 then do
     p = lastpos(".", s)
     i = lastpos("/", s)
     if p <= i + 1 then p = 0
@@ -17293,9 +17332,9 @@ bcall_os: procedure = .int
     end
     return v
   end
-  if bid = 137 then return ast[base + 1]
-  if bid = 134 then return mkstr(path_norm(s))
-  if bid = 131 then do
+  if bid = 138 then return ast[base + 1]
+  if bid = 135 then return mkstr(path_norm(s))
+  if bid = 132 then do
     if left(s, 1) \== "/" then do
       t = getenv("PWD")
       if t == "" then t = "."
@@ -17303,7 +17342,7 @@ bcall_os: procedure = .int
     end
     return mkstr(path_norm(s))
   end
-  if bid = 133 then do
+  if bid = 134 then do
     if s == "~" | left(s, 2) == "~/" then do
       t = getenv("HOME")
       if t == "" then t = "/"
@@ -19303,26 +19342,26 @@ np_math1: procedure = .int
   dt = ob_c[ia]
   pa = ob_p[ia]
   rd = 2
-  if fid = 160 | fid = 170 then rd = dt
-  if fid = 171 then rd = 3
+  if fid = 161 | fid = 171 then rd = dt
+  if fid = 172 then rd = 3
   r = np_new(rd, ob_x[ia], n)
   ir = r % 2
   pr = ob_p[ir]
   do i = 0 to ob_x[ia] - 1
     sl[ob_y[ir] + i] = sl[ob_y[ia] + i]
   end
-  if fid = 160 | fid = 170 then do
+  if fid = 161 | fid = 171 then do
     if dt = 2 then do
       do i = 0 to n - 1
         f = npf[pa + i]
-        if fid = 160 then npf[pr + i] = rxfloat..fabs(f)
+        if fid = 161 then npf[pr + i] = rxfloat..fabs(f)
         else npf[pr + i] = f * f
       end
     end
     else do
       do i = 0 to n - 1
         v = sl[pa + i]
-        if fid = 160 then do
+        if fid = 161 then do
           if v < 0 then v = 0 - v
         end
         else v = v * v
@@ -19339,42 +19378,42 @@ np_math1: procedure = .int
     end
     g = 0.0
     select
-      when fid = 171 then do
+      when fid = 172 then do
         if f \= f then sl[pr + i] = 1
         else sl[pr + i] = 0
       end
-      when fid = 159 then do
+      when fid = 160 then do
         if f \= f then g = f
         else if f < 0.0 then g = f_nan()
         else g = rxfloat..sqrt(f)
       end
-      when fid = 161 then do
+      when fid = 162 then do
         if f \= f then g = f
         else if f > 709.78 then g = f_inf()
         else g = rxfloat..exp(f)
       end
-      when fid = 162 then g = rxfloat..sin(f)
-      when fid = 163 then g = rxfloat..cos(f)
-      when fid = 164 then g = rxfloat..tan(f)
-      when fid = 165 | fid = 166 | fid = 167 then do
+      when fid = 163 then g = rxfloat..sin(f)
+      when fid = 164 then g = rxfloat..cos(f)
+      when fid = 165 then g = rxfloat..tan(f)
+      when fid = 166 | fid = 167 | fid = 168 then do
         if f \= f then g = f
         else if f < 0.0 then g = f_nan()
         else if f = 0.0 then g = 0.0 - f_inf()
-        else if fid = 165 then g = rxfloat..log(f)
-        else if fid = 166 then g = rxfloat..log10(f)
+        else if fid = 166 then g = rxfloat..log(f)
+        else if fid = 167 then g = rxfloat..log10(f)
         else g = rxfloat..log2(f)
       end
-      when fid = 168 then do
+      when fid = 169 then do
         if f \= f | finf(f) \= 0 then g = f
         else g = rxfloat..floor(f)
       end
-      when fid = 169 then do
+      when fid = 170 then do
         if f \= f | finf(f) \= 0 then g = f
         else g = rxfloat..ceil(f)
       end
       otherwise nop
     end
-    if fid \= 171 then npf[pr + i] = g
+    if fid \= 172 then npf[pr + i] = g
   end
   return r
 
@@ -21516,7 +21555,7 @@ bcall_np: procedure = .int
   atl = .float
   l = .int
   isf = .int
-  if bid \= 146 & bid \= 147 then do
+  if bid \= 147 & bid \= 148 then do
     do i = 1 to na
       if is_cx(ast[base + i]) = 1 then return cx_dispatch(bid, base, na, nk)
     end
@@ -21525,10 +21564,10 @@ bcall_np: procedure = .int
     if is_carr(ast[base + 1]) = 1 then return cx_dispatch(bid, base, na, nk)
   end
   select
-    when bid = 146 | bid = 147 then do
+    when bid = 147 | bid = 148 then do
       if na < 1 then return nargs_err("array", na, 1, 2)
       v = ast[base + 1]
-      if bid = 147 & kind_of(v) = 29 then r = v
+      if bid = 148 & kind_of(v) = 29 then r = v
       else if kind_of(v) = 29 then r = np_cast(v, ob_c[v % 2])
       else r = np_from_obj(v)
       if r = 0 then return 0
@@ -21542,7 +21581,7 @@ bcall_np: procedure = .int
       end
       return r
     end
-    when bid = 148 | bid = 149 | bid = 150 then do
+    when bid = 149 | bid = 150 | bid = 151 then do
       if na < 1 then return nargs_err("zeros", na, 1, 2)
       if np_dims(base, 1, 1) = 0 then return 0
       npcx_d = 0
@@ -21550,7 +21589,7 @@ bcall_np: procedure = .int
       if dt = 0 then return 0
       fi = 0
       z = 0.0
-      if bid = 149 then do
+      if bid = 150 then do
         fi = 1
         z = 1.0
       end
@@ -21561,7 +21600,7 @@ bcall_np: procedure = .int
       end
       return r
     end
-    when bid = 151 then do
+    when bid = 152 then do
       if na < 2 then return nargs_err("full", na, 2, 3)
       if np_dims(base, 1, 1) = 0 then return 0
       v = ast[base + 2]
@@ -21588,7 +21627,7 @@ bcall_np: procedure = .int
       if dt = 3 & fi \= 0 then fi = 1
       return np_make(dt, fi, z)
     end
-    when bid = 152 | bid = 153 | bid = 154 then do
+    when bid = 153 | bid = 154 | bid = 155 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       ntnd = ob_x[a % 2]
@@ -21598,11 +21637,11 @@ bcall_np: procedure = .int
       dt = ob_c[a % 2]
       fi = 0
       z = 0.0
-      if bid = 153 then do
+      if bid = 154 then do
         fi = 1
         z = 1.0
       end
-      if bid = 154 then do
+      if bid = 155 then do
         v = ast[base + 2]
         if numkind(v) >= 2 then do
           z = tofloat(v)
@@ -21616,16 +21655,16 @@ bcall_np: procedure = .int
       if dt = 3 & fi \= 0 then fi = 1
       return np_make(dt, fi, z)
     end
-    when bid = 155 | bid = 156 then do
+    when bid = 156 | bid = 157 then do
       if numkind(ast[base + 1]) \= 1 then return raise_exc(38, "'" || type_name(ast[base + 1]) || "' object cannot be interpreted as an integer")
       n = ival(ast[base + 1])
       j = n
-      if na >= 2 & bid = 155 then do
+      if na >= 2 & bid = 156 then do
         if ast[base + 2] \= 2 then j = ival(ast[base + 2])
       end
       return np_eye(n, j)
     end
-    when bid = 157 then do
+    when bid = 158 then do
       if na < 1 then return nargs_err("arange", na, 1, 3)
       isf = 0
       do i = 1 to na
@@ -21681,7 +21720,7 @@ bcall_np: procedure = .int
       if dt > 0 then r = np_cast(r, dt)
       return r
     end
-    when bid = 158 then do
+    when bid = 159 then do
       if na < 2 then return nargs_err("linspace", na, 2, 3)
       x = mf(ast[base + 1])
       y = mf(ast[base + 2])
@@ -21708,7 +21747,7 @@ bcall_np: procedure = .int
       else if n = 1 then npf[ob_p[r % 2]] = x
       return r
     end
-    when bid = 159 | bid = 160 | bid = 161 | bid = 162 | bid = 163 | bid = 164 | bid = 165 | bid = 166 | bid = 167 | bid = 168 | bid = 169 | bid = 170 | bid = 171 then do
+    when bid = 160 | bid = 161 | bid = 162 | bid = 163 | bid = 164 | bid = 165 | bid = 166 | bid = 167 | bid = 168 | bid = 169 | bid = 170 | bid = 171 | bid = 172 then do
       if na < 1 then return nargs_err("ufunc", na, 1, 1)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
@@ -21717,7 +21756,7 @@ bcall_np: procedure = .int
       if ob_x[r % 2] = 0 then return np_scalar(r, 0)
       return r
     end
-    when bid = 172 then do
+    when bid = 173 then do
       if na = 1 then do
         a = np_coerce(ast[base + 1])
         if a = 0 then return 0
@@ -21732,7 +21771,7 @@ bcall_np: procedure = .int
       if c = 0 then return 0
       return np_where3(a, b, c)
     end
-    when bid = 173 then do
+    when bid = 174 then do
       if na < 1 then return nargs_err("concatenate", na, 1, 2)
       l = np_array_list(ast[base + 1], 0)
       if l = 0 then return 0
@@ -21742,12 +21781,12 @@ bcall_np: procedure = .int
       if v \= 0 then w = ival(v)
       return np_concat(l, w)
     end
-    when bid = 174 then do
+    when bid = 175 then do
       l = np_array_list(ast[base + 1], 2)
       if l = 0 then return 0
       return np_concat(l, 0)
     end
-    when bid = 175 then do
+    when bid = 176 then do
       l = np_array_list(ast[base + 1], 1)
       if l = 0 then return 0
       if ob_n[l % 2] > 0 then do
@@ -21755,7 +21794,7 @@ bcall_np: procedure = .int
       end
       return np_concat(l, 1)
     end
-    when bid = 176 then do
+    when bid = 177 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       w = -1
@@ -21767,12 +21806,12 @@ bcall_np: procedure = .int
       else if v \= 0 then w = ival(v)
       return np_sort(a, c, w)
     end
-    when bid = 177 then do
+    when bid = 178 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_unique(a)
     end
-    when bid = 178 | bid = 179 then do
+    when bid = 179 | bid = 180 then do
       if na < 2 then return nargs_err("dot", na, 2, 2)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
@@ -21780,17 +21819,17 @@ bcall_np: procedure = .int
       if b = 0 then return 0
       return np_dot(a, b)
     end
-    when bid = 180 then do
+    when bid = 181 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_transpose(a)
     end
-    when bid = 181 then do
+    when bid = 182 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_diag(a)
     end
-    when bid = 182 then do
+    when bid = 183 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       if ob_x[a % 2] \= 2 then return raise_exc(36, "diag requires an array of at least two dimensions")
@@ -21798,20 +21837,20 @@ bcall_np: procedure = .int
       if b = 0 then return 0
       return np_reduce(b, 1, 0, 0)
     end
-    when bid = 184 | bid = 185 | bid = 186 then do
+    when bid = 185 | bid = 186 | bid = 187 then do
       if na < 2 then return nargs_err("ufunc", na, 2, 2)
-      if bid = 184 then w = 21
-      else if bid = 185 then w = 22
+      if bid = 185 then w = 21
+      else if bid = 186 then w = 22
       else w = 7
       return np_binop(w, ast[base + 1], ast[base + 2])
     end
-    when bid = 187 then do
+    when bid = 188 then do
       if na < 3 then return nargs_err("clip", na, 3, 3)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_clip(a, ast[base + 2], ast[base + 3])
     end
-    when bid = 190 then do
+    when bid = 191 then do
       if na < 2 then return nargs_err("allclose", na, 2, 4)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
@@ -21828,7 +21867,7 @@ bcall_np: procedure = .int
       if unw > 0 then return 0
       return np_allclose(a, b, rtl, atl)
     end
-    when bid = 191 then do
+    when bid = 192 then do
       if na < 2 then return nargs_err("array_equal", na, 2, 2)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
@@ -21836,12 +21875,12 @@ bcall_np: procedure = .int
       if b = 0 then return 0
       return np_array_equal(a, b)
     end
-    when bid = 192 then do
+    when bid = 193 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_median(a)
     end
-    when bid = 195 then do
+    when bid = 196 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       w = 0
@@ -21853,33 +21892,33 @@ bcall_np: procedure = .int
       if ob_x[r % 2] = 0 then return np_scalar(r, 0)
       return r
     end
-    when bid = 203 then do
+    when bid = 204 then do
       if na < 2 then return nargs_err("reshape", na, 2, 2)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       if np_dims(base, 2, na - 1) = 0 then return 0
       return np_reshape(a)
     end
-    when bid = 204 then do
+    when bid = 205 then do
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
       return np_flat(a)
     end
-    when bid = 196 | bid = 197 | bid = 198 | bid = 199 | bid = 200 | bid = 201 | bid = 202 | bid = 183 | bid = 188 | bid = 189 | bid = 193 | bid = 194 then do
+    when bid = 197 | bid = 198 | bid = 199 | bid = 200 | bid = 201 | bid = 202 | bid = 203 | bid = 184 | bid = 189 | bid = 190 | bid = 194 | bid = 195 then do
       if na < 1 then return nargs_err("reduction", na, 1, 2)
       a = np_coerce(ast[base + 1])
       if a = 0 then return 0
-      if bid = 196 then w = 1
-      else if bid = 197 then w = 2
-      else if bid = 198 then w = 3
-      else if bid = 199 then w = 4
-      else if bid = 200 then w = 5
-      else if bid = 201 then w = 6
-      else if bid = 202 then w = 7
-      else if bid = 183 then w = 8
-      else if bid = 188 then w = 9
-      else if bid = 189 then w = 10
-      else if bid = 193 then w = 11
+      if bid = 197 then w = 1
+      else if bid = 198 then w = 2
+      else if bid = 199 then w = 3
+      else if bid = 200 then w = 4
+      else if bid = 201 then w = 5
+      else if bid = 202 then w = 6
+      else if bid = 203 then w = 7
+      else if bid = 184 then w = 8
+      else if bid = 189 then w = 9
+      else if bid = 190 then w = 10
+      else if bid = 194 then w = 11
       else w = 12
       return np_red_call(a, w, base, na, nk, 2)
     end
@@ -23819,6 +23858,21 @@ sock_call: procedure = .int
     otherwise nop
   end
   return 2
+
+/* ---------------------------------------------------------------------
+   _sys(cmd): run a shell command line with ADDRESS SYSTEM (sh -c); its output goes to the
+   inherited streams unless the command redirects it. Returns the exit status. Used by pylib/_proc.py.
+   --------------------------------------------------------------------- */
+sys_call: procedure = .int
+  arg base = .int, na = .int
+  cmd = .string
+  r = .int
+  if na < 1 then return raise_exc(38, "_sys() needs a command string")
+  if kind_of(ast[base + 1]) \= 6 then return raise_exc(38, "_sys() needs a command string")
+  cmd = ob_s[ast[base + 1] % 2]
+  address system cmd
+  r = rc
+  return mkint(r)
 
 /* ---------------------------------------------------------------------
    Pattern matching (match / case), ExceptionGroup and except*
