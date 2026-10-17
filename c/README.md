@@ -107,7 +107,7 @@ compile-time `PY_LIBDIR` (`make LIBDIR=...`, default the absolute `../pylib` of 
 which is where the shared pure-Python libraries live). Only stdio `fopen` is used; path
 composition is `host_join` / `host_module_path` in p0_os.c.
 
-`eval`, `exec`, `globals()`, `locals()`, `vars()`, `dir()`, `__import__` are available.
+`eval`, `exec`, `globals()`, `locals()`, `vars()`, `dir()`, `__import__` are available. `exec(src, d)` keeps one persistent namespace per dict `d` (functions defined by earlier calls see globals rebound by later ones; two dicts do not share names), up to 64 dicts at a time.
 
 ## Language notes (Stage 2)
 

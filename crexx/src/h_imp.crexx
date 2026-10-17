@@ -15,6 +15,7 @@ new_module: procedure = .int
   mod_fb[nmod] = 0
   mod_dyn[nmod] = 0
   mod_nsd[nmod] = 0
+  mod_act[nmod] = 0
   if ispkg = 1 then mod_pkg[nmod] = name
   else do
     p = lastpos(".", name)
@@ -88,7 +89,14 @@ parse_module: procedure = .int
   parse_dyn = parse_dyn_init
   parse_mi = mi
   call lex_text src, 0
-  sc = scope_push(SK_MODULE)
+  if parse_reuse > 0 then do
+    /* a further chunk of the persistent namespace: keep the module scope (names, slots) */
+    sc = mod_sc[mi]
+    sc_par[sc] = 0
+    sc_rf0[sc] = nrf + 1
+    cursc = sc
+  end
+  else sc = scope_push(SK_MODULE)
   sc_id[sc] = 0
   mod_sc[mi] = sc
   cur_msc = sc
@@ -118,6 +126,7 @@ module_exec: procedure = .int
   i = .int
   sv_g = .int
   sv_m = .int
+  sv_e = .int
   body = parse_module(src, mi)
   if body = 0 then do
     call raise_exc C_SYNTAXERROR, mod_file[mi] || ": " || pe_msg
@@ -138,7 +147,10 @@ module_exec: procedure = .int
   sv_m = cur_mi
   gfb = fbm
   cur_mi = mi
+  sv_e = echo_chunk
+  echo_chunk = 0
   call ex body, fbm
+  echo_chunk = sv_e
   gfb = sv_g
   cur_mi = sv_m
   if unw > 0 then return 0

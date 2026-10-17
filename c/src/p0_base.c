@@ -327,6 +327,10 @@ static long ngray, graycap;
 static Str **gnames;
 static Value *G;
 static long nglobals, gcap;
+#define EXEC_NS 64
+static Value exec_dicts[EXEC_NS];   /* dicts passed to exec()/eval() as globals: each has its own persistent namespace */
+static Str *exec_gps[EXEC_NS];
+static int exec_nsn, exec_next;
 
 /* classes */
 static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, *cls_list,
@@ -1325,6 +1329,7 @@ static void gc_collect(void)
         gray[ngray++] = h; }
     for (p = vstack; p < vsp; p++) gc_push(*p);
     for (i = 0; i < nglobals; i++) gc_push(G[i]);
+    for (i = 0; i < exec_nsn && i < EXEC_NS; i++) gc_push(exec_dicts[i]);
     for (f = cur_frame; f; f = f->up) {
         gc_push(f->ret);
         gc_pushp(f->gen, T_GEN);

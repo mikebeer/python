@@ -1487,6 +1487,10 @@ static long ngray, graycap;
 static Str **gnames;
 static Value *G;
 static long nglobals, gcap;
+#define EXEC_NS 64
+static Value exec_dicts[EXEC_NS];   /* dicts passed to exec()/eval() as globals: each has its own persistent namespace */
+static Str *exec_gps[EXEC_NS];
+static int exec_nsn, exec_next;
 
 /* classes */
 static Class *cls_object, *cls_type, *cls_int, *cls_bool, *cls_float, *cls_str, *cls_list,
@@ -2485,6 +2489,7 @@ static void gc_collect(void)
         gray[ngray++] = h; }
     for (p = vstack; p < vsp; p++) gc_push(*p);
     for (i = 0; i < nglobals; i++) gc_push(G[i]);
+    for (i = 0; i < exec_nsn && i < EXEC_NS; i++) gc_push(exec_dicts[i]);
     for (f = cur_frame; f; f = f->up) {
         gc_push(f->ret);
         gc_pushp(f->gen, T_GEN);
@@ -28652,6 +28657,20 @@ static Value exec_eval(Args *x, int is_eval)
     if (gd.t == T_DICT) {
         usedict = 1;
         gp = intern_c("<exec>.");
+        if (x->n > 1 || kwget(x, "globals").t == T_DICT) {
+            /* an explicit globals dict is one persistent namespace: functions defined by earlier calls
+               see globals rebound by later ones, and two dicts do not share names */
+            char nb[40];
+            for (i = 0; i < exec_nsn; i++)
+                if (exec_dicts[i].u.o == gd.u.o) break;
+            if (i == exec_nsn) {
+                i = exec_nsn < EXEC_NS ? exec_nsn++ : exec_next++ % EXEC_NS;
+                sprintf(nb, "<exec%d>.", ++exec_ns_serial);
+                exec_dicts[i] = gd;
+                exec_gps[i] = intern_c(nb);
+            }
+            gp = exec_gps[i];
+        }
         /* clear the scratch namespace, then load the dicts */
         for (i = 0; i < nglobals; i++)
             if (gnames[i]->len > gp->len && memcmp(gnames[i]->s, gp->s, (size_t)gp->len) == 0)
@@ -28691,7 +28710,6 @@ static Value exec_eval(Args *x, int is_eval)
         buf_addn(&b, AS_STR(srcv)->s, AS_STR(srcv)->len);
         buf_addc(&b, '\n');
     }
-    exec_ns_serial++;
     VPUSH(srcv);
     blk = compile_src(b.s, b.n, gp);
     buf_free(&b);

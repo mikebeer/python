@@ -30,9 +30,13 @@ Set `CREXX` to the crexx driver if it is not on `PATH`. The first run compiles
 `sys.executable` is the absolute path of the `py` launcher (exported as `PY_EXECUTABLE`, read by `pylib/sys.py`).
 `dir()` of built-in values (`str list tuple dict set int float bytes complex range`) lists the public method names.
 An `exec()` inside exec'd code shares the outer namespace, so `exec("exec('x = 1')")` defines `x` (the `-i` loop relies on it).
-Limit of `-i` and `exec()`: every exec'd chunk is parsed as its own module, so a function defined in one chunk reads
-globals from that chunk's frame and does not see later rebinding of a global made by another chunk (CPython shares one
-globals dict). Simple REPL use is fine; the Workbench probes this and replays history instead of keeping a live session.
+All exec()/eval() chunks that run in one namespace share ONE persistent module (scope and global frame): `exec(src)` in the
+running module, `exec(src, d)` per dict `d`, and the `-i` loop (which runs its chunks in its own module). A function defined by an
+earlier chunk therefore sees globals rebound by a later chunk, as in CPython (test 78); a name used by a function before it is
+defined is resolved at call time; assignments made before an exception and `del` are kept. In `-i`, an expression statement at the
+top level of a chunk echoes its repr (as `c/py -i` does). Limit: module-level code of a plain script and an `exec` namespace
+are separate frames synchronised at every exec() call, so a global rebound by a function that exec() defined is seen by the
+script only after the next exec().
 
 ## Design
 

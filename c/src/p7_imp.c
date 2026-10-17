@@ -633,6 +633,20 @@ static Value exec_eval(Args *x, int is_eval)
     if (gd.t == T_DICT) {
         usedict = 1;
         gp = intern_c("<exec>.");
+        if (x->n > 1 || kwget(x, "globals").t == T_DICT) {
+            /* an explicit globals dict is one persistent namespace: functions defined by earlier calls
+               see globals rebound by later ones, and two dicts do not share names */
+            char nb[40];
+            for (i = 0; i < exec_nsn; i++)
+                if (exec_dicts[i].u.o == gd.u.o) break;
+            if (i == exec_nsn) {
+                i = exec_nsn < EXEC_NS ? exec_nsn++ : exec_next++ % EXEC_NS;
+                sprintf(nb, "<exec%d>.", ++exec_ns_serial);
+                exec_dicts[i] = gd;
+                exec_gps[i] = intern_c(nb);
+            }
+            gp = exec_gps[i];
+        }
         /* clear the scratch namespace, then load the dicts */
         for (i = 0; i < nglobals; i++)
             if (gnames[i]->len > gp->len && memcmp(gnames[i]->s, gp->s, (size_t)gp->len) == 0)
@@ -672,7 +686,6 @@ static Value exec_eval(Args *x, int is_eval)
         buf_addn(&b, AS_STR(srcv)->s, AS_STR(srcv)->len);
         buf_addc(&b, '\n');
     }
-    exec_ns_serial++;
     VPUSH(srcv);
     blk = compile_src(b.s, b.n, gp);
     buf_free(&b);

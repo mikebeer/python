@@ -3,35 +3,71 @@ import os as _os
 
 
 class _Environ:
+    """The process environment: reads go to the real variables, writes and deletes are kept in this object
+    (not exported to child processes); keys() lists only the names that were set here."""
+
+    def __init__(self):
+        self._set = {}
+        self._del = []
+
     def __getitem__(self, key):
-        v = _os.getenv(key)
+        if key in self._set:
+            return self._set[key]
+        v = None if key in self._del else _os.getenv(key)
         if v is None:
             raise KeyError(key)
         return v
 
     def get(self, key, default=None):
-        v = _os.getenv(key)
-        if v is None:
+        try:
+            return self[key]
+        except KeyError:
             return default
-        return v
 
     def __contains__(self, key):
-        return _os.getenv(key) is not None
+        return self.get(key) is not None
 
     def __setitem__(self, key, value):
-        pass
+        self._set[key] = value
+        if key in self._del:
+            self._del.remove(key)
+
+    def __delitem__(self, key):
+        if key not in self:
+            raise KeyError(key)
+        self._set.pop(key, None)
+        if key not in self._del:
+            self._del.append(key)
+
+    def pop(self, key, *default):
+        if key in self:
+            v = self[key]
+            del self[key]
+            return v
+        if default:
+            return default[0]
+        raise KeyError(key)
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def update(self, other):
+        for k in other:
+            self[k] = other[k]
 
     def keys(self):
-        return []
+        return list(self._set.keys())
 
     def items(self):
-        return []
+        return list(self._set.items())
 
     def __iter__(self):
-        return iter([])
+        return iter(self.keys())
 
     def __len__(self):
-        return 0
+        return len(self._set)
 
 
 environ = _Environ()

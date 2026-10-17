@@ -87,15 +87,18 @@ gc_scan: procedure = .void
   end
   if k = K_DICT | k = K_SET then do
     d = ob_x[i]
-    e = dd_head[d]
-    do while e > 0
-      if de_live[e] = 1 then do
-        call gc_mark de_key[e]
-        call gc_mark de_val[e]
+    /* a dict / set object without storage (ob_x = 0, e.g. a set subclass instance before its __init__) has no entries */
+    if d > 0 then do
+      e = dd_head[d]
+      do while e > 0
+        if de_live[e] = 1 then do
+          call gc_mark de_key[e]
+          call gc_mark de_val[e]
+        end
+        e = de_next[e]
       end
-      e = de_next[e]
+      if dd_own[d] > 0 then call gc_mark dd_own[d]
     end
-    if dd_own[d] > 0 then call gc_mark dd_own[d]
     if ob_c[i] > 0 then do
       hv = nat_at["h" || (i * 2)]
       if hv \== "" then call gc_mark hv as .int
@@ -383,6 +386,11 @@ gc_run: procedure = .void
   n = dyn_val.0
   do j = 1 to n
     call gc_mark dyn_val[j]
+  end
+  /* the namespace dicts of exec()'d chunk modules: their key (the dict's object number) must not be reused */
+  n = mod_nsd.0
+  do j = 1 to n
+    call gc_mark mod_nsd[j]
   end
   n = cd_obj.0
   do j = 1 to n

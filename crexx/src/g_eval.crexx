@@ -933,6 +933,11 @@ ex: procedure = .void
   cs_ln[cdepth + 1] = n_ln[n]
   if t = N_EXPR then do
     v = ev(n_a[n], fb)
+    /* `-i`: an expression statement at the top level of an exec()'d chunk echoes its repr (as c/py -i does) */
+    if echo_chunk = 1 & fb = gfb & v \= 0 & v \= NONE_OOP then do
+      s2 = repr_of(v)
+      if unw = 0 then call outs s2 || '0a'x
+    end
     return
   end
   if t = N_ASSIGN then do

@@ -207,7 +207,7 @@ run_source: procedure = .int
   end
   sc = mod_sc[mi]
   mod_fsz[mi] = sc_n[sc] + 1 + 64
-  if mod_dyn[mi] = 1 then mod_fsz[mi] = mod_fsz[mi] + 512
+  if mod_dyn[mi] = 1 then mod_fsz[mi] = mod_fsz[mi] + 8192
   gfb = alloc_frame(mod_fsz[mi])
   mod_fb[mi] = gfb
   cur_mi = mi
@@ -562,6 +562,10 @@ init: procedure = .void
   mod_obj = .int[]
   mod_dyn = .int[]
   mod_nsd = .int[]
+  mod_act = .int[]
+  nsmod = .stem()
+  parse_reuse = 0
+  echo_chunk = 0
   modx = .stem()
   hyb = .stem()
   cur_mi = 0

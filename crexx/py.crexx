@@ -37,17 +37,17 @@ namespace py expose rc_exit repl_mode obuf h_out h_err h_in stdin_eof rnd_s,
    c53f c85f cmnf lm lmn lr lrn fovf hxv rg_sa rg_sb rg_sc rg_idx fr_m fr_e,
    fs_p fs_n fs_sp fs_inf fs_nf fneg_max nmod pypath script_dir mod_name,
    mod_file mod_pkg mod_pdir mod_ispkg mod_sc mod_fb mod_obj mod_dyn,
-   mod_nsd modx hyb cur_mi parse_mi parse_dyn cur_msc ndyn dyn_mi dyn_slot,
-   dyn_val nbn bn_sc bn_name bn_slot sys_modules syspath nsyspath imp_file,
-   imp_ispkg imp_pdir imp_quiet natives shadow cl_mod cl_bt cl_meta nckw,
-   kw_cd kw_name kw_node cl_ms cl_mn cl_bs cl_bn mro_a bs_a nmro nbs nca,
-   ca_c ca_n nis is_c is_n is_s gn_ret gen_throw mod_fsz parse_dyn_init,
-   fmt_nested fmt_auto_in fmt_auto_out fnattr dd_own bl_a bl_n sq_a sq_s,
-   sq_e sq_p sup_c npn nfh npf npta nptb nptc npsel np_sc nprs nprn npcat,
-   npco npcc npcd npcs npit npax npnb npes npip npfp npxp npnf npls npstr,
-   npsm npnd np_sep np_ip np_fp np_es np_ds np_de nti ntf nts ntn ntnd ntfb,
-   ntfi ntff npfl npil np_outer np_n np_inner np_axn np_hasax np_axv,
-   np_ddof np_nidT
+   mod_nsd mod_act nsmod parse_reuse echo_chunk modx hyb cur_mi parse_mi,
+   parse_dyn cur_msc ndyn dyn_mi dyn_slot dyn_val nbn bn_sc bn_name bn_slot,
+   sys_modules syspath nsyspath imp_file imp_ispkg imp_pdir imp_quiet,
+   natives shadow cl_mod cl_bt cl_meta nckw kw_cd kw_name kw_node cl_ms,
+   cl_mn cl_bs cl_bn mro_a bs_a nmro nbs nca ca_c ca_n nis is_c is_n is_s,
+   gn_ret gen_throw mod_fsz parse_dyn_init fmt_nested fmt_auto_in,
+   fmt_auto_out fnattr dd_own bl_a bl_n sq_a sq_s sq_e sq_p sup_c npn nfh,
+   npf npta nptb nptc npsel np_sc nprs nprn npcat npco npcc npcd npcs npit,
+   npax npnb npes npip npfp npxp npnf npls npstr npsm npnd np_sep np_ip,
+   np_fp np_es np_ds np_de nti ntf nts ntn ntnd ntfb ntfi ntff npfl npil,
+   np_outer np_n np_inner np_axn np_hasax np_axv np_ddof np_nidT
 
 arg av = .string[]
 if av.0 >= 1 then do
@@ -242,7 +242,7 @@ run_source: procedure = .int
   end
   sc = mod_sc[mi]
   mod_fsz[mi] = sc_n[sc] + 1 + 64
-  if mod_dyn[mi] = 1 then mod_fsz[mi] = mod_fsz[mi] + 512
+  if mod_dyn[mi] = 1 then mod_fsz[mi] = mod_fsz[mi] + 8192
   gfb = alloc_frame(mod_fsz[mi])
   mod_fb[mi] = gfb
   cur_mi = mi
@@ -640,6 +640,10 @@ init: procedure = .void
   mod_obj = .int[]
   mod_dyn = .int[]
   mod_nsd = .int[]
+  mod_act = .int[]
+  nsmod = .stem()
+  parse_reuse = 0
+  echo_chunk = 0
   modx = .stem()
   hyb = .stem()
   cur_mi = 0
@@ -11164,6 +11168,11 @@ ex: procedure = .void
   cs_ln[cdepth + 1] = n_ln[n]
   if t = 21 then do
     v = ev(n_a[n], fb)
+    /* `-i`: an expression statement at the top level of an exec()'d chunk echoes its repr (as c/py -i does) */
+    if echo_chunk = 1 & fb = gfb & v \= 0 & v \= 2 then do
+      s2 = repr_of(v)
+      if unw = 0 then call outs s2 || '0a'x
+    end
     return
   end
   if t = 4 then do
@@ -16611,6 +16620,7 @@ new_module: procedure = .int
   mod_fb[nmod] = 0
   mod_dyn[nmod] = 0
   mod_nsd[nmod] = 0
+  mod_act[nmod] = 0
   if ispkg = 1 then mod_pkg[nmod] = name
   else do
     p = lastpos(".", name)
@@ -16684,7 +16694,14 @@ parse_module: procedure = .int
   parse_dyn = parse_dyn_init
   parse_mi = mi
   call lex_text src, 0
-  sc = scope_push(1)
+  if parse_reuse > 0 then do
+    /* a further chunk of the persistent namespace: keep the module scope (names, slots) */
+    sc = mod_sc[mi]
+    sc_par[sc] = 0
+    sc_rf0[sc] = nrf + 1
+    cursc = sc
+  end
+  else sc = scope_push(1)
   sc_id[sc] = 0
   mod_sc[mi] = sc
   cur_msc = sc
@@ -16714,6 +16731,7 @@ module_exec: procedure = .int
   i = .int
   sv_g = .int
   sv_m = .int
+  sv_e = .int
   body = parse_module(src, mi)
   if body = 0 then do
     call raise_exc 52, mod_file[mi] || ": " || pe_msg
@@ -16734,7 +16752,10 @@ module_exec: procedure = .int
   sv_m = cur_mi
   gfb = fbm
   cur_mi = mi
+  sv_e = echo_chunk
+  echo_chunk = 0
   call ex body, fbm
+  echo_chunk = sv_e
   gfb = sv_g
   cur_mi = sv_m
   if unw > 0 then return 0
@@ -17579,14 +17600,19 @@ dict_copy_into: procedure = .void
   end
   return
 
-/* run source text src in the namespace dict nsd (mode 0 exec, 1 eval); eval returns the value */
+/* run source text src in the namespace dict nsd (mode 0 exec, 1 eval); eval returns the value.
+   key names a persistent namespace: all chunks run with the same key share ONE module (scope and global frame),
+   so a function defined by an earlier chunk sees globals rebound by a later one (as in CPython, where the
+   functions resolve their globals in the shared dict at call time).  tmi > 0 runs the chunk in that module
+   itself (an exec() inside code of the namespace's own module). */
 ns_exec: procedure = .int
-  arg src = .string, mode = .int, nsd = .int
+  arg src = .string, mode = .int, nsd = .int, key = .string, tmi = .int
   mi = .int
   sc = .int
   body = .int
   sz = .int
   fbm = .int
+  nb = .int
   i = .int
   e = .int
   s = .string
@@ -17595,64 +17621,120 @@ ns_exec: procedure = .int
   sv_g = .int
   sv_m = .int
   res = .int
-  sv_pe = .int
+  fresh = .int
+  sync = .int
+  evs = .int
+  sv_e = .int
   if mode = 1 then src = "__eval_result__ = (" || src || '0a'x || ")"
-  mi = new_module("<string>", "<string>", 0, "")
-  mod_nsd[mi] = nsd
+  mi = tmi
+  fresh = 0
+  if mi = 0 & key \== "" then do
+    s = nsmod[key]
+    if s \== "" then mi = s as .int
+  end
+  if mi = 0 then do
+    mi = new_module("<string>", "<string>", 0, "")
+    mod_nsd[mi] = nsd
+    if key \== "" then nsmod[key] = mi as .string
+    fresh = 1
+  end
+  sync = 1
+  if tmi > 0 | mod_act[mi] > 0 then sync = 0
   parse_dyn_init = 1
+  if fresh = 0 then parse_reuse = mi
   body = parse_module(src, mi)
+  parse_reuse = 0
   parse_dyn_init = 0
   if body = 0 then return raise_exc(52, pe_msg)
   sc = mod_sc[mi]
-  sz = sc_n[sc] + 1 + 512
-  mod_fsz[mi] = sz
-  fbm = alloc_frame(sz)
-  mod_fb[mi] = fbm
-  call setg mi, "__name__", mkstr("<string>")
-  call setg mi, "__file__", mkstr("<string>")
-  call setg mi, "__package__", mkstr("")
-  do i = 1 to ndyn
-    if dyn_mi[i] = mi then vp[fbm + dyn_slot[i]] = dyn_val[i]
+  if fresh = 1 then do
+    sz = sc_n[sc] + 1 + 512
+    mod_fsz[mi] = sz
+    fbm = alloc_frame(sz)
+    mod_fb[mi] = fbm
+    call setg mi, "__name__", mkstr("<string>")
+    call setg mi, "__file__", mkstr("<string>")
+    call setg mi, "__package__", mkstr("")
   end
-  e = dd_head[ob_x[nsd % 2]]
-  do while e > 0
-    if de_live[e] = 1 & kind_of(de_key[e]) = 6 then do
-      s = scm[sc || "|" || ob_s[de_key[e] % 2]]
-      if s \== "" then vp[fbm + (s as .int)] = de_val[e]
+  else do
+    fbm = mod_fb[mi]
+    if sc_n[sc] + 1 > mod_fsz[mi] then do
+      sz = (sc_n[sc] + 1) * 2 + 512
+      nb = alloc_frame(sz)
+      do i = 0 to mod_fsz[mi] - 1
+        vp[nb + i] = vp[fbm + i]
+      end
+      mod_fsz[mi] = sz
+      mod_fb[mi] = nb
+      fbm = nb
     end
-    e = de_next[e]
+  end
+  do i = 1 to ndyn
+    if dyn_mi[i] = mi then do
+      if vp[fbm + dyn_slot[i]] = 0 then vp[fbm + dyn_slot[i]] = dyn_val[i]
+    end
+  end
+  if sync = 1 then do
+    e = dd_head[ob_x[nsd % 2]]
+    do while e > 0
+      if de_live[e] = 1 & kind_of(de_key[e]) = 6 then do
+        s = scm[sc || "|" || ob_s[de_key[e] % 2]]
+        if s \== "" then vp[fbm + (s as .int)] = de_val[e]
+      end
+      e = de_next[e]
+    end
+  end
+  evs = 0
+  if mode = 1 then do
+    s = scm[sc || "|__eval_result__"]
+    evs = s as .int
+    vp[fbm + evs] = 0
   end
   sv_g = gfb
   sv_m = cur_mi
   gfb = fbm
   cur_mi = mi
+  mod_act[mi] = mod_act[mi] + 1
+  sv_e = echo_chunk
+  if repl_mode = 1 & mode = 0 then echo_chunk = 1
   call ex body, fbm
-  gfb = sv_g
+  echo_chunk = sv_e
+  mod_act[mi] = mod_act[mi] - 1
   cur_mi = sv_m
-  if unw > 0 then return 0
+  gfb = mod_fb[sv_m]
+  if gfb = 0 then gfb = sv_g
   res = 2
   if mode = 1 then do
-    s = scm[sc || "|__eval_result__"]
-    res = vp[fbm + (s as .int)]
+    if unw > 0 then return 0
+    res = vp[mod_fb[mi] + evs]
     if res = 0 then res = 2
     return res
   end
-  do i = 1 to nbn
-    if bn_sc[i] = sc then do
-      v = vp[fbm + bn_slot[i]]
-      if v \= 0 then do
+  if tmi = 0 then do
+    fbm = mod_fb[mi]
+    do i = 1 to nbn
+      if bn_sc[i] = sc then do
+        v = vp[fbm + bn_slot[i]]
         nm = bn_name[i]
-        if nm \== "__eval_result__" then do
-          e = dict_find(ob_x[nsd % 2], hashkey(mkstr(nm)))
-          if e = 0 then do
-            if left(nm, 2) == "__" & right(nm, 2) == "__" then iterate
-            if builtin_lookup(nm) = v then iterate
+        if v \= 0 then do
+          if nm \== "__eval_result__" then do
+            e = dict_find(ob_x[nsd % 2], hashkey(mkstr(nm)))
+            if e = 0 then do
+              if left(nm, 2) == "__" & right(nm, 2) == "__" then iterate
+              if builtin_lookup(nm) = v then iterate
+            end
+            call dset nsd, mkstr(nm), v
           end
-          call dset nsd, mkstr(nm), v
+        end
+        else if nm \== "__eval_result__" then do
+          /* del x: the name leaves the namespace dict as well */
+          e = dict_find(ob_x[nsd % 2], hashkey(mkstr(nm)))
+          if e > 0 then e = dict_del(ob_x[nsd % 2], hashkey(mkstr(nm)))
         end
       end
     end
   end
+  if unw > 0 then return 0
   return 2
 
 /* store the entries of dict nsd back into the namespace of the running module */
@@ -17695,12 +17777,14 @@ bi_evalexec: procedure = .int
   if na >= 3 then l = ast[base + 3]
   if na >= 4 then modlvl = ival(ast[base + 4])
   if g = 2 then do
-    /* an exec() inside exec()'d code shares the namespace of the outer exec */
-    if mod_nsd[cur_mi] > 0 then nsd = mod_nsd[cur_mi]
-    else nsd = mod_dict(cur_mi)
+    /* an exec() inside code of an exec()'d namespace module, or of the dynamic main module of `-i`, runs in that module itself */
+    if mod_nsd[cur_mi] > 0 | mod_dyn[cur_mi] = 1 then do
+      r = ns_exec(ob_s[src % 2], mode, mod_nsd[cur_mi], "", cur_mi)
+      return r
+    end
+    nsd = mod_dict(cur_mi)
     if l \= 2 & kind_of(l) = 9 then call dict_copy_into l, nsd
-    r = ns_exec(ob_s[src % 2], mode, nsd)
-    if r = 0 then return 0
+    r = ns_exec(ob_s[src % 2], mode, nsd, "i" || cur_mi, 0)
     if mode = 0 & modlvl = 1 then call ns_writeback nsd
     return r
   end
@@ -17710,12 +17794,12 @@ bi_evalexec: procedure = .int
     nsd = dict_new(9)
     call dict_copy_into g, nsd
     call dict_copy_into l, nsd
-    r = ns_exec(ob_s[src % 2], mode, nsd)
+    r = ns_exec(ob_s[src % 2], mode, nsd, "", 0)
     if r = 0 then return 0
     if mode = 0 then call dict_copy_into nsd, l
     return r
   end
-  return ns_exec(ob_s[src % 2], mode, nsd)
+  return ns_exec(ob_s[src % 2], mode, nsd, "d" || g, 0)
 
 /* __import__(name, globals, locals, fromlist, level) */
 bi_import: procedure = .int
@@ -24744,15 +24828,18 @@ gc_scan: procedure = .void
   end
   if k = 9 | k = 10 then do
     d = ob_x[i]
-    e = dd_head[d]
-    do while e > 0
-      if de_live[e] = 1 then do
-        call gc_mark de_key[e]
-        call gc_mark de_val[e]
+    /* a dict / set object without storage (ob_x = 0, e.g. a set subclass instance before its __init__) has no entries */
+    if d > 0 then do
+      e = dd_head[d]
+      do while e > 0
+        if de_live[e] = 1 then do
+          call gc_mark de_key[e]
+          call gc_mark de_val[e]
+        end
+        e = de_next[e]
       end
-      e = de_next[e]
+      if dd_own[d] > 0 then call gc_mark dd_own[d]
     end
-    if dd_own[d] > 0 then call gc_mark dd_own[d]
     if ob_c[i] > 0 then do
       hv = nat_at["h" || (i * 2)]
       if hv \== "" then call gc_mark hv as .int
@@ -25040,6 +25127,11 @@ gc_run: procedure = .void
   n = dyn_val.0
   do j = 1 to n
     call gc_mark dyn_val[j]
+  end
+  /* the namespace dicts of exec()'d chunk modules: their key (the dict's object number) must not be reused */
+  n = mod_nsd.0
+  do j = 1 to n
+    call gc_mark mod_nsd[j]
   end
   n = cd_obj.0
   do j = 1 to n
