@@ -1,0 +1,7 @@
+3 'hello' 'err\n'
+timeout Command '['sleep', '5']' timed out after 0.3 seconds
+fnf
+HI
+
+4 0
+2

@@ -381,3 +381,11 @@ vdot cross diff ediff1d gradient percentile quantile median(axis) histogram binc
 corrcoef searchsorted nan_to_num nansum nanmean nanstd nanvar nanmax nanmin tril triu tri kron
 polyfit polyval convolve trapz flip roll tile repeat squeeze expand_dims swapaxes argwhere isin
 append take logical_* exp2 expm1 log1p cbrt degrees radians ...`.
+
+## subprocess (src/p7_sock.c `_proc`, host adapter `host_proc_run` in src/p0_os.c, pylib/subprocess.py)
+
+`import subprocess` (POSIX builds only): `run`, `call`, `check_call`, `check_output`, `CompletedProcess`,
+`CalledProcessError`, `TimeoutExpired`, `PIPE`, `STDOUT`, `DEVNULL`, and a deferred `Popen` whose
+`communicate()/wait()/poll()` run the child to completion (no interactive pipes). Native part:
+`_proc.run(argv, input, timeout, cwd) -> (status, rc, stdout, stderr)` using fork/execvp/pipe/select;
+without `-DPY_POSIX` it reports ENOSYS (OSError).

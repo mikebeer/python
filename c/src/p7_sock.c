@@ -788,6 +788,48 @@ BI(sel_select)
     return ov;
 }
 
+
+/* ---- the _proc module: run a child process to completion ----------------
+   _proc.run(argv, input, timeout, cwd[, inherit]) -> (status, rc, stdout, stderr)
+   status 0 ran (rc = exit status), 1 timed out, 2 not started (rc = errno).
+   subprocess.run in pylib/subprocess.py is built on it. */
+BI(proc_run)
+{
+    Value out[4];
+    List *l;
+    char **av, *so, *se;
+    const char *ip = "", *cwd = NULL;
+    long i, n, il = 0, sol, sel;
+    double to = -1.0;
+    int rc, st;
+    int inherit = 0;
+    need(x, 4, 5, "run");
+    if (x->n > 4) inherit = A(4).t == T_BOOL ? (int)(A(4).u.i != 0) : (int)need_long(A(4), "inherit");
+    if (A(0).t != T_LIST) throw_new(cls_TypeError, "argv must be a list");
+    l = AS_LIST(A(0));
+    n = l->n;
+    if (n < 1) throw_new(cls_ValueError, "empty argv");
+    for (i = 0; i < n; i++)
+        if (l->a[i].t != T_STR) throw_new(cls_TypeError, "argv items must be str");
+    if (A(1).t != T_NONE && !bytes_get(A(1), &ip, &il))
+        throw_new(cls_TypeError, "input must be bytes");
+    if (A(2).t != T_NONE) to = to_dbl(A(2));
+    if (A(3).t == T_STR) cwd = AS_STR(A(3))->s;
+    av = (char **)xmalloc((size_t)(n + 1) * sizeof(char *));
+    for (i = 0; i < n; i++) av[i] = AS_STR(l->a[i])->s;
+    av[n] = NULL;
+    st = host_proc_run(av, ip, il, to, cwd, inherit, &so, &sol, &se, &sel, &rc);
+    free(av);
+    out[0] = mkint(st); out[1] = mkint(rc);
+    out[2] = mkbytes(so ? so : "", sol); VPUSH(out[2]);
+    out[3] = mkbytes(se ? se : "", sel); VPUSH(out[3]);
+    if (so) free(so);
+    if (se) free(se);
+    out[0] = mktuple_from(out, 4);
+    vsp -= 2;
+    return out[0];
+}
+
 /* ---- initialisation --------------------------------------------------- */
 static void sock_init(void)
 {
@@ -844,6 +886,8 @@ static void sock_init(void)
     mod_def(m, "setdefaulttimeout", m_setdefaulttimeout);
     mod_def(m, "create_connection", m_create_connection);
     mod_def(m, "socketpair", m_socketpair);
+    sm = new_module("_proc");
+    mod_def(sm, "run", proc_run);
     sm = new_module("select");
     mod_def(sm, "select", sel_select);
 }

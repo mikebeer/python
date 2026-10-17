@@ -882,3 +882,133 @@ static int host_sock_const(const char *name, long *val)
     return 0;
 }
 #endif
+
+/* ---- child processes -----------------------------------------------------
+   host_proc_run starts argv[0] (searched on PATH) with the given standard
+   input bytes, collects stdout and stderr completely and waits for the end.
+   Returns 0 when the process ran (*rc is the exit status, or 128+signal),
+   1 when the timeout (seconds, < 0 for none) killed it, 2 when it could not
+   be started (*rc is the errno).  *out and *err are malloc'ed buffers.
+   With inherit the child keeps the parent's stdin/stdout/stderr (an editor, a pager)
+   and nothing is collected.  Reference implementation: fork/execvp/pipe/select, POSIX only; other
+   hosts return 2 with ENOSYS (38). */
+#ifdef PY_POSIX
+#include <sys/wait.h>
+static double host_proc_now(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+}
+static void host_proc_grow(char **buf, long *n, long *cap, const char *src, long k)
+{
+    if (*n + k + 1 > *cap) {
+        *cap = (*n + k + 1) * 2;
+        *buf = (char *)realloc(*buf, (size_t)*cap);
+        if (!*buf) { fprintf(stderr, "out of memory\n"); exit(1); }
+    }
+    memcpy(*buf + *n, src, (size_t)k);
+    *n += k;
+}
+static int host_proc_run(char **argv, const char *in, long inlen, double timeout,
+                         const char *cwd, int inherit, char **out, long *outlen, char **err,
+                         long *errlen, int *rc)
+{
+    int pin[2], pout[2], perr[2], pst[2];
+    pid_t pid;
+    long ocap = 0, ecap = 0, ipos = 0;
+    int ofd, efd, ifd, timedout = 0, st = 0, e;
+    double t0 = host_proc_now();
+    char tmp[4096];
+    *out = NULL; *err = NULL; *outlen = 0; *errlen = 0; *rc = 0;
+    signal(SIGPIPE, SIG_IGN);
+    if (pipe(pin) < 0) { *rc = errno; return 2; }
+    if (pipe(pout) < 0) { *rc = errno; return 2; }
+    if (pipe(perr) < 0) { *rc = errno; return 2; }
+    if (pipe(pst) < 0) { *rc = errno; return 2; }
+    fcntl(pst[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) { *rc = errno; return 2; }
+    if (pid == 0) {
+        int en;
+        if (!inherit) { dup2(pin[0], 0); dup2(pout[1], 1); dup2(perr[1], 2); }
+        close(pin[0]); close(pin[1]); close(pout[0]); close(pout[1]);
+        close(perr[0]); close(perr[1]); close(pst[0]);
+        if (cwd && chdir(cwd) < 0) {
+            en = errno;
+            if (write(pst[1], &en, sizeof(en)) < 0) { /* nothing to do */ }
+            _exit(127);
+        }
+        execvp(argv[0], argv);
+        en = errno;
+        if (write(pst[1], &en, sizeof(en)) < 0) { /* nothing to do */ }
+        _exit(127);
+    }
+    close(pin[0]); close(pout[1]); close(perr[1]); close(pst[1]);
+    ifd = pin[1]; ofd = pout[0]; efd = perr[0];
+    if (inherit) { close(ifd); close(ofd); close(efd); ifd = ofd = efd = -1; inlen = 0; }
+    fcntl(ifd, F_SETFL, fcntl(ifd, F_GETFL, 0) | O_NONBLOCK);
+    if (inlen <= 0 && ifd >= 0) { close(ifd); ifd = -1; }
+    while (ofd >= 0 || efd >= 0 || ifd >= 0) {
+        fd_set rs, ws;
+        struct timeval tv, *tvp = NULL;
+        int mx = -1, r;
+        FD_ZERO(&rs); FD_ZERO(&ws);
+        if (ofd >= 0) { FD_SET(ofd, &rs); if (ofd > mx) mx = ofd; }
+        if (efd >= 0) { FD_SET(efd, &rs); if (efd > mx) mx = efd; }
+        if (ifd >= 0) { FD_SET(ifd, &ws); if (ifd > mx) mx = ifd; }
+        if (timeout >= 0) {
+            double left = timeout - (host_proc_now() - t0);
+            if (left <= 0) { timedout = 1; break; }
+            tv.tv_sec = (long)left;
+            tv.tv_usec = (long)((left - (double)tv.tv_sec) * 1e6);
+            tvp = &tv;
+        }
+        r = select(mx + 1, &rs, &ws, NULL, tvp);
+        if (r < 0) { if (errno == EINTR) continue; break; }
+        if (r == 0) continue;
+        if (ofd >= 0 && FD_ISSET(ofd, &rs)) {
+            long k = (long)read(ofd, tmp, sizeof(tmp));
+            if (k > 0) host_proc_grow(out, outlen, &ocap, tmp, k);
+            else if (k == 0 || errno != EINTR) { close(ofd); ofd = -1; }
+        }
+        if (efd >= 0 && FD_ISSET(efd, &rs)) {
+            long k = (long)read(efd, tmp, sizeof(tmp));
+            if (k > 0) host_proc_grow(err, errlen, &ecap, tmp, k);
+            else if (k == 0 || errno != EINTR) { close(efd); efd = -1; }
+        }
+        if (ifd >= 0 && FD_ISSET(ifd, &ws)) {
+            long k = (long)write(ifd, in + ipos, (size_t)(inlen - ipos));
+            if (k > 0) ipos += k;
+            if (k < 0 && errno != EAGAIN && errno != EINTR) ipos = inlen;
+            if (ipos >= inlen) { close(ifd); ifd = -1; }
+        }
+    }
+    if (timedout) kill(pid, SIGKILL);
+    if (ifd >= 0) close(ifd);
+    if (ofd >= 0) close(ofd);
+    if (efd >= 0) close(efd);
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { /* retry */ }
+    if (read(pst[0], &e, sizeof(e)) == (ssize_t)sizeof(e)) {
+        close(pst[0]);
+        *rc = e;
+        return 2;
+    }
+    close(pst[0]);
+    if (!*out) *out = (char *)malloc(1);
+    if (!*err) *err = (char *)malloc(1);
+    if (timedout) return 1;
+    if (WIFEXITED(st)) *rc = WEXITSTATUS(st);
+    else if (WIFSIGNALED(st)) *rc = 128 + WTERMSIG(st);
+    return 0;
+}
+#else
+static int host_proc_run(char **argv, const char *in, long inlen, double timeout,
+                         const char *cwd, int inherit, char **out, long *outlen, char **err,
+                         long *errlen, int *rc)
+{
+    (void)argv; (void)in; (void)inlen; (void)timeout; (void)cwd; (void)inherit;
+    *out = NULL; *err = NULL; *outlen = 0; *errlen = 0; *rc = 38;
+    return 2;
+}
+#endif
