@@ -15,4 +15,11 @@ if [ ! -f "$DIR/py.rxbin" ] || [ "$DIR/py.crexx" -nt "$DIR/py.rxbin" ]; then
     exit 2
   }
 fi
+# Run the bytecode directly with rxvme when it sits next to the driver: the driver holds an output lock on
+# py.crexx for the whole run, which would make an interpreter started from a running script (subprocess,
+# the Workbench evaluation) wait for its parent forever.
+CBIN=$(dirname "$(command -v "$CREXX" 2>/dev/null || echo "$CREXX")")
+if [ -x "$CBIN/rxvme" ] && [ -f "$CBIN/rx_treemap.rxplugin" ] && [ -f "$CBIN/rx_llist.rxplugin" ] && [ -f "$CBIN/rx_keyaccess.rxplugin" ]; then
+  exec "$CBIN/rxvme" "$DIR/py" "$CBIN/rx_treemap" "$CBIN/rx_llist" "$CBIN/rx_keyaccess" -a --pypath="$DIR/pylib:$DIR/../pylib" "$@"
+fi
 exec "$CREXX" "$DIR/py.crexx" -nocompile -args --pypath="$DIR/pylib:$DIR/../pylib" "$@"

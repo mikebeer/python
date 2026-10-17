@@ -106,7 +106,11 @@ numpy's pairwise summation so results agree to the last digit.
   `p.stdin.write()` renames into place (latency about 30 ms), the child output file is polled by
   `p.stdout.read1(n, timeout)` / `p.read_nonblock(timeout)`; `kill` signals the child's process group
   (ADDRESS SYSTEM ends the command's own process group, so the supervisor runs under `setsid`). Needs a POSIX `sh`,
-  `timeout` and `setsid`; each spawn costs a few milliseconds of shell start.
+  `timeout` and `setsid`; each spawn costs a few milliseconds of shell start. The launcher `py` starts `rxvme` directly
+  (next to the driver) because the driver holds an output lock on `py.crexx` for the whole run, so an interpreter started
+  from a running script through the driver would wait for its parent forever.
+- Workbench (`../../workbench/tests`, `PY=crexx/py WB_PY=crexx/py`): t_bundle, t_git, t_port, t_regina, t_repo, t_rexxmembers,
+  t_screen, t_ui pass; t_adapters/t_live/t_scratch/t_cli/t_dogfood/t_api/t_http/t_plain/t_tui still fail (live session driver, see the report).
 
 ## Modules and libraries
 
