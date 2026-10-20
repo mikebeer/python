@@ -152,7 +152,8 @@ PROCEDURE(f_sort){ rxnp *a; ARGCHK(1); NEED(0, a); RETARR(rxnp_sort(a)) }
 PROCEDURE(f_argsort){ rxnp *a; ARGCHK(1); NEED(0, a); RETARR(rxnp_argsort(a)) }
 
 /* ---- products / linalg ---- */
-PROCEDURE(f_dot){ rxnp *a, *b; ARGCHK(2); NEED(0, a); NEED(1, b); RETARR(rxnp_matmul(a, b)) }
+PROCEDURE(f_dot){ rxnp *a, *b; ARGCHK(2); NEED(0, a); NEED(1, b);
+    if (a->ndim > 2 || b->ndim > 2) { RETARR(rxnp_dot_nd(a, b)) } else { RETARR(rxnp_matmul(a, b)) } }
 PROCEDURE(f_outer){ rxnp *a, *b; ARGCHK(2); NEED(0, a); NEED(1, b); RETARR(rxnp_outer(a, b)) }
 PROCEDURE(f_trace){ rxnp *a; ARGCHK(1); NEED(0, a); RETURNFLOAT(rxnp_trace(a)); RESETSIGNAL }
 PROCEDURE(f_norm){ rxnp *a; ARGCHK(1); NEED(0, a); RETURNFLOAT(rxnp_norm(a)); RESETSIGNAL }
@@ -185,6 +186,76 @@ PROCEDURE(f_randn){ ARGCHK(1); RETARR(rxnp_randn(rng(), GETSTRING(ARG0))) }
 PROCEDURE(f_randint){ ARGCHK(3); RETARR(rxnp_randint(rng(), (long)GETINT(ARG0), (long)GETINT(ARG1), GETSTRING(ARG2))) }
 PROCEDURE(f_random1){ ARGCHK(0); RETURNFLOAT(rxnp_rng_random(rng())); RESETSIGNAL }
 PROCEDURE(f_randn1){ ARGCHK(0); RETURNFLOAT(rxnp_rng_gauss(rng())); RESETSIGNAL }
+
+
+/* ---- Generator handle (default_rng) ---- */
+#define GEN_TYPE "crexx.rxnumpy.rng.v1"
+static void gen_retain_cb(void *o) { rxnp_gen_retain((rxnp_gen *)o); }
+static void gen_release_cb(void *o) { rxnp_gen_release((rxnp_gen *)o); }
+static void gen_copy_cb(void *dest, void *src);
+static void gen_fin_cb(void *v);
+static const rxl_kind gen_kind = { { GEN_TYPE, gen_copy_cb, gen_fin_cb }, gen_retain_cb, gen_release_cb };
+static void gen_copy_cb(void *dest, void *src)
+{
+    rxl_payload *p = rxl_get(src, GEN_TYPE), q;
+    if (!p) return;
+    q = *p; rxnp_gen_retain((rxnp_gen *)q.obj);
+    if (SETNATIVEPAYLOAD(dest, &q, sizeof q, &gen_kind.ops, 0u) != 0) rxnp_gen_release((rxnp_gen *)q.obj);
+}
+static void gen_fin_cb(void *v) { rxl_payload *p = rxl_get(v, GEN_TYPE); if (p) rxnp_gen_release((rxnp_gen *)p->obj); }
+#define NEEDG(i, var) { rxl_payload *_p = rxl_get(ARG(i), GEN_TYPE); if (!_p) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, "argument is not an rxnumpy Generator handle"); var = (rxnp_gen *)_p->obj; }
+PROCEDURE(f_default_rng) { rxnp_gen *g; ARGCHK(1); if (GETINT(ARG0) < 0) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, "expected non-negative integer")
+    g = rxnp_gen_new((unsigned long)GETINT(ARG0)); if (!g) RETURNSIGNAL(SIGNAL_FAILURE, "out of memory")
+    if (!rxl_publish(RETURN, &gen_kind, g)) RETURNSIGNAL(SIGNAL_FAILURE, "cannot publish generator handle") RESETSIGNAL }
+PROCEDURE(f_default_rng_arr) { rxnp *a; rxnp_gen *g; ARGCHK(1); NEED(0, a); g = rxnp_gen_new_array(a);
+    if (!g) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, "seed must be a non-empty int array")
+    if (!rxl_publish(RETURN, &gen_kind, g)) RETURNSIGNAL(SIGNAL_FAILURE, "cannot publish generator handle") RESETSIGNAL }
+PROCEDURE(f_rng_random) { rxnp_gen *g; ARGCHK(2); NEEDG(0, g); RETARR(rxnp_gen_random_arr(g, GETSTRING(ARG1))) }
+PROCEDURE(f_rng_random1) { rxnp_gen *g; ARGCHK(1); NEEDG(0, g); RETURNFLOAT(rxnp_gen_random(g)); RESETSIGNAL }
+PROCEDURE(f_rng_normal) { rxnp_gen *g; ARGCHK(4); NEEDG(0, g); RETARR(rxnp_gen_normal_arr(g, GETFLOAT(ARG1), GETFLOAT(ARG2), GETSTRING(ARG3))) }
+PROCEDURE(f_rng_normal1) { rxnp_gen *g; ARGCHK(1); NEEDG(0, g); RETURNFLOAT(rxnp_gen_normal(g)); RESETSIGNAL }
+PROCEDURE(f_rng_exponential) { rxnp_gen *g; ARGCHK(3); NEEDG(0, g); RETARR(rxnp_gen_exponential_arr(g, GETFLOAT(ARG1), GETSTRING(ARG2))) }
+PROCEDURE(f_rng_integers) { rxnp_gen *g; ARGCHK(4); NEEDG(0, g);
+    RETARR(rxnp_gen_integers(g, (long)GETINT(ARG1), (long)GETINT(ARG2), GETSTRING(ARG3))) }
+PROCEDURE(f_rng_integer1) { rxnp_gen *g; long lo, hi; ARGCHK(3); NEEDG(0, g); lo = (long)GETINT(ARG1); hi = (long)GETINT(ARG2);
+    if (lo >= hi) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, "low >= high")
+    RETURNINT(rxnp_gen_integer1(g, lo, hi)); RESETSIGNAL }
+PROCEDURE(f_rng_choice) { rxnp_gen *g; rxnp *a; ARGCHK(4); NEEDG(0, g); NEED(1, a);
+    RETARR(rxnp_gen_choice(g, a, (long)GETINT(ARG2), (int)GETINT(ARG3) != 0)) }
+PROCEDURE(f_rng_shuffle) { rxnp_gen *g; rxnp *a; ARGCHK(2); NEEDG(0, g); NEED(1, a);
+    if (!rxnp_gen_shuffle(g, a)) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, "shuffle: 0-d array") RETURNINT(0); RESETSIGNAL }
+PROCEDURE(f_rng_permutation) { rxnp_gen *g; ARGCHK(2); NEEDG(0, g); RETARR(rxnp_gen_permutation(g, (long)GETINT(ARG1))) }
+
+/* ---- comparison / indexing / joining / n-d products ---- */
+static int cmp_op(const char *s)
+{
+    if (!strcmp(s, ">")) return RXNP_GT; if (!strcmp(s, "<")) return RXNP_LT; if (!strcmp(s, ">=")) return RXNP_GE;
+    if (!strcmp(s, "<=")) return RXNP_LE; if (!strcmp(s, "==")) return RXNP_EQ; if (!strcmp(s, "!=")) return RXNP_NE; return -1;
+}
+PROCEDURE(f_cmp) { rxnp *a, *b; int op; ARGCHK(3); NEED(0, a); NEED(1, b); op = cmp_op(GETSTRING(ARG2));
+    if (op < 0) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, "comparison operator must be one of > < >= <= == !=")
+    RETARR(rxnp_cmp(op, a, b)) }
+PROCEDURE(f_cmps) { rxnp *a, *s, *r; int op; ARGCHK(3); NEED(0, a); op = cmp_op(GETSTRING(ARG2));
+    if (op < 0) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, "comparison operator must be one of > < >= <= == !=")
+    s = rxnp_scalar(GETFLOAT(ARG1)); if (!s) RETURNSIGNAL(SIGNAL_FAILURE, "out of memory") r = rxnp_cmp(op, a, s); rxnp_release(s); RETARR(r) }
+PROCEDURE(f_take) { rxnp *a, *i; ARGCHK(3); NEED(0, a); NEED(1, i); RETARR(rxnp_take(a, i, (int)GETINT(ARG2))) }
+PROCEDURE(f_takeflat) { rxnp *a, *i; ARGCHK(2); NEED(0, a); NEED(1, i); RETARR(rxnp_take(a, i, -2000)) }
+PROCEDURE(f_where) { rxnp *c, *a, *b; ARGCHK(3); NEED(0, c); NEED(1, a); NEED(2, b); RETARR(rxnp_where(c, a, b)) }
+PROCEDURE(f_compress) { rxnp *m, *a; ARGCHK(3); NEED(0, m); NEED(1, a); RETARR(rxnp_compress(m, a, (int)GETINT(ARG2))) }
+PROCEDURE(f_bget) { rxnp *a, *m; ARGCHK(2); NEED(0, a); NEED(1, m); RETARR(rxnp_boolean_get(a, m)) }
+PROCEDURE(f_bset) { rxnp *a, *m, *v; ARGCHK(3); NEED(0, a); NEED(1, m); v = rxnp_scalar(GETFLOAT(ARG2));
+    if (!v) RETURNSIGNAL(SIGNAL_FAILURE, "out of memory")
+    if (!rxnp_boolean_set(a, m, v)) { rxnp_release(v); RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, rxnp_error()) }
+    rxnp_release(v); RETURNINT(0); RESETSIGNAL }
+PROCEDURE(f_bsetarr) { rxnp *a, *m, *v; ARGCHK(3); NEED(0, a); NEED(1, m); NEED(2, v);
+    if (!rxnp_boolean_set(a, m, v)) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, rxnp_error()) RETURNINT(0); RESETSIGNAL }
+PROCEDURE(f_unique) { rxnp *a, *c = NULL, *r; ARGCHK(1); NEED(0, a); r = rxnp_unique(a, &c); rxnp_release(c); RETARR(r) }
+PROCEDURE(f_uniquec) { rxnp *a, *c = NULL, *r; ARGCHK(1); NEED(0, a); r = rxnp_unique(a, &c); rxnp_release(r); RETARR(c) }
+PROCEDURE(f_stack) { rxnp *a, *b; ARGCHK(3); NEED(0, a); NEED(1, b); RETARR(rxnp_stack(a, b, (int)GETINT(ARG2))) }
+PROCEDURE(f_vstack) { rxnp *a, *b; ARGCHK(2); NEED(0, a); NEED(1, b); RETARR(rxnp_vstack(a, b)) }
+PROCEDURE(f_hstack) { rxnp *a, *b; ARGCHK(2); NEED(0, a); NEED(1, b); RETARR(rxnp_hstack(a, b)) }
+PROCEDURE(f_matmul) { rxnp *a, *b; ARGCHK(2); NEED(0, a); NEED(1, b); RETARR(rxnp_matmul_nd(a, b)) }
+PROCEDURE(f_tensordot) { rxnp *a, *b; ARGCHK(3); NEED(0, a); NEED(1, b); RETARR(rxnp_tensordot(a, b, (int)GETINT(ARG2))) }
 
 #define A1 "a = .binary"
 #define A2 "a = .binary, b = .binary"
@@ -245,4 +316,24 @@ P(f_seed,"np_rand_seed",".int","seed = .int") P(f_rand,"np_rand",".binary","shap
 P(f_randn,"np_randn",".binary","shape = .string")
 P(f_randint,"np_randint",".binary","low = .int, high = .int, shape = .string")
 P(f_random1,"np_random",".float","") P(f_randn1,"np_gauss",".float","")
+P(f_default_rng,"np_default_rng",".binary","seed = .int") P(f_default_rng_arr,"np_default_rng_arr",".binary","seed = .binary")
+P(f_rng_random,"np_rng_random",".binary","rng = .binary, shape = .string") P(f_rng_random1,"np_rng_random1",".float","rng = .binary")
+P(f_rng_normal,"np_rng_normal",".binary","rng = .binary, loc = .float, scale = .float, shape = .string")
+P(f_rng_normal1,"np_rng_normal1",".float","rng = .binary")
+P(f_rng_exponential,"np_rng_exponential",".binary","rng = .binary, scale = .float, shape = .string")
+P(f_rng_integers,"np_rng_integers",".binary","rng = .binary, low = .int, high = .int, shape = .string")
+P(f_rng_integer1,"np_rng_integer1",".int","rng = .binary, low = .int, high = .int")
+P(f_rng_choice,"np_rng_choice",".binary","rng = .binary, a = .binary, size = .int, replace = .int")
+P(f_rng_shuffle,"np_rng_shuffle",".int","rng = .binary, a = .binary") P(f_rng_permutation,"np_rng_permutation",".binary","rng = .binary, n = .int")
+P(f_cmp,"np_cmp",".binary","a = .binary, b = .binary, op = .string") P(f_cmps,"np_cmps",".binary","a = .binary, s = .float, op = .string")
+P(f_take,"np_take",".binary","a = .binary, idx = .binary, axis = .int") P(f_takeflat,"np_take_flat",".binary","a = .binary, idx = .binary")
+P(f_where,"np_where",".binary","cond = .binary, a = .binary, b = .binary")
+P(f_compress,"np_compress",".binary","mask = .binary, a = .binary, axis = .int")
+P(f_bget,"np_boolean_get",".binary","a = .binary, mask = .binary")
+P(f_bset,"np_boolean_set",".int","a = .binary, mask = .binary, value = .float")
+P(f_bsetarr,"np_boolean_set_arr",".int","a = .binary, mask = .binary, values = .binary")
+P(f_unique,"np_unique",".binary",A1) P(f_uniquec,"np_unique_counts",".binary",A1)
+P(f_stack,"np_stack",".binary","a = .binary, b = .binary, axis = .int") P(f_vstack,"np_vstack",".binary",A2) P(f_hstack,"np_hstack",".binary",A2)
+P(f_concat,"np_concatenate",".binary","a = .binary, b = .binary, axis = .int")
+P(f_matmul,"np_matmul",".binary",A2) P(f_tensordot,"np_tensordot",".binary","a = .binary, b = .binary, naxes = .int")
 ENDLOADFUNCS

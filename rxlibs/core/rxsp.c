@@ -205,3 +205,71 @@ int rxsp_ttest_ind(const rxnp *a, const rxnp *b, double *t, double *p)
     *p = 2.0 * (1.0 - rxsp_t_cdf(fabs(*t), df));
     return 1;
 }
+
+/* ---- cubic spline through the second derivatives M ---- */
+static int solve_dense(double *a, double *b, int n)
+{
+    int i, j, k, p;
+    for (k = 0; k < n; k++) {
+        double mx = fabs(a[k * n + k]), t;
+        p = k;
+        for (i = k + 1; i < n; i++) if (fabs(a[i * n + k]) > mx) { mx = fabs(a[i * n + k]); p = i; }
+        if (mx == 0.0) return 0;
+        if (p != k) { for (j = 0; j < n; j++) { t = a[k * n + j]; a[k * n + j] = a[p * n + j]; a[p * n + j] = t; } t = b[k]; b[k] = b[p]; b[p] = t; }
+        for (i = k + 1; i < n; i++) {
+            double f = a[i * n + k] / a[k * n + k];
+            for (j = k; j < n; j++) a[i * n + j] -= f * a[k * n + j];
+            b[i] -= f * b[k];
+        }
+    }
+    for (i = n - 1; i >= 0; i--) {
+        double s = b[i];
+        for (j = i + 1; j < n; j++) s -= a[i * n + j] * b[j];
+        b[i] = s / a[i * n + i];
+    }
+    return 1;
+}
+rxnp *rxsp_cubic_spline(const rxnp *x0, const rxnp *y0, int natural, const rxnp *xn0, int deriv)
+{
+    rxnp *x = rxnp_astype(x0, RXNP_F64), *y = rxnp_astype(y0, RXNP_F64), *xn = rxnp_astype(xn0, RXNP_F64), *r = NULL;
+    long n, i, k; double *a = NULL, *m = NULL, *h = NULL;
+    if (!x || !y || !xn) goto out;
+    n = x->size;
+    if (x->ndim != 1 || y->ndim != 1 || y->size != n || n < 2) { sfail("x and y must be 1-d of equal length (at least 2)"); goto out; }
+    for (i = 1; i < n; i++) if (!(x->f[i] > x->f[i - 1])) { sfail("x must be strictly increasing"); goto out; }
+    if (deriv < 0 || deriv > 2) { sfail("deriv must be 0, 1 or 2"); goto out; }
+    a = (double *)calloc((size_t)(n * n), sizeof(double)); m = (double *)calloc((size_t)n, sizeof(double)); h = (double *)malloc(sizeof(double) * (size_t)n);
+    if (!a || !m || !h) { sfail("out of memory"); goto out; }
+    for (i = 0; i + 1 < n; i++) h[i] = x->f[i + 1] - x->f[i];
+    if (n == 2) { /* straight line */ }
+    else if (n == 3 && !natural) {
+        double dd = ((y->f[2] - y->f[1]) / h[1] - (y->f[1] - y->f[0]) / h[0]) / (h[0] + h[1]);
+        m[0] = m[1] = m[2] = 2.0 * dd;
+    } else {
+        for (i = 1; i + 1 < n; i++) {
+            a[i * n + i - 1] = h[i - 1]; a[i * n + i] = 2.0 * (h[i - 1] + h[i]); a[i * n + i + 1] = h[i];
+            m[i] = 6.0 * ((y->f[i + 1] - y->f[i]) / h[i] - (y->f[i] - y->f[i - 1]) / h[i - 1]);
+        }
+        if (natural) { a[0] = 1.0; a[(n - 1) * n + n - 1] = 1.0; }
+        else {
+            a[0] = h[1]; a[1] = -(h[0] + h[1]); a[2] = h[0];
+            a[(n - 1) * n + n - 3] = h[n - 2]; a[(n - 1) * n + n - 2] = -(h[n - 3] + h[n - 2]); a[(n - 1) * n + n - 1] = h[n - 3];
+        }
+        if (!solve_dense(a, m, (int)n)) { sfail("singular spline system"); goto out; }
+    }
+    r = rxnp_new(RXNP_F64, xn->ndim, xn->shape);
+    if (!r) goto out;
+    for (k = 0; k < xn->size; k++) {
+        double t = xn->f[k], A, B, hh, v;
+        long lo = 0, hi = n - 1;
+        while (hi - lo > 1) { long mid = (lo + hi) / 2; if (t >= x->f[mid]) lo = mid; else hi = mid; }
+        i = lo; hh = h[i]; A = (x->f[i + 1] - t) / hh; B = (t - x->f[i]) / hh;
+        if (deriv == 0) v = A * y->f[i] + B * y->f[i + 1] + ((A * A * A - A) * m[i] + (B * B * B - B) * m[i + 1]) * hh * hh / 6.0;
+        else if (deriv == 1) v = (y->f[i + 1] - y->f[i]) / hh - (3.0 * A * A - 1.0) / 6.0 * hh * m[i] + (3.0 * B * B - 1.0) / 6.0 * hh * m[i + 1];
+        else v = A * m[i] + B * m[i + 1];
+        r->f[k] = v;
+    }
+out:
+    free(a); free(m); free(h); rxnp_release(x); rxnp_release(y); rxnp_release(xn);
+    return r;
+}

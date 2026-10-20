@@ -23,6 +23,8 @@ void rxdf_release(rxdf *d)
         if (d->isstr[c]) { for (r = 0; r < d->nrows; r++) free(d->str[c][r]); free(d->str[c]); }
         else free(d->num[c]);
     }
+    if (d->index) { for (r = 0; r < d->nrows; r++) free(d->index[r]); free(d->index); }
+    free(d->index_name);
     free(d->names); free(d->isstr); free(d->isint); free(d->num); free(d->str); free(d);
 }
 long rxdf_find(const rxdf *d, const char *name)
@@ -240,8 +242,8 @@ char *rxdf_to_text(const rxdf *d, long maxrows)
         }
     }
     for (r = -1; r < nr; r++) {
-        char idx[24]; sprintf(idx, "%ld", r);
-        if (r < 0) sprintf(idx, "%*s", 3, ""); else sprintf(idx, "%-3ld", r);
+        char idx[300]; sprintf(idx, "%ld", r);
+        if (r < 0) sprintf(idx, "%*s", 3, ""); else if (d->index) sprintf(idx, "%-3s", d->index[r]); else sprintf(idx, "%-3ld", r);
         sb_add(&o, idx, strlen(idx));
         for (c = 0; c < d->ncols; c++) {
             char tmp[400]; size_t pad;
@@ -287,6 +289,17 @@ static rxdf *take(const rxdf *d, const long *idx, long n)
         }
     }
     o->nrows = n;
+    {   char **ix = (char **)malloc((n ? n : 1) * sizeof *ix); char buf[32];
+        if (ix) {
+            for (r = 0; r < n; r++) {
+                if (idx[r] < 0) ix[r] = sdup("");
+                else if (d->index) ix[r] = sdup(d->index[idx[r]]);
+                else { sprintf(buf, "%ld", idx[r]); ix[r] = sdup(buf); }
+            }
+            o->index = ix;
+            if (d->index && d->index_name) o->index_name = sdup(d->index_name);
+        }
+    }
     return o;
 }
 rxdf *rxdf_head(const rxdf *d, long n)
@@ -409,35 +422,67 @@ rxdf *rxdf_groupby(const rxdf *d, const char *key, const char *val, const char *
 }
 
 /* ------------------------------------------------------------------ merge */
+static int key_eq_ab(const rxdf *a, long ka, long i, const rxdf *b, long kb, long j)
+{ return a->isstr[ka] ? !strcmp(a->str[ka][i], b->str[kb][j]) : a->num[ka][i] == b->num[kb][j]; }
 rxdf *rxdf_merge(const rxdf *a, const rxdf *b, const char *key, const char *how)
 {
-    long ka = rxdf_find(a, key), kb = rxdf_find(b, key), i, j, n = 0, cap = 16, c; long *ia, *ib; int left; rxdf *o;
+    long ka = rxdf_find(a, key), kb = rxdf_find(b, key), i, j, n = 0, cap = 16, c; long *ia, *ib; int mode; rxdf *o;
     if (ka < 0 || kb < 0) return (rxdf *)dfail("key column missing in one of the tables");
     if (a->isstr[ka] != b->isstr[kb]) return (rxdf *)dfail("key columns have different types");
-    if (!strcmp(how, "inner")) left = 0; else if (!strcmp(how, "left")) left = 1; else return (rxdf *)dfail("how must be inner or left");
+    if (!strcmp(how, "inner")) mode = 0; else if (!strcmp(how, "left")) mode = 1;
+    else if (!strcmp(how, "right")) mode = 2; else if (!strcmp(how, "outer")) mode = 3;
+    else return (rxdf *)dfail("how must be inner, left, right or outer");
     ia = (long *)malloc(cap * sizeof *ia); ib = (long *)malloc(cap * sizeof *ib);
-    for (i = 0; i < a->nrows; i++) {
-        int matched = 0;
+#define PUSH(x, y) { if (n == cap) { cap *= 2; ia = (long *)realloc(ia, cap * sizeof *ia); ib = (long *)realloc(ib, cap * sizeof *ib); } ia[n] = (x); ib[n] = (y); n++; }
+    if (mode == 2) {
         for (j = 0; j < b->nrows; j++) {
-            int eq = a->isstr[ka] ? !strcmp(a->str[ka][i], b->str[kb][j]) : a->num[ka][i] == b->num[kb][j];
-            if (eq) {
-                if (n == cap) { cap *= 2; ia = (long *)realloc(ia, cap * sizeof *ia); ib = (long *)realloc(ib, cap * sizeof *ib); }
-                ia[n] = i; ib[n] = j; n++; matched = 1;
-            }
+            int matched = 0;
+            for (i = 0; i < a->nrows; i++) if (key_eq_ab(a, ka, i, b, kb, j)) { PUSH(i, j); matched = 1; }
+            if (!matched) PUSH(-1, j);
         }
-        if (!matched && left) {
-            if (n == cap) { cap *= 2; ia = (long *)realloc(ia, cap * sizeof *ia); ib = (long *)realloc(ib, cap * sizeof *ib); }
-            ia[n] = i; ib[n] = -1; n++;
+    } else {
+        for (i = 0; i < a->nrows; i++) {
+            int matched = 0;
+            for (j = 0; j < b->nrows; j++) if (key_eq_ab(a, ka, i, b, kb, j)) { PUSH(i, j); matched = 1; }
+            if (!matched && mode != 0) PUSH(i, -1);
+        }
+        if (mode == 3) {
+            for (j = 0; j < b->nrows; j++) {
+                int matched = 0;
+                for (i = 0; i < a->nrows; i++) if (key_eq_ab(a, ka, i, b, kb, j)) { matched = 1; break; }
+                if (!matched) PUSH(-1, j);
+            }
         }
     }
     {
         rxdf *ta = take(a, ia, n), *tb = take(b, ib, n); o = rxdf_new();
+        /* key coalescing: rows without a left partner take the key from b */
+        for (i = 0; i < n; i++) if (ia[i] < 0) {
+            if (ta->isstr[ka]) { free(ta->str[ka][i]); ta->str[ka][i] = sdup(b->str[kb][ib[i]]); }
+            else ta->num[ka][i] = b->num[kb][ib[i]];
+        }
+        if (!ta->isstr[ka]) ta->isint[ka] = a->isint[ka] && b->isint[kb];
+        if (mode == 3 && n > 1) {                       /* pandas sorts outer-join results by key (stable) */
+            long *ord = (long *)malloc(n * sizeof *ord), *ia2, *ib2; rxdf *ta2, *tb2;
+            for (i = 0; i < n; i++) ord[i] = i;
+            g_sortd = ta; g_sortc = ka; g_asc = 1; qsort(ord, n, sizeof *ord, cmp_rows);
+            ia2 = (long *)malloc(n * sizeof *ia2); ib2 = (long *)malloc(n * sizeof *ib2);
+            for (i = 0; i < n; i++) { ia2[i] = ia[ord[i]]; ib2[i] = ib[ord[i]]; }
+            ta2 = take(a, ia2, n); tb2 = take(b, ib2, n);
+            for (i = 0; i < n; i++) if (ia2[i] < 0) {
+                if (ta2->isstr[ka]) { free(ta2->str[ka][i]); ta2->str[ka][i] = sdup(b->str[kb][ib2[i]]); }
+                else ta2->num[ka][i] = b->num[kb][ib2[i]];
+            }
+            if (!ta2->isstr[ka]) ta2->isint[ka] = a->isint[ka] && b->isint[kb];
+            rxdf_release(ta); rxdf_release(tb); ta = ta2; tb = tb2;
+            free(ord); free(ia2); free(ib2);
+        }
         for (c = 0; c < ta->ncols; c++) {
             char nm[300]; long other = rxdf_find(tb, ta->names[c]);
             strcpy(nm, ta->names[c]);
             if (other >= 0 && strcmp(nm, key)) strcat(nm, "_x");
             if (ta->isstr[c]) { char **v = (char **)malloc((n ? n : 1) * sizeof *v); for (i = 0; i < n; i++) v[i] = sdup(ta->str[c][i]); add_str_raw(o, nm, v, n); }
-            else { double *v = (double *)malloc((n ? n : 1) * sizeof *v); memcpy(v, ta->num[c], n * sizeof *v); add_num_raw(o, nm, v, n, ta->isint[c]); }
+            else { double *v = (double *)malloc((n ? n : 1) * sizeof *v); int isint = ta->isint[c]; memcpy(v, ta->num[c], n * sizeof *v); add_num_raw(o, nm, v, n, isint); }
         }
         for (c = 0; c < tb->ncols; c++) {
             char nm[300];
@@ -450,6 +495,7 @@ rxdf *rxdf_merge(const rxdf *a, const rxdf *b, const char *key, const char *how)
         o->nrows = n;
         rxdf_release(ta); rxdf_release(tb);
     }
+#undef PUSH
     free(ia); free(ib);
     return o;
 }
@@ -479,4 +525,298 @@ rxdf *rxdf_describe(const rxdf *d)
         free(s);
     }
     return o;
+}
+
+/* ================================================================== index */
+static char *cell_text(const rxdf *d, long c, long r)
+{
+    char buf[64];
+    if (d->isstr[c]) return sdup(d->str[c][r]);
+    fmt_double(buf, d->num[c][r], d->isint[c]);
+    return sdup(buf);
+}
+static rxdf *copy_cols(const rxdf *d, long skip)
+{
+    rxdf *o = rxdf_new(); long c, r;
+    for (c = 0; c < d->ncols; c++) {
+        if (c == skip) continue;
+        if (d->isstr[c]) { char **v = (char **)malloc((d->nrows ? d->nrows : 1) * sizeof *v); for (r = 0; r < d->nrows; r++) v[r] = sdup(d->str[c][r]); add_str_raw(o, d->names[c], v, d->nrows); }
+        else { double *v = (double *)malloc((d->nrows ? d->nrows : 1) * sizeof *v); memcpy(v, d->num[c], d->nrows * sizeof *v); add_num_raw(o, d->names[c], v, d->nrows, d->isint[c]); }
+    }
+    o->nrows = d->nrows;
+    return o;
+}
+rxdf *rxdf_set_index(const rxdf *d, const char *col)
+{
+    long c = rxdf_find(d, col), r; rxdf *o;
+    if (c < 0) return (rxdf *)dfail("no such column");
+    o = copy_cols(d, c);
+    o->index = (char **)malloc((d->nrows ? d->nrows : 1) * sizeof *o->index);
+    for (r = 0; r < d->nrows; r++) o->index[r] = cell_text(d, c, r);
+    o->index_name = sdup(d->names[c]);
+    return o;
+}
+rxdf *rxdf_reset_index(const rxdf *d, int drop)
+{
+    rxdf *o = copy_cols(d, -1), *res; long r;
+    if (!d->index || drop) return o;
+    res = rxdf_new();
+    {   char **v = (char **)malloc((d->nrows ? d->nrows : 1) * sizeof *v);
+        for (r = 0; r < d->nrows; r++) v[r] = sdup(d->index[r]);
+        add_str_raw(res, d->index_name ? d->index_name : "index", v, d->nrows);
+    }
+    {   long c;
+        for (c = 0; c < o->ncols; c++) {
+            if (o->isstr[c]) { char **v = (char **)malloc((o->nrows ? o->nrows : 1) * sizeof *v); for (r = 0; r < o->nrows; r++) v[r] = sdup(o->str[c][r]); add_str_raw(res, o->names[c], v, o->nrows); }
+            else { double *v = (double *)malloc((o->nrows ? o->nrows : 1) * sizeof *v); memcpy(v, o->num[c], o->nrows * sizeof *v); add_num_raw(res, o->names[c], v, o->nrows, o->isint[c]); }
+        }
+    }
+    res->nrows = d->nrows;
+    rxdf_release(o);
+    return res;
+}
+char *rxdf_index_label(const rxdf *d, long row)
+{
+    char buf[32];
+    if (row < 0 || row >= d->nrows) return NULL;
+    if (d->index) return sdup(d->index[row]);
+    sprintf(buf, "%ld", row);
+    return sdup(buf);
+}
+long rxdf_loc(const rxdf *d, const char *label)
+{
+    long r;
+    if (!d->index) { char *e; long v = strtol(label, &e, 10); return (*label && !*e && v >= 0 && v < d->nrows) ? v : -1; }
+    for (r = 0; r < d->nrows; r++) if (!strcmp(d->index[r], label)) return r;
+    return -1;
+}
+
+/* ================================================================== multi-key sort / groupby */
+#define MAXK 8
+static const rxdf *m_d; static long m_c[MAXK]; static int m_asc[MAXK]; static int m_nk;
+static int cmp_multi(const void *pa, const void *pb)
+{
+    long a = *(const long *)pa, b = *(const long *)pb; int k, r;
+    for (k = 0; k < m_nk; k++) {
+        long c = m_c[k];
+        if (m_d->isstr[c]) r = strcmp(m_d->str[c][a], m_d->str[c][b]);
+        else {
+            double x = m_d->num[c][a], y = m_d->num[c][b];
+            if (x != x || y != y) { r = (x != x) - (y != y); if (r) return r; continue; }
+            r = (x > y) - (x < y);
+        }
+        if (r) return m_asc[k] ? r : -r;
+    }
+    return (a > b) - (a < b);
+}
+static int parse_cols(const rxdf *d, const char *csv, long *cols, int max)
+{
+    int n = 0; const char *p = csv;
+    for (;;) {
+        const char *e = strchr(p, ','); size_t l = e ? (size_t)(e - p) : strlen(p); char name[256]; long c;
+        if (l >= sizeof name) l = sizeof name - 1;
+        memcpy(name, p, l); name[l] = 0;
+        while (l > 0 && name[l - 1] == ' ') name[--l] = 0;
+        c = rxdf_find(d, name);
+        if (c < 0 || n >= max) return -1;
+        cols[n++] = c;
+        if (!e) break;
+        p = e + 1;
+    }
+    return n;
+}
+rxdf *rxdf_sort_multi(const rxdf *d, const char *cols_csv, const char *asc_csv)
+{
+    long idx0, *idx, r; int n, k; rxdf *o; const char *p = asc_csv;
+    n = parse_cols(d, cols_csv, m_c, MAXK);
+    if (n < 0) return (rxdf *)dfail("no such column");
+    m_nk = n;
+    for (k = 0; k < n; k++) {
+        m_asc[k] = 1;
+        if (p && *p) { m_asc[k] = atoi(p) != 0; p = strchr(p, ','); if (p) p++; }
+    }
+    (void)idx0;
+    idx = (long *)malloc((d->nrows ? d->nrows : 1) * sizeof *idx);
+    for (r = 0; r < d->nrows; r++) idx[r] = r;
+    m_d = d; qsort(idx, d->nrows, sizeof *idx, cmp_multi);
+    o = take(d, idx, d->nrows); free(idx);
+    return o;
+}
+rxdf *rxdf_groupby_multi(const rxdf *d, const char *keys_csv, const char *val, const char *agg)
+{
+    long vc = rxdf_find(d, val), r, g, ng = 0, *idx, *start; int nk, k, op; rxdf *o; double *res;
+    nk = parse_cols(d, keys_csv, m_c, MAXK);
+    if (nk < 0 || vc < 0) return (rxdf *)dfail("no such column");
+    if (d->isstr[vc]) return (rxdf *)dfail("value column must be numeric");
+    if (!strcmp(agg, "sum")) op = 0; else if (!strcmp(agg, "mean")) op = 1; else if (!strcmp(agg, "count")) op = 2;
+    else if (!strcmp(agg, "min")) op = 3; else if (!strcmp(agg, "max")) op = 4; else if (!strcmp(agg, "std")) op = 5;
+    else return (rxdf *)dfail("agg must be sum, mean, count, min, max or std");
+    m_nk = nk; for (k = 0; k < nk; k++) m_asc[k] = 1;
+    idx = (long *)malloc((d->nrows ? d->nrows : 1) * sizeof *idx);
+    for (r = 0; r < d->nrows; r++) idx[r] = r;
+    m_d = d; qsort(idx, d->nrows, sizeof *idx, cmp_multi);
+    start = (long *)malloc((d->nrows + 2) * sizeof *start);
+    for (r = 0; r < d->nrows; r++) {
+        int same = r > 0;
+        for (k = 0; same && k < nk; k++) if (!key_equal(d, m_c[k], idx[r - 1], idx[r])) same = 0;
+        if (!same) start[ng++] = r;
+    }
+    start[ng] = d->nrows;
+    res = (double *)malloc((ng ? ng : 1) * sizeof *res);
+    for (g = 0; g < ng; g++) {
+        long n = 0, i; double s = 0, mn = 0, mx = 0, m, ss = 0;
+        for (i = start[g]; i < start[g + 1]; i++) {
+            double x = d->num[vc][idx[i]];
+            if (x != x) continue;
+            if (n == 0) mn = mx = x; else { if (x < mn) mn = x; if (x > mx) mx = x; }
+            s += x; n++;
+        }
+        m = n ? s / n : nanv();
+        if (op == 5) for (i = start[g]; i < start[g + 1]; i++) { double x = d->num[vc][idx[i]]; if (x == x) ss += (x - m) * (x - m); }
+        switch (op) { case 0: res[g] = s; break; case 1: res[g] = m; break; case 2: res[g] = (double)n; break;
+                      case 3: res[g] = n ? mn : nanv(); break; case 4: res[g] = n ? mx : nanv(); break;
+                      default: res[g] = n > 1 ? sqrt(ss / (n - 1)) : nanv(); break; }
+    }
+    o = rxdf_new();
+    for (k = 0; k < nk; k++) {
+        long kc = m_c[k];
+        if (d->isstr[kc]) { char **v = (char **)malloc((ng ? ng : 1) * sizeof *v); for (g = 0; g < ng; g++) v[g] = sdup(d->str[kc][idx[start[g]]]); add_str_raw(o, d->names[kc], v, ng); }
+        else { double *v = (double *)malloc((ng ? ng : 1) * sizeof *v); for (g = 0; g < ng; g++) v[g] = d->num[kc][idx[start[g]]]; add_num_raw(o, d->names[kc], v, ng, d->isint[kc]); }
+    }
+    add_num_raw(o, val, res, ng, op == 2 || (op != 1 && op != 5 && d->isint[vc]));
+    o->nrows = ng;
+    free(idx); free(start);
+    return o;
+}
+
+/* ================================================================== value_counts / pivot */
+rxdf *rxdf_value_counts(const rxdf *d, const char *col)
+{
+    long c = rxdf_find(d, col), r, j, nu = 0, *first, *cnt, *ord; rxdf *o; double *cv;
+    if (c < 0) return (rxdf *)dfail("no such column");
+    first = (long *)malloc((d->nrows + 1) * sizeof *first); cnt = (long *)calloc(d->nrows + 1, sizeof *cnt);
+    ord = (long *)malloc((d->nrows + 1) * sizeof *ord);
+    for (r = 0; r < d->nrows; r++) {
+        for (j = 0; j < nu; j++) if (key_equal(d, c, first[j], r)) break;
+        if (j == nu) first[nu++] = r;
+        cnt[j]++;
+    }
+    for (j = 0; j < nu; j++) ord[j] = j;
+    /* stable insertion sort by count descending */
+    for (j = 1; j < nu; j++) {
+        long t = ord[j], k = j - 1;
+        while (k >= 0 && cnt[ord[k]] < cnt[t]) { ord[k + 1] = ord[k]; k--; }
+        ord[k + 1] = t;
+    }
+    o = rxdf_new();
+    if (d->isstr[c]) { char **v = (char **)malloc((nu ? nu : 1) * sizeof *v); for (j = 0; j < nu; j++) v[j] = sdup(d->str[c][first[ord[j]]]); add_str_raw(o, d->names[c], v, nu); }
+    else { double *v = (double *)malloc((nu ? nu : 1) * sizeof *v); for (j = 0; j < nu; j++) v[j] = d->num[c][first[ord[j]]]; add_num_raw(o, d->names[c], v, nu, d->isint[c]); }
+    cv = (double *)malloc((nu ? nu : 1) * sizeof *cv);
+    for (j = 0; j < nu; j++) cv[j] = (double)cnt[ord[j]];
+    add_num_raw(o, "count", cv, nu, 1);
+    o->nrows = nu;
+    free(first); free(cnt); free(ord);
+    return o;
+}
+/* sorted unique values of column c as first-row indices */
+static long uniq_sorted(const rxdf *d, long c, long **rows)
+{
+    long *idx = (long *)malloc((d->nrows + 1) * sizeof *idx), *u = (long *)malloc((d->nrows + 1) * sizeof *u), r, n = 0;
+    for (r = 0; r < d->nrows; r++) idx[r] = r;
+    g_sortd = d; g_sortc = c; g_asc = 1; qsort(idx, d->nrows, sizeof *idx, cmp_rows);
+    for (r = 0; r < d->nrows; r++) if (r == 0 || !key_equal(d, c, idx[r - 1], idx[r])) u[n++] = idx[r];
+    free(idx); *rows = u; return n;
+}
+rxdf *rxdf_pivot(const rxdf *d, const char *index, const char *columns, const char *values, const char *agg)
+{
+    long ic = rxdf_find(d, index), cc = rxdf_find(d, columns), vc = rxdf_find(d, values), *ir, *cr, ni, nc, a, b, r; rxdf *o; int op;
+    if (ic < 0 || cc < 0 || vc < 0) return (rxdf *)dfail("no such column");
+    if (d->isstr[vc]) return (rxdf *)dfail("value column must be numeric");
+    if (!strcmp(agg, "sum")) op = 0; else if (!strcmp(agg, "mean")) op = 1; else if (!strcmp(agg, "count")) op = 2;
+    else if (!strcmp(agg, "min")) op = 3; else if (!strcmp(agg, "max")) op = 4; else return (rxdf *)dfail("agg must be sum, mean, count, min or max");
+    ni = uniq_sorted(d, ic, &ir); nc = uniq_sorted(d, cc, &cr);
+    o = rxdf_new();
+    if (d->isstr[ic]) { char **v = (char **)malloc((ni ? ni : 1) * sizeof *v); for (a = 0; a < ni; a++) v[a] = sdup(d->str[ic][ir[a]]); add_str_raw(o, index, v, ni); }
+    else { double *v = (double *)malloc((ni ? ni : 1) * sizeof *v); for (a = 0; a < ni; a++) v[a] = d->num[ic][ir[a]]; add_num_raw(o, index, v, ni, d->isint[ic]); }
+    for (b = 0; b < nc; b++) {
+        char *nm = cell_text(d, cc, cr[b]); double *v = (double *)malloc((ni ? ni : 1) * sizeof *v);
+        for (a = 0; a < ni; a++) {
+            long n = 0; double s = 0, mn = 0, mx = 0;
+            for (r = 0; r < d->nrows; r++) {
+                double x = d->num[vc][r];
+                if (!key_equal(d, ic, ir[a], r) || !key_equal(d, cc, cr[b], r) || x != x) continue;
+                if (n == 0) mn = mx = x; else { if (x < mn) mn = x; if (x > mx) mx = x; }
+                s += x; n++;
+            }
+            v[a] = n == 0 ? nanv() : op == 0 ? s : op == 1 ? s / n : op == 2 ? (double)n : op == 3 ? mn : mx;
+        }
+        add_num_raw(o, nm, v, ni, 0);
+        free(nm);
+    }
+    o->nrows = ni;
+    free(ir); free(cr);
+    return o;
+}
+
+/* ================================================================== datetime */
+static long days_from_civil(long y, int m, int d)
+{
+    long era, yoe, doy, doe;
+    y -= m <= 2; era = (y >= 0 ? y : y - 399) / 400; yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1; doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+static void civil_from_days(long z, long *y, int *m, int *d)
+{
+    long era, doe, yoe, doy, mp;
+    z += 719468; era = (z >= 0 ? z : z - 146096) / 146097; doe = z - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; *y = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100); mp = (5 * doy + 2) / 153;
+    *d = (int)(doy - (153 * mp + 2) / 5 + 1); *m = (int)(mp < 10 ? mp + 3 : mp - 9); if (*m <= 2) (*y)++;
+}
+int rxdf_parse_datetime(const char *s, double *epoch)
+{
+    int y, mo, d, h = 0, mi = 0; double sec = 0.0; int n; const char *p = s;
+    while (*p == ' ') p++;
+    if (sscanf(p, "%d-%d-%d%n", &y, &mo, &d, &n) != 3) return 0;
+    p += n;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return 0;
+    if (*p == 'T' || *p == ' ') {
+        p++;
+        if (sscanf(p, "%d:%d%n", &h, &mi, &n) != 2) return 0;
+        p += n;
+        if (*p == ':') { p++; if (sscanf(p, "%lf%n", &sec, &n) != 1) return 0; p += n; }
+    }
+    if (*p && *p != 'Z' && *p != ' ') return 0;
+    if (h < 0 || h > 23 || mi < 0 || mi > 59 || sec < 0 || sec >= 61) return 0;
+    *epoch = (double)days_from_civil(y, mo, d) * 86400.0 + h * 3600.0 + mi * 60.0 + sec;
+    return 1;
+}
+int rxdf_datetime_part(double epoch, const char *part, long *out)
+{
+    long days = (long)floor(epoch / 86400.0), y; double rem = epoch - (double)days * 86400.0; int m, d;
+    civil_from_days(days, &y, &m, &d);
+    if (!strcmp(part, "year")) *out = y; else if (!strcmp(part, "month")) *out = m; else if (!strcmp(part, "day")) *out = d;
+    else if (!strcmp(part, "hour")) *out = (long)(rem / 3600.0); else if (!strcmp(part, "minute")) *out = (long)(rem / 60.0) % 60;
+    else if (!strcmp(part, "second")) *out = (long)rem % 60;
+    else if (!strcmp(part, "dow")) *out = ((days % 7) + 7 + 3) % 7;          /* Monday = 0 (1970-01-01 was a Thursday) */
+    else if (!strcmp(part, "doy")) *out = days - days_from_civil(y, 1, 1) + 1;
+    else return 0;
+    return 1;
+}
+int rxdf_to_datetime(rxdf *d, const char *col, const char *newcol)
+{
+    long c = rxdf_find(d, col), r; double *v;
+    if (c < 0 || !d->isstr[c]) { dfail("column must be a string column"); return 0; }
+    v = (double *)malloc((d->nrows ? d->nrows : 1) * sizeof *v);
+    for (r = 0; r < d->nrows; r++) if (!rxdf_parse_datetime(d->str[c][r], &v[r])) { free(v); dfail("cannot parse datetime"); return 0; }
+    return add_num_raw(d, newcol, v, d->nrows, 0);
+}
+int rxdf_dt_part(rxdf *d, const char *epoch_col, const char *part, const char *newcol)
+{
+    long c = rxdf_find(d, epoch_col), r, o; double *v;
+    if (c < 0 || d->isstr[c]) { dfail("column must be numeric epoch seconds"); return 0; }
+    v = (double *)malloc((d->nrows ? d->nrows : 1) * sizeof *v);
+    for (r = 0; r < d->nrows; r++) { if (!rxdf_datetime_part(d->num[c][r], part, &o)) { free(v); dfail("part must be year, month, day, hour, minute, second, dow or doy"); return 0; } v[r] = (double)o; }
+    return add_num_raw(d, newcol, v, d->nrows, 1);
 }

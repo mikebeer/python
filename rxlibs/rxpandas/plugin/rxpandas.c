@@ -80,6 +80,20 @@ PROCEDURE(f_groupby) { rxdf *d; ARGCHK(4); NEEDDF(0, d); RETDF(rxdf_groupby(d, G
 PROCEDURE(f_merge) { rxdf *a, *b; ARGCHK(4); NEEDDF(0, a); NEEDDF(1, b); RETDF(rxdf_merge(a, b, GETSTRING(ARG2), GETSTRING(ARG3))) }
 PROCEDURE(f_describe) { rxdf *d; ARGCHK(1); NEEDDF(0, d); RETDF(rxdf_describe(d)) }
 
+PROCEDURE(f_set_index) { rxdf *d; ARGCHK(2); NEEDDF(0, d); RETDF(rxdf_set_index(d, GETSTRING(ARG1))) }
+PROCEDURE(f_reset_index) { rxdf *d; ARGCHK(2); NEEDDF(0, d); RETDF(rxdf_reset_index(d, (int)GETINT(ARG1))) }
+PROCEDURE(f_index_label) { rxdf *d; char *t; ARGCHK(2); NEEDDF(0, d); t = rxdf_index_label(d, (long)GETINT(ARG1));
+    if (!t) RETURNSIGNAL(SIGNAL_OUT_OF_RANGE, "row out of range") RETURNSTR(t); free(t); RESETSIGNAL }
+PROCEDURE(f_loc) { rxdf *d; ARGCHK(2); NEEDDF(0, d); RETURNINT(rxdf_loc(d, GETSTRING(ARG1))); RESETSIGNAL }
+PROCEDURE(f_groupby_multi) { rxdf *d; ARGCHK(4); NEEDDF(0, d); RETDF(rxdf_groupby_multi(d, GETSTRING(ARG1), GETSTRING(ARG2), GETSTRING(ARG3))) }
+PROCEDURE(f_sort_multi) { rxdf *d; ARGCHK(3); NEEDDF(0, d); RETDF(rxdf_sort_multi(d, GETSTRING(ARG1), GETSTRING(ARG2))) }
+PROCEDURE(f_value_counts) { rxdf *d; ARGCHK(2); NEEDDF(0, d); RETDF(rxdf_value_counts(d, GETSTRING(ARG1))) }
+PROCEDURE(f_pivot) { rxdf *d; ARGCHK(5); NEEDDF(0, d); RETDF(rxdf_pivot(d, GETSTRING(ARG1), GETSTRING(ARG2), GETSTRING(ARG3), GETSTRING(ARG4))) }
+PROCEDURE(f_to_datetime) { rxdf *d; ARGCHK(3); NEEDDF(0, d); if (!rxdf_to_datetime(d, GETSTRING(ARG1), GETSTRING(ARG2))) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, rxdf_error()) RETURNINT(0); RESETSIGNAL }
+PROCEDURE(f_dt_part) { rxdf *d; ARGCHK(4); NEEDDF(0, d); if (!rxdf_dt_part(d, GETSTRING(ARG1), GETSTRING(ARG2), GETSTRING(ARG3))) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, rxdf_error()) RETURNINT(0); RESETSIGNAL }
+PROCEDURE(f_parse_dt) { double e; ARGCHK(1); if (!rxdf_parse_datetime(GETSTRING(ARG0), &e)) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, "cannot parse datetime") RETURNFLOAT(e); RESETSIGNAL }
+PROCEDURE(f_dt_scalar) { long o; ARGCHK(2); if (!rxdf_datetime_part(GETFLOAT(ARG0), GETSTRING(ARG1), &o)) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, "unknown datetime part") RETURNINT(o); RESETSIGNAL }
+
 #define P(f, name, ret, args) ADDPROC(f, "rxpandas." name, "b", ret, args);
 LOADFUNCS
 P(f_new,"pd_new",".binary","") P(f_read_csv,"pd_read_csv",".binary","path = .string")
@@ -98,4 +112,13 @@ P(f_head,"pd_head",".binary","df = .binary, n = .int") P(f_select,"pd_select",".
 P(f_groupby,"pd_groupby",".binary","df = .binary, key = .string, val = .string, agg = .string")
 P(f_merge,"pd_merge",".binary","a = .binary, b = .binary, key = .string, how = .string")
 P(f_describe,"pd_describe",".binary","df = .binary")
+P(f_set_index,"pd_set_index",".binary","df = .binary, col = .string") P(f_reset_index,"pd_reset_index",".binary","df = .binary, drop = .int")
+P(f_index_label,"pd_index_label",".string","df = .binary, row = .int") P(f_loc,"pd_loc",".int","df = .binary, label = .string")
+P(f_groupby_multi,"pd_groupby_multi",".binary","df = .binary, keys = .string, val = .string, agg = .string")
+P(f_sort_multi,"pd_sort_multi",".binary","df = .binary, cols = .string, ascending = .string")
+P(f_value_counts,"pd_value_counts",".binary","df = .binary, col = .string")
+P(f_pivot,"pd_pivot",".binary","df = .binary, index = .string, columns = .string, values = .string, agg = .string")
+P(f_to_datetime,"pd_to_datetime",".int","df = .binary, col = .string, newcol = .string")
+P(f_dt_part,"pd_dt_part",".int","df = .binary, epoch_col = .string, part = .string, newcol = .string")
+P(f_parse_dt,"pd_parse_datetime",".float","text = .string") P(f_dt_scalar,"pd_datetime_part",".int","epoch = .float, part = .string")
 ENDLOADFUNCS

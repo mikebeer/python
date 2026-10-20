@@ -1,0 +1,675 @@
+/* rxspalg - scipy-style callback algorithms (optimize, integrate, ODE, curve_fit) written in CREXX Level B
+ * on top of the rxnumpy / rxscipy native plugins.  Callbacks are objects: the caller implements one of the
+ * interfaces below in a class (see docs/DESIGN.md, "Callbacks") and passes an instance.
+ *
+ *   sp_f1     f(x = .float) = .float                 root finding, quad
+ *   sp_f1d    f(x), df(x)                            newton with derivative
+ *   sp_fn     f(x = .binary) = .float                minimize (x is an rxnumpy float64 vector)
+ *   sp_ode    rhs(t = .float, y = .binary) = .binary solve_ivp
+ *   sp_model  f(x = .float, p = .binary) = .float    curve_fit
+ */
+options levelb floats_binary
+namespace rxspalg expose sp_f1 sp_f1d sp_fn sp_ode sp_model sp_brentq sp_newton sp_newton_d sp_quad sp_minimize_nm sp_minimize_bfgs sp_solve_ivp sp_curve_fit
+import rxnumpy
+import rxscipy
+
+sp_f1: interface
+  f: method = .float
+  arg x = .float
+
+sp_f1d: interface
+  f: method = .float
+  arg x = .float
+  df: method = .float
+  arg x = .float
+
+sp_fn: interface
+  f: method = .float
+  arg x = .binary
+
+sp_ode: interface
+  rhs: method = .binary
+  arg t = .float, y = .binary
+
+sp_model: interface
+  f: method = .float
+  arg x = .float, p = .binary
+
+fmax: procedure = .float
+  arg a = .float, b = .float
+  if a > b then return a
+  return b
+
+fmin: procedure = .float
+  arg a = .float, b = .float
+  if a < b then return a
+  return b
+
+fabs: procedure = .float
+  arg a = .float
+  if a < 0.0 then return 0.0 - a
+  return a
+
+/* ------------------------------------------------------------------ brentq */
+sp_brentq: procedure = .float
+  arg f = .sp_f1, xa = .float, xb = .float, xtol = .float, rtol = .float, maxiter = .int
+  xpre = xa
+  xcur = xb
+  fpre = f.f(xpre)
+  fcur = f.f(xcur)
+  if fpre = 0.0 then return xpre
+  if fcur = 0.0 then return xcur
+  if fpre * fcur > 0.0 then signal invalid_arguments "f(a) and f(b) must have different signs"
+  xblk = 0.0
+  fblk = 0.0
+  spre = 0.0
+  scur = 0.0
+  do i = 1 to maxiter
+    if fpre <> 0.0 & fcur <> 0.0 & ((fpre < 0.0 & fcur > 0.0) | (fpre > 0.0 & fcur < 0.0)) then do
+      xblk = xpre
+      fblk = fpre
+      spre = xcur - xpre
+      scur = spre
+    end
+    if fabs(fblk) < fabs(fcur) then do
+      xpre = xcur
+      xcur = xblk
+      xblk = xpre
+      fpre = fcur
+      fcur = fblk
+      fblk = fpre
+    end
+    delta = (xtol + rtol * fabs(xcur)) / 2.0
+    sbis = (xblk - xcur) / 2.0
+    if fcur = 0.0 | fabs(sbis) < delta then return xcur
+    if fabs(spre) > delta & fabs(fcur) < fabs(fpre) then do
+      if xpre = xblk then stry = (0.0 - fcur) * (xcur - xpre) / (fcur - fpre)
+      else do
+        dpre = (fpre - fcur) / (xpre - xcur)
+        dblk = (fblk - fcur) / (xblk - xcur)
+        stry = (0.0 - fcur) * (fblk * dblk - fpre * dpre) / (dblk * dpre * (fblk - fpre))
+      end
+      if 2.0 * fabs(stry) < fmin(fabs(spre), 3.0 * fabs(sbis) - delta) then do
+        spre = scur
+        scur = stry
+      end
+      else do
+        spre = sbis
+        scur = sbis
+      end
+    end
+    else do
+      spre = sbis
+      scur = sbis
+    end
+    xpre = xcur
+    fpre = fcur
+    if fabs(scur) > delta then xcur = xcur + scur
+    else if sbis > 0.0 then xcur = xcur + delta
+    else xcur = xcur - delta
+    fcur = f.f(xcur)
+  end
+  return xcur
+
+/* ------------------------------------------------------------------ newton (secant, no derivative) */
+sp_newton: procedure = .float
+  arg f = .sp_f1, x0 = .float, tol = .float, maxiter = .int
+  p0 = x0
+  if p0 >= 0.0 then p1 = p0 * 1.0001 + 0.0001
+  else p1 = p0 * 1.0001 - 0.0001
+  q0 = f.f(p0)
+  q1 = f.f(p1)
+  if fabs(q1) < fabs(q0) then do
+    t = p0
+    p0 = p1
+    p1 = t
+    t = q0
+    q0 = q1
+    q1 = t
+  end
+  do i = 1 to maxiter
+    if q1 = q0 then do
+      if p1 <> p0 then signal failure "newton did not converge"
+      return (p1 + p0) / 2.0
+    end
+    p = p1 - q1 * (p1 - p0) / (q1 - q0)
+    if fabs(p - p1) <= tol then return p
+    p0 = p1
+    q0 = q1
+    p1 = p
+    q1 = f.f(p1)
+  end
+  return p1
+
+/* newton-raphson with derivative */
+sp_newton_d: procedure = .float
+  arg f = .sp_f1d, x0 = .float, tol = .float, maxiter = .int
+  p0 = x0
+  do i = 1 to maxiter
+    fval = f.f(p0)
+    if fval = 0.0 then return p0
+    fder = f.df(p0)
+    if fder = 0.0 then signal failure "newton did not converge"
+    p = p0 - fval / fder
+    if fabs(p - p0) < tol then return p
+    p0 = p
+  end
+  return p0
+
+/* ------------------------------------------------------------------ quad: adaptive Gauss-Kronrod 21 (QUADPACK qk21 + bisection) */
+gk21: procedure = .float
+  arg f = .sp_f1, a = .float, b = .float, expose err = .float
+  xgk = rxnumpy..np_array("[0.995657163025808080735527280689003, 0.973906528517171720077964012084452, 0.930157491355708226001207180059508, 0.865063366688984510732096688423493, 0.780817726586416897063717578345042, 0.679409568299024406234327365114874, 0.562757134668604683339000099272694, 0.433395394129247190799265943165784, 0.294392862701460198131126603103866, 0.148874338981631210884826001129720, 0.0]")
+  wgk = rxnumpy..np_array("[0.011694638867371874278064396062192, 0.032558162307964727478818972459390, 0.054755896574351996031381300244580, 0.075039674810919952767043140916190, 0.093125454583697605535065465083366, 0.109387158802297641899210590325805, 0.123491976262065851077958109831074, 0.134709217311473325928054001771707, 0.142775938577060080797094273138717, 0.147739104901338491374841515972068, 0.149445554002916905664936468389821]")
+  wg = rxnumpy..np_array("[0.066671344308688137593568809893332, 0.149451349150580593145776339657697, 0.219086362515982043995534934228163, 0.269266719309996355091226921569469, 0.295524224714752870173892994651338]")
+  c = (a + b) / 2.0
+  h = (b - a) / 2.0
+  fc = f.f(c)
+  resk = fc * rxnumpy..np_get(wgk, 10)
+  resg = 0.0
+  resabs = fabs(resk)
+  fv1 = rxnumpy..np_zeros("11")
+  fv2 = rxnumpy..np_zeros("11")
+  do j = 0 to 9
+    dx = h * rxnumpy..np_get(xgk, j)
+    f1 = f.f(c - dx)
+    f2 = f.f(c + dx)
+    call rxnumpy..np_set(fv1, j, f1)
+    call rxnumpy..np_set(fv2, j, f2)
+    w = rxnumpy..np_get(wgk, j)
+    resk = resk + w * (f1 + f2)
+    resabs = resabs + w * (fabs(f1) + fabs(f2))
+    if j - (j % 2) * 2 = 1 then resg = resg + rxnumpy..np_get(wg, j % 2) * (f1 + f2)
+  end
+  reskh = resk * 0.5
+  resasc = rxnumpy..np_get(wgk, 10) * fabs(fc - reskh)
+  do j = 0 to 9
+    w = rxnumpy..np_get(wgk, j)
+    resasc = resasc + w * (fabs(rxnumpy..np_get(fv1, j) - reskh) + fabs(rxnumpy..np_get(fv2, j) - reskh))
+  end
+  result = resk * h
+  resabs = resabs * fabs(h)
+  resasc = resasc * fabs(h)
+  e = fabs((resk - resg) * h)
+  if resasc <> 0.0 & e <> 0.0 then e = resasc * fmin(1.0, rxscipy..sp_pow(200.0 * e / resasc, 1.5))
+  if resabs > 2.2250738585072014e-308 / (50.0 * 2.220446049250313e-16) then e = fmax(2.220446049250313e-16 * 50.0 * resabs, e)
+  err = e
+  return result
+
+sp_quad: procedure = .float
+  arg f = .sp_f1, a = .float, b = .float, epsabs = .float, epsrel = .float, limit = .int, expose abserr = .float
+  ia = rxnumpy..np_zeros(limit || "")
+  ib = rxnumpy..np_zeros(limit || "")
+  ir = rxnumpy..np_zeros(limit || "")
+  ie = rxnumpy..np_zeros(limit || "")
+  e = 0.0
+  r = gk21(f, a, b, e)
+  call rxnumpy..np_set(ia, 0, a)
+  call rxnumpy..np_set(ib, 0, b)
+  call rxnumpy..np_set(ir, 0, r)
+  call rxnumpy..np_set(ie, 0, e)
+  n = 1
+  total = r
+  toterr = e
+  do while n < limit & toterr > fmax(epsabs, epsrel * fabs(total))
+    k = rxnumpy..np_argmax(ie)
+    lo = rxnumpy..np_get(ia, k)
+    hi = rxnumpy..np_get(ib, k)
+    mid = (lo + hi) / 2.0
+    e1 = 0.0
+    e2 = 0.0
+    r1 = gk21(f, lo, mid, e1)
+    r2 = gk21(f, mid, hi, e2)
+    call rxnumpy..np_set(ib, k, mid)
+    call rxnumpy..np_set(ir, k, r1)
+    call rxnumpy..np_set(ie, k, e1)
+    call rxnumpy..np_set(ia, n, mid)
+    call rxnumpy..np_set(ib, n, hi)
+    call rxnumpy..np_set(ir, n, r2)
+    call rxnumpy..np_set(ie, n, e2)
+    n = n + 1
+    total = rxnumpy..np_sum(rxnumpy..np_slice(ir, 0, 0, n, 1))
+    toterr = rxnumpy..np_sum(rxnumpy..np_slice(ie, 0, 0, n, 1))
+  end
+  abserr = toterr
+  return total
+
+/* ------------------------------------------------------------------ helpers on vectors */
+row_of: procedure = .binary
+  arg m = .binary, i = .int, n = .int
+  v = rxnumpy..np_zeros(n || "")
+  do j = 0 to n - 1
+    call rxnumpy..np_set(v, j, rxnumpy..np_get2(m, i, j))
+  end
+  return v
+
+set_row: procedure = .int
+  arg m = .binary, i = .int, v = .binary, n = .int
+  do j = 0 to n - 1
+    call rxnumpy..np_set2(m, i, j, rxnumpy..np_get(v, j))
+  end
+  return 0
+
+/* ------------------------------------------------------------------ Nelder-Mead (scipy.optimize.minimize method='Nelder-Mead') */
+/* returns x; fval in expose; evaluations in expose nfev */
+sp_minimize_nm: procedure = .binary
+  arg f = .sp_fn, x0 = .binary, xatol = .float, fatol = .float, maxiter = .int, expose fval = .float, expose nfev = .int
+  n = rxnumpy..np_size(x0)
+  sim = rxnumpy..np_zeros((n + 1) || "," || n)
+  fsim = rxnumpy..np_zeros((n + 1) || "")
+  call set_row(sim, 0, x0, n)
+  nfev = 1
+  call rxnumpy..np_set(fsim, 0, f.f(row_of(sim, 0, n)))
+  do k = 0 to n - 1
+    y = rxnumpy..np_copy(x0)
+    if rxnumpy..np_get(y, k) <> 0.0 then call rxnumpy..np_set(y, k, 1.05 * rxnumpy..np_get(y, k))
+    else call rxnumpy..np_set(y, k, 0.00025)
+    call set_row(sim, k + 1, y, n)
+    call rxnumpy..np_set(fsim, k + 1, f.f(row_of(sim, k + 1, n)))
+    nfev = nfev + 1
+  end
+  call nm_sort(sim, fsim, n)
+  iter = 1
+  maxfun = n * 200
+  if maxiter > 0 then maxfun = maxiter
+  do while nfev < maxfun & iter < maxfun
+    big = 0.0
+    do j = 1 to n
+      do k = 0 to n - 1
+        big = fmax(big, fabs(rxnumpy..np_get2(sim, j, k) - rxnumpy..np_get2(sim, 0, k)))
+      end
+      big = fmax(big, 0.0)
+    end
+    fbig = 0.0
+    do j = 1 to n
+      fbig = fmax(fbig, fabs(rxnumpy..np_get(fsim, 0) - rxnumpy..np_get(fsim, j)))
+    end
+    if big <= xatol & fbig <= fatol then leave
+    xbar = rxnumpy..np_zeros(n || "")
+    do j = 0 to n - 1
+      s = 0.0
+      do k = 0 to n - 1
+        s = s + rxnumpy..np_get2(sim, k, j)
+      end
+      call rxnumpy..np_set(xbar, j, s / n)
+    end
+    last = row_of(sim, n, n)
+    xr = rxnumpy..np_sub(rxnumpy..np_muls(xbar, 2.0), last)
+    fxr = f.f(xr)
+    nfev = nfev + 1
+    doshrink = 0
+    if fxr < rxnumpy..np_get(fsim, 0) then do
+      xe = rxnumpy..np_sub(rxnumpy..np_muls(xbar, 3.0), rxnumpy..np_muls(last, 2.0))
+      fxe = f.f(xe)
+      nfev = nfev + 1
+      if fxe < fxr then do
+        call set_row(sim, n, xe, n)
+        call rxnumpy..np_set(fsim, n, fxe)
+      end
+      else do
+        call set_row(sim, n, xr, n)
+        call rxnumpy..np_set(fsim, n, fxr)
+      end
+    end
+    else do
+      if fxr < rxnumpy..np_get(fsim, n - 1) then do
+        call set_row(sim, n, xr, n)
+        call rxnumpy..np_set(fsim, n, fxr)
+      end
+      else do
+        if fxr < rxnumpy..np_get(fsim, n) then do
+          xc = rxnumpy..np_add(rxnumpy..np_muls(xbar, 1.5), rxnumpy..np_muls(last, -0.5))
+          fxc = f.f(xc)
+          nfev = nfev + 1
+          if fxc <= fxr then do
+            call set_row(sim, n, xc, n)
+            call rxnumpy..np_set(fsim, n, fxc)
+          end
+          else doshrink = 1
+        end
+        else do
+          xcc = rxnumpy..np_add(rxnumpy..np_muls(xbar, 0.5), rxnumpy..np_muls(last, 0.5))
+          fxcc = f.f(xcc)
+          nfev = nfev + 1
+          if fxcc < rxnumpy..np_get(fsim, n) then do
+            call set_row(sim, n, xcc, n)
+            call rxnumpy..np_set(fsim, n, fxcc)
+          end
+          else doshrink = 1
+        end
+      end
+    end
+    if doshrink = 1 then do
+      s0 = row_of(sim, 0, n)
+      do j = 1 to n
+        y = rxnumpy..np_add(s0, rxnumpy..np_muls(rxnumpy..np_sub(row_of(sim, j, n), s0), 0.5))
+        call set_row(sim, j, y, n)
+        call rxnumpy..np_set(fsim, j, f.f(y))
+        nfev = nfev + 1
+      end
+    end
+    call nm_sort(sim, fsim, n)
+    iter = iter + 1
+  end
+  fval = rxnumpy..np_get(fsim, 0)
+  return row_of(sim, 0, n)
+
+/* stable insertion sort of the simplex rows by fsim */
+nm_sort: procedure = .int
+  arg sim = .binary, fsim = .binary, n = .int
+  do i = 1 to n
+    j = i
+    do while j > 0
+      if rxnumpy..np_get(fsim, j) < rxnumpy..np_get(fsim, j - 1) then do
+        ft = rxnumpy..np_get(fsim, j)
+        call rxnumpy..np_set(fsim, j, rxnumpy..np_get(fsim, j - 1))
+        call rxnumpy..np_set(fsim, j - 1, ft)
+        ra = row_of(sim, j, n)
+        rb = row_of(sim, j - 1, n)
+        call set_row(sim, j, rb, n)
+        call set_row(sim, j - 1, ra, n)
+        j = j - 1
+      end
+      else leave
+    end
+  end
+  return 0
+
+/* ------------------------------------------------------------------ BFGS with central-difference gradient */
+num_grad: procedure = .binary
+  arg f = .sp_fn, x = .binary, n = .int
+  g = rxnumpy..np_zeros(n || "")
+  do i = 0 to n - 1
+    xi = rxnumpy..np_get(x, i)
+    h = 0.000006 * fmax(1.0, fabs(xi))
+    xp = rxnumpy..np_copy(x)
+    call rxnumpy..np_set(xp, i, xi + h)
+    xm = rxnumpy..np_copy(x)
+    call rxnumpy..np_set(xm, i, xi - h)
+    call rxnumpy..np_set(g, i, (f.f(xp) - f.f(xm)) / (2.0 * h))
+  end
+  return g
+
+sp_minimize_bfgs: procedure = .binary
+  arg f = .sp_fn, x0 = .binary, gtol = .float, maxiter = .int, expose fval = .float, expose nit = .int
+  n = rxnumpy..np_size(x0)
+  x = rxnumpy..np_copy(x0)
+  fx = f.f(x)
+  g = num_grad(f, x, n)
+  hinv = rxnumpy..np_eye(n)
+  ident = rxnumpy..np_eye(n)
+  nit = 0
+  if maxiter <= 0 then maxiter = n * 200
+  do while nit < maxiter
+    gn = 0.0
+    do i = 0 to n - 1
+      gn = fmax(gn, fabs(rxnumpy..np_get(g, i)))
+    end
+    if gn <= gtol then leave
+    p = rxnumpy..np_muls(rxnumpy..np_dot(hinv, g), -1.0)
+    slope = rxnumpy..np_sum(rxnumpy..np_mul(g, p))
+    if slope >= 0.0 then do
+      hinv = rxnumpy..np_eye(n)
+      p = rxnumpy..np_muls(g, -1.0)
+      slope = rxnumpy..np_sum(rxnumpy..np_mul(g, p))
+    end
+    /* backtracking line search with Armijo condition, expanding first */
+    alpha = 1.0
+    ok = 0
+    xn = x
+    fnew = fx
+    do ls = 1 to 60
+      xn = rxnumpy..np_add(x, rxnumpy..np_muls(p, alpha))
+      fnew = f.f(xn)
+      if fnew <= fx + 0.0001 * alpha * slope then do
+        ok = 1
+        leave
+      end
+      alpha = alpha * 0.5
+    end
+    if ok = 0 then leave
+    gnew = num_grad(f, xn, n)
+    s = rxnumpy..np_sub(xn, x)
+    y = rxnumpy..np_sub(gnew, g)
+    sy = rxnumpy..np_sum(rxnumpy..np_mul(s, y))
+    if sy > 0.0000000000000001 then do
+      rho = 1.0 / sy
+      a = rxnumpy..np_sub(ident, rxnumpy..np_muls(rxnumpy..np_outer(s, y), rho))
+      b = rxnumpy..np_sub(ident, rxnumpy..np_muls(rxnumpy..np_outer(y, s), rho))
+      hinv = rxnumpy..np_add(rxnumpy..np_dot(rxnumpy..np_dot(a, hinv), b), rxnumpy..np_muls(rxnumpy..np_outer(s, s), rho))
+    end
+    x = xn
+    fx = fnew
+    g = gnew
+    nit = nit + 1
+  end
+  fval = fx
+  return x
+
+rk_A: procedure = .binary
+  return rxnumpy..np_array("[[0.2, 0.0, 0.0, 0.0, 0.0], [0.075, 0.225, 0.0, 0.0, 0.0], [0.9777777777777777, -3.7333333333333334, 3.5555555555555554, 0.0, 0.0], [2.9525986892242035, -11.595793324188385, 9.822892851699436, -0.2908093278463649, 0.0], [2.8462752525252526, -10.757575757575758, 8.906422717743473, 0.2784090909090909, -0.2735313036020583]]")
+
+rk_B: procedure = .binary
+  return rxnumpy..np_array("[0.09114583333333333, 0.0, 0.44923629829290207, 0.6510416666666666, -0.322376179245283, 0.13095238095238096, 0.0]")
+
+rk_E: procedure = .binary
+  return rxnumpy..np_array("[-0.0012326388888888888, 0.0, 0.0042527702905061394, -0.03697916666666667, 0.05086379716981132, -0.0419047619047619, 0.025]")
+
+rk_C: procedure = .binary
+  return rxnumpy..np_array("[0.0, 0.2, 0.3, 0.8, 0.8888888888888888, 1.0]")
+
+rk_P: procedure = .binary
+  return rxnumpy..np_array("[[1.0, -2.8535800653862835, 3.0717434641059005, -1.1270175653862835], [0.0, 0.0, 0.0, 0.0], [0.0, 4.023133379230305, -6.249321565289, 2.675424484351598], [0.0, -3.7324019615885042, 10.068970589843675, -5.685526961588504], [0.0, 2.5548038301849423, -6.399112377351017, 3.5219323679207912], [0.0, -1.3744241142186024, 3.272657752246729, -1.7672812570757455], [0.0, 1.3824689317781436, -3.764937863556287, 2.382468931778144]]")
+
+rms: procedure = .float
+  arg v = .binary
+  return rxnumpy..np_norm(v) / rxscipy..sp_sqrt(rxnumpy..np_size(v) + 0.0)
+
+/* linear combination sum_j w[j] * K[j] (j < cnt) of the rows of K */
+lincomb: procedure = .binary
+  arg k = .binary, w = .binary, cnt = .int, n = .int
+  acc = rxnumpy..np_zeros(n || "")
+  do j = 0 to cnt - 1
+    wj = rxnumpy..np_get(w, j)
+    if wj <> 0.0 then acc = rxnumpy..np_add(acc, rxnumpy..np_muls(row_of(k, j, n), wj))
+  end
+  return acc
+
+/* RK45 (Dormand-Prince) as scipy.integrate.solve_ivp(method='RK45') incl. 4th-order dense output.
+ * t_eval: ascending (or descending for t1 < t0) times, or an empty array (size 0) to get every step.
+ * returns y with shape (n, m); tout receives the m times; nfev the number of rhs evaluations. */
+sp_solve_ivp: procedure = .binary
+  arg f = .sp_ode, t0 = .float, t1 = .float, y0 = .binary, t_eval = .binary, rtol = .float, atol = .float, expose tout = .binary, expose nfev = .int
+  n = rxnumpy..np_size(y0)
+  ma = rk_A()
+  mb = rk_B()
+  me = rk_E()
+  mc = rk_C()
+  mp = rk_P()
+  direction = 1.0
+  if t1 < t0 then direction = -1.0
+  t = t0
+  y = rxnumpy..np_copy(y0)
+  f0 = f.rhs(t, y)
+  nfev = 1
+  /* initial step (scipy select_initial_step, order 4) */
+  scale = rxnumpy..np_adds(rxnumpy..np_muls(rxnumpy..np_abs(y), rtol), atol)
+  d0 = rms(rxnumpy..np_div(y, scale))
+  d1 = rms(rxnumpy..np_div(f0, scale))
+  if d0 < 0.00001 | d1 < 0.00001 then h0 = 0.000001
+  else h0 = 0.01 * d0 / d1
+  y1 = rxnumpy..np_add(y, rxnumpy..np_muls(f0, h0 * direction))
+  f1 = f.rhs(t + h0 * direction, y1)
+  nfev = nfev + 1
+  d2 = rms(rxnumpy..np_div(rxnumpy..np_sub(f1, f0), scale)) / h0
+  if d1 <= 0.000000000000001 & d2 <= 0.000000000000001 then h1 = fmax(0.000001, h0 * 0.001)
+  else h1 = rxscipy..sp_pow(0.01 / fmax(d1, d2), 0.2)
+  hab = fmin(fmin(100.0 * h0, h1), fabs(t1 - t0))
+  K = rxnumpy..np_zeros("7," || n)
+  call set_row(K, 0, f0, n)
+  fk = f0
+  m = rxnumpy..np_size(t_eval)
+  every = 0
+  if m = 0 then every = 1
+  cap = m
+  if every = 1 then cap = 20000
+  out = rxnumpy..np_zeros(cap || "," || n)
+  tt = rxnumpy..np_zeros(cap || "")
+  idx = 0
+  if every = 1 then do
+    call set_row(out, 0, y, n)
+    call rxnumpy..np_set(tt, 0, t)
+    idx = 1
+  end
+  rejected = 0
+  done = 0
+  do while done = 0
+    told = t
+    yold = y
+    ok = 0
+    rejected = 0
+    ynew = y
+    knew = fk
+    tnew = t
+    h = 0.0
+    do while ok = 0
+      h = hab * direction
+      tnew = t + h
+      if direction * (tnew - t1) > 0.0 then tnew = t1
+      h = tnew - t
+      hab = fabs(h)
+      call set_row(K, 0, fk, n)
+      do s = 1 to 5
+        dy = rxnumpy..np_zeros(n || "")
+        do j = 0 to s - 1
+          dy = rxnumpy..np_add(dy, rxnumpy..np_muls(row_of(K, j, n), rxnumpy..np_get2(ma, s - 1, j)))
+        end
+        ys = rxnumpy..np_add(y, rxnumpy..np_muls(dy, h))
+        call set_row(K, s, f.rhs(t + rxnumpy..np_get(mc, s) * h, ys), n)
+        nfev = nfev + 1
+      end
+      ynew = rxnumpy..np_add(y, rxnumpy..np_muls(lincomb(K, mb, 6, n), h))
+      knew = f.rhs(tnew, ynew)
+      nfev = nfev + 1
+      call set_row(K, 6, knew, n)
+      sc2 = rxnumpy..np_adds(rxnumpy..np_muls(rxnumpy..np_maximum(rxnumpy..np_abs(y), rxnumpy..np_abs(ynew)), rtol), atol)
+      en = rms(rxnumpy..np_div(rxnumpy..np_muls(lincomb(K, me, 7, n), h), sc2))
+      if en < 1.0 then do
+        if en = 0.0 then fac = 10.0
+        else fac = fmin(10.0, 0.9 * rxscipy..sp_pow(en, -0.2))
+        if rejected = 1 then fac = fmin(1.0, fac)
+        hab = hab * fac
+        ok = 1
+      end
+      else do
+        hab = hab * fmax(0.2, 0.9 * rxscipy..sp_pow(en, -0.2))
+        rejected = 1
+        if hab < 0.00000000000001 * fmax(1.0, fabs(t)) then signal failure "step size too small"
+      end
+    end
+    t = tnew
+    y = ynew
+    fk = knew
+    if every = 1 then do
+      if idx >= cap then signal out_of_range "too many steps"
+      call set_row(out, idx, y, n)
+      call rxnumpy..np_set(tt, idx, t)
+      idx = idx + 1
+    end
+    else do
+      q = rxnumpy..np_dot(rxnumpy..np_transpose(K), mp)
+      do while idx < m
+        te = rxnumpy..np_get(t_eval, idx)
+        if direction * (te - t) > 0.0 then leave
+        x = (te - told) / h
+        pv = rxnumpy..np_array("[" || x || "," || (x * x) || "," || (x * x * x) || "," || (x * x * x * x) || "]")
+        yq = rxnumpy..np_add(yold, rxnumpy..np_muls(rxnumpy..np_dot(q, pv), h))
+        call set_row(out, idx, yq, n)
+        call rxnumpy..np_set(tt, idx, te)
+        idx = idx + 1
+      end
+    end
+    if t = t1 then done = 1
+  end
+  if every = 1 then do
+    tout = rxnumpy..np_slice(tt, 0, 0, idx, 1)
+    return rxnumpy..np_transpose(rxnumpy..np_slice(out, 0, 0, idx, 1))
+  end
+  tout = tt
+  return rxnumpy..np_transpose(out)
+
+/* ------------------------------------------------------------------ curve_fit: Levenberg-Marquardt, numeric Jacobian */
+resid: procedure = .binary
+  arg f = .sp_model, x = .binary, y = .binary, p = .binary, m = .int
+  r = rxnumpy..np_zeros(m || "")
+  do i = 0 to m - 1
+    call rxnumpy..np_set(r, i, f.f(rxnumpy..np_get(x, i), p) - rxnumpy..np_get(y, i))
+  end
+  return r
+
+/* returns p; pcov (n,n) covariance as scipy curve_fit; cost = sum of squared residuals */
+sp_curve_fit: procedure = .binary
+  arg f = .sp_model, x = .binary, y = .binary, p0 = .binary, maxiter = .int, expose pcov = .binary, expose cost = .float
+  m = rxnumpy..np_size(x)
+  n = rxnumpy..np_size(p0)
+  p = rxnumpy..np_copy(p0)
+  if maxiter <= 0 then maxiter = 400
+  lam = 0.001
+  r = resid(f, x, y, p, m)
+  cost = rxnumpy..np_sum(rxnumpy..np_square(r))
+  J = rxnumpy..np_zeros(m || "," || n)
+  jtj = rxnumpy..np_zeros(n || "," || n)
+  do it = 1 to maxiter
+    do k = 0 to n - 1
+      pk = rxnumpy..np_get(p, k)
+      h = 0.000006 * fmax(1.0, fabs(pk))
+      pp = rxnumpy..np_copy(p)
+      call rxnumpy..np_set(pp, k, pk + h)
+      pm = rxnumpy..np_copy(p)
+      call rxnumpy..np_set(pm, k, pk - h)
+      do i = 0 to m - 1
+        xi = rxnumpy..np_get(x, i)
+        call rxnumpy..np_set2(J, i, k, (f.f(xi, pp) - f.f(xi, pm)) / (2.0 * h))
+      end
+    end
+    jtj = rxnumpy..np_dot(rxnumpy..np_transpose(J), J)
+    g = rxnumpy..np_dot(rxnumpy..np_transpose(J), r)
+    improved = 0
+    conv = 0
+    do tries = 1 to 40
+      a = rxnumpy..np_copy(jtj)
+      do k = 0 to n - 1
+        call rxnumpy..np_set2(a, k, k, rxnumpy..np_get2(jtj, k, k) * (1.0 + lam) + 0.000000000000000000001)
+      end
+      delta = rxnumpy..np_solve(a, rxnumpy..np_muls(g, -1.0))
+      pn = rxnumpy..np_add(p, delta)
+      rn = resid(f, x, y, pn, m)
+      cn = rxnumpy..np_sum(rxnumpy..np_square(rn))
+      if cn < cost then do
+        if cost - cn <= 0.000000000000001 * cost | rxnumpy..np_norm(delta) <= 0.000000000001 * (rxnumpy..np_norm(p) + 0.000000000001) then conv = 1
+        p = pn
+        r = rn
+        cost = cn
+        lam = fmax(lam / 10.0, 0.000000000001)
+        improved = 1
+        leave
+      end
+      lam = lam * 10.0
+    end
+    if improved = 0 | conv = 1 then leave
+  end
+  /* final Jacobian for the covariance */
+  do k = 0 to n - 1
+    pk = rxnumpy..np_get(p, k)
+    h = 0.000006 * fmax(1.0, fabs(pk))
+    pp = rxnumpy..np_copy(p)
+    call rxnumpy..np_set(pp, k, pk + h)
+    pm = rxnumpy..np_copy(p)
+    call rxnumpy..np_set(pm, k, pk - h)
+    do i = 0 to m - 1
+      xi = rxnumpy..np_get(x, i)
+      call rxnumpy..np_set2(J, i, k, (f.f(xi, pp) - f.f(xi, pm)) / (2.0 * h))
+    end
+  end
+  pcov = rxnumpy..np_muls(rxnumpy..np_inv(rxnumpy..np_dot(rxnumpy..np_transpose(J), J)), cost / (m - n + 0.0))
+  return p

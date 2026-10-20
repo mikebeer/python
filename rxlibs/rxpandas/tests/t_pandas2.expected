@@ -1,0 +1,74 @@
+gb2 rows 5
+  region ['E', 'E', 'N', 'W', 'W']
+  prod ['a', 'b', 'b', 'a', 'b']
+  units [12, 2, 1, 3, 8]
+gb2mean rows 5
+  region ['E', 'E', 'N', 'W', 'W']
+  prod ['a', 'b', 'b', 'a', 'b']
+  price [1.25, 3.0, 4.0, 2.5, 0.5]
+sort2 rows 6
+  id ['r5', 'r1', 'r3', 'r6', 'r4', 'r2']
+  region ['E', 'E', 'E', 'N', 'W', 'W']
+  prod ['a', 'a', 'b', 'b', 'b', 'a']
+  units [7, 5, 2, 1, 8, 3]
+  price [1.0, 1.5, 3.0, 4.0, 0.5, 2.5]
+sort3 rows 6
+  id ['r4', 'r3', 'r6', 'r5', 'r1', 'r2']
+  region ['W', 'E', 'N', 'E', 'E', 'W']
+  prod ['b', 'b', 'b', 'a', 'a', 'a']
+  units [8, 2, 1, 7, 5, 3]
+  price [0.5, 3.0, 4.0, 1.0, 1.5, 2.5]
+m_inner rows 5
+  region ['E', 'W', 'E', 'W', 'E']
+  units [5, 3, 2, 8, 7]
+  mgr [10.0, 20.0, 10.0, 20.0, 10.0]
+m_left rows 6
+  region ['E', 'W', 'E', 'W', 'E', 'N']
+  units [5, 3, 2, 8, 7, 1]
+  mgr [10.0, 20.0, 10.0, 20.0, 10.0, nan]
+m_right rows 6
+  region ['E', 'E', 'E', 'W', 'W', 'S']
+  units [5.0, 2.0, 7.0, 3.0, 8.0, nan]
+  mgr [10.0, 10.0, 10.0, 20.0, 20.0, 30.0]
+m_outer rows 7
+  region ['E', 'E', 'E', 'N', 'S', 'W', 'W']
+  units [5.0, 2.0, 7.0, 1.0, nan, 3.0, 8.0]
+  mgr [10.0, 10.0, 10.0, nan, 30.0, 20.0, 20.0]
+vc rows 3
+  region ['E', 'W', 'N']
+  count [3, 2, 1]
+vc_prod rows 2
+  prod ['a', 'b']
+  count [3, 3]
+pivot rows 3
+  region ['E', 'N', 'W']
+  a [12.0, nan, 3.0]
+  b [2.0, 1.0, 8.0]
+pivot_mean rows 3
+  region ['E', 'N', 'W']
+  a [1.25, nan, 2.5]
+  b [3.0, 4.0, 0.5]
+range_index 0,1,2,3,4,5 3
+filter_index 0,3,4
+sorted_index 5,2,1,0,4,3
+set_index r1,r2,r3,r4,r5,r6 4 2 -1
+loc_value 8
+sorted_labelled r4,r5,r1,r2,r3,r6
+reset rows 6
+  id ['r1', 'r2', 'r3', 'r4', 'r5', 'r6']
+  region ['E', 'W', 'E', 'W', 'E', 'N']
+  prod ['a', 'a', 'b', 'b', 'a', 'b']
+  units [5, 3, 2, 8, 7, 1]
+  price [1.5, 2.5, 3.0, 0.5, 1.0, 4.0]
+reset_drop 4 0,1,2,3,4,5
+datetime rows 6
+  ts [1706659200.0, 1703511910.0, 1709251199.0, 946598400.0, 951868800.0, 1720051200.0]
+  year [2024, 2023, 2024, 1999, 2000, 2024]
+  month [1, 12, 2, 12, 3, 7]
+  day [31, 25, 29, 31, 1, 4]
+  dow [2, 0, 3, 4, 2, 3]
+  doy [31, 359, 60, 365, 61, 186]
+  hour [0, 13, 23, 0, 0, 0]
+  second [0, 10, 59, 0, 0, 0]
+scalar 946684800 1 60
+signal INVALID_ARGUMENTS cannot parse datetime

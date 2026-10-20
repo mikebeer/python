@@ -1,0 +1,109 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+import rxscipy
+import rxspalg
+
+cube: class implements .sp_f1
+  *: factory
+    return
+  f: method = .float
+  arg x = .float
+  return x * x * x - 2.0 * x - 5.0
+
+cosm: class implements .sp_f1d
+  *: factory
+    return
+  f: method = .float
+  arg x = .float
+  return rxscipy..sp_cos(x) - x
+  df: method = .float
+  arg x = .float
+  return 0.0 - rxscipy..sp_sin(x) - 1.0
+
+gauss: class implements .sp_f1
+  *: factory
+    return
+  f: method = .float
+  arg x = .float
+  return rxscipy..sp_exp(0.0 - x * x)
+
+osc: class implements .sp_f1
+  *: factory
+    return
+  f: method = .float
+  arg x = .float
+  return rxscipy..sp_sin(10.0 * x) * x + 1.0
+
+ross: class implements .sp_fn
+  *: factory
+    return
+  f: method = .float
+  arg x = .binary
+  a = rxnumpy..np_get(x, 0)
+  b = rxnumpy..np_get(x, 1)
+  return (1.0 - a) * (1.0 - a) + 100.0 * (b - a * a) * (b - a * a)
+
+quadf: class implements .sp_fn
+  *: factory
+    return
+  f: method = .float
+  arg x = .binary
+  a = rxnumpy..np_get(x, 0)
+  b = rxnumpy..np_get(x, 1)
+  return (a - 3.0) * (a - 3.0) + 2.0 * (b + 1.0) * (b + 1.0) + a * b
+
+decay: class implements .sp_ode
+  *: factory
+    return
+  rhs: method = .binary
+  arg t = .float, y = .binary
+  return rxnumpy..np_array("[" || (0.0 - 0.5 * rxnumpy..np_get(y, 0)) || "," || (rxnumpy..np_get(y, 0) - rxnumpy..np_get(y, 1)) || "]")
+
+expm: class implements .sp_model
+  *: factory
+    return
+  f: method = .float
+  arg x = .float, p = .binary
+  return rxnumpy..np_get(p, 0) * rxscipy..sp_exp(0.0 - rxnumpy..np_get(p, 1) * x) + rxnumpy..np_get(p, 2)
+
+r9: procedure = .string
+  arg x = .float
+  return rxnumpy..np_tolist(rxnumpy..np_round(rxnumpy..np_muls(rxnumpy..np_scalar(x), 1000000.0)))
+
+v6: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000.0)), 1000000.0))
+
+main: procedure = .int
+  say "brentq" v6(rxnumpy..np_scalar(rxspalg..sp_brentq(.cube(), 2.0, 3.0, 0.000000000002, 0.000000000000000888, 100)))
+  say "newton_d" v6(rxnumpy..np_scalar(rxspalg..sp_newton_d(.cosm(), 1.0, 0.0000000001, 50)))
+  say "secant" v6(rxnumpy..np_scalar(rxspalg..sp_newton(.cube(), 2.0, 0.00000001, 50)))
+  err = 0.0
+  say "quad_gauss" v6(rxnumpy..np_scalar(rxspalg..sp_quad(.gauss(), -2.0, 3.0, 0.00000001, 0.00000001, 200, err)))
+  say "quad_osc" v6(rxnumpy..np_scalar(rxspalg..sp_quad(.osc(), 0.0, 4.0, 0.00000001, 0.00000001, 200, err)))
+  fv = 0.0
+  nf = 0
+  x0 = rxnumpy..np_array("[-1.2, 1.0]")
+  xm = rxspalg..sp_minimize_nm(.ross(), x0, 0.00000001, 0.00000001, 0, fv, nf)
+  say "nm_rosen" v6(xm) v6(rxnumpy..np_scalar(fv))
+  xm = rxspalg..sp_minimize_nm(.quadf(), rxnumpy..np_array("[0.0, 0.0]"), 0.0000001, 0.0000001, 0, fv, nf)
+  say "nm_quad" v6(xm) v6(rxnumpy..np_scalar(fv))
+  nit = 0
+  xb = rxspalg..sp_minimize_bfgs(.ross(), x0, 0.00000001, 0, fv, nit)
+  say "bfgs_rosen" v6(xb) v6(rxnumpy..np_scalar(fv))
+  xb = rxspalg..sp_minimize_bfgs(.quadf(), rxnumpy..np_array("[0.0, 0.0]"), 0.00000001, 0, fv, nit)
+  say "bfgs_quad" v6(xb) v6(rxnumpy..np_scalar(fv))
+  te = rxnumpy..np_array("[0.0, 0.5, 1.0, 2.5, 4.0]")
+  tout = rxnumpy..np_zeros("1")
+  nf = 0
+  ys = rxspalg..sp_solve_ivp(.decay(), 0.0, 4.0, rxnumpy..np_array("[1.0, 0.0]"), te, 0.0000000001, 0.000000000001, tout, nf)
+  say "ivp" v6(ys)
+  ys = rxspalg..sp_solve_ivp(.decay(), 0.0, 4.0, rxnumpy..np_array("[1.0, 0.0]"), rxnumpy..np_zeros("0"), 0.001, 0.000001, tout, nf)
+  say "ivp_default_steps" rxnumpy..np_size(tout) v6(rxnumpy..np_slice(ys, 1, 0, 3, 1)) v6(rxnumpy..np_slice(tout, 0, 0, 3, 1))
+  xd = rxnumpy..np_array("[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]")
+  yd = rxnumpy..np_array("[5.2, 3.9, 3.0, 2.5, 2.1, 1.9, 1.6, 1.55, 1.4]")
+  pcov = rxnumpy..np_zeros("1")
+  pf = rxspalg..sp_curve_fit(.expm(), xd, yd, rxnumpy..np_array("[4.0, 1.0, 1.0]"), 0, pcov, fv)
+  say "curve_fit" v6(pf) v6(rxnumpy..np_sqrt(rxnumpy..np_array("[" || rxnumpy..np_get2(pcov, 0, 0) || "," || rxnumpy..np_get2(pcov, 1, 1) || "," || rxnumpy..np_get2(pcov, 2, 2) || "]")))
+  return 0

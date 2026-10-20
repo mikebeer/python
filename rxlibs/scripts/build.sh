@@ -11,7 +11,7 @@ GEN=${CREXX_GENERATED:-$CREXX_ROOT/cmake-build-release/generated}
 C="$HERE/core"
 mkdir -p "$OUT" || exit 1
 [ $# -eq 0 ] && set -- rxnumpy rxscipy rxpandas
-NPCORE="$C/rxnp.c $C/rxnp_la.c $C/rxnp_lapack.c $C/rxnp_fft.c $C/rxnp_rng.c"
+NPCORE="$C/rxnp.c $C/rxnp_la.c $C/rxnp_lapack.c $C/rxnp_fft.c $C/rxnp_rng.c $C/rxnp_pcg.c $C/rxnp_idx.c"
 for p in "$@"; do
   case $p in
     rxnumpy)  SRC="$HERE/rxnumpy/plugin/rxnumpy.c $NPCORE" ;;

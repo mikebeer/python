@@ -1,0 +1,90 @@
+options levelb floats_binary
+import rxnumpy
+import rxpandas
+
+rr: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000000.0)), 1000000000.0))
+
+show: procedure = .int
+  arg label = .string, df = .binary
+  say label "rows" rxpandas..pd_nrows(df)
+  do c = 0 to rxpandas..pd_ncols(df) - 1
+    name = rxpandas..pd_colname(df, c)
+    if rxpandas..pd_isstr(df, name) = 1 then do
+      s = "["
+      do r = 0 to rxpandas..pd_nrows(df) - 1
+        if r > 0 then s = s || ", "
+        s = s || "'" || rxpandas..pd_gets(df, name, r) || "'"
+      end
+      say " " name s || "]"
+    end
+    else do
+      col = rxpandas..pd_col(df, name)
+      if rxnumpy..np_isint(col) = 1 then say " " name rxnumpy..np_tolist(col)
+      else say " " name rr(col)
+    end
+  end
+  return 0
+
+labels: procedure = .string
+  arg df = .binary
+  s = ""
+  do r = 0 to rxpandas..pd_nrows(df) - 1
+    if r > 0 then s = s || ","
+    s = s || rxpandas..pd_index_label(df, r)
+  end
+  return s
+
+main: procedure = .int
+  df = rxpandas..pd_new()
+  call rxpandas..pd_add_str_col(df, "id", "r1,r2,r3,r4,r5,r6")
+  call rxpandas..pd_add_str_col(df, "region", "E,W,E,W,E,N")
+  call rxpandas..pd_add_str_col(df, "prod", "a,a,b,b,a,b")
+  call rxpandas..pd_add_col(df, "units", rxnumpy..np_array("[5, 3, 2, 8, 7, 1]"))
+  call rxpandas..pd_add_col(df, "price", rxnumpy..np_array("[1.5, 2.5, 3.0, 0.5, 1.0, 4.0]"))
+  ignore = show("gb2", rxpandas..pd_groupby_multi(df, "region,prod", "units", "sum"))
+  ignore = show("gb2mean", rxpandas..pd_groupby_multi(df, "region,prod", "price", "mean"))
+  ignore = show("sort2", rxpandas..pd_sort_multi(df, "region,units", "1,0"))
+  ignore = show("sort3", rxpandas..pd_sort_multi(df, "prod,price", "0,1"))
+  mg = rxpandas..pd_new()
+  call rxpandas..pd_add_str_col(mg, "region", "E,W,S")
+  call rxpandas..pd_add_col(mg, "mgr", rxnumpy..np_array("[10.0, 20.0, 30.0]"))
+  sm = rxpandas..pd_select(df, "region,units")
+  ignore = show("m_inner", rxpandas..pd_merge(sm, mg, "region", "inner"))
+  ignore = show("m_left", rxpandas..pd_merge(sm, mg, "region", "left"))
+  ignore = show("m_right", rxpandas..pd_merge(sm, mg, "region", "right"))
+  ignore = show("m_outer", rxpandas..pd_merge(sm, mg, "region", "outer"))
+  ignore = show("vc", rxpandas..pd_value_counts(df, "region"))
+  ignore = show("vc_prod", rxpandas..pd_value_counts(df, "prod"))
+  ignore = show("pivot", rxpandas..pd_pivot(df, "region", "prod", "units", "sum"))
+  ignore = show("pivot_mean", rxpandas..pd_pivot(df, "region", "prod", "price", "mean"))
+  say "range_index" labels(df) rxpandas..pd_loc(df, "3")
+  big = rxpandas..pd_filter(df, "units", ">", "3")
+  say "filter_index" labels(big)
+  say "sorted_index" labels(rxpandas..pd_sort(df, "units", 1))
+  ix = rxpandas..pd_set_index(df, "id")
+  say "set_index" labels(ix) rxpandas..pd_ncols(ix) rxpandas..pd_loc(ix, "r3") rxpandas..pd_loc(ix, "zz")
+  say "loc_value" rxpandas..pd_get(ix, "units", rxpandas..pd_loc(ix, "r4"))
+  say "sorted_labelled" labels(rxpandas..pd_sort(ix, "units", 0))
+  ignore = show("reset", rxpandas..pd_reset_index(ix, 0))
+  say "reset_drop" rxpandas..pd_ncols(rxpandas..pd_reset_index(ix, 1)) labels(rxpandas..pd_reset_index(ix, 1))
+  dt = rxpandas..pd_new()
+  call rxpandas..pd_add_str_col(dt, "when", "2024-01-31,2023-12-25 13:45:10,2024-02-29T23:59:59,1999-12-31,2000-03-01 00:00:00,2024-07-04")
+  call rxpandas..pd_to_datetime(dt, "when", "ts")
+  call rxpandas..pd_dt_part(dt, "ts", "year", "year")
+  call rxpandas..pd_dt_part(dt, "ts", "month", "month")
+  call rxpandas..pd_dt_part(dt, "ts", "day", "day")
+  call rxpandas..pd_dt_part(dt, "ts", "dow", "dow")
+  call rxpandas..pd_dt_part(dt, "ts", "doy", "doy")
+  call rxpandas..pd_dt_part(dt, "ts", "hour", "hour")
+  call rxpandas..pd_dt_part(dt, "ts", "second", "second")
+  ignore = show("datetime", rxpandas..pd_select(dt, "ts,year,month,day,dow,doy,hour,second"))
+  say "scalar" rxpandas..pd_parse_datetime("2000-01-01") rxpandas..pd_datetime_part(951782400.0, "dow") rxpandas..pd_datetime_part(951782400.0, "doy")
+  do
+    x = rxpandas..pd_parse_datetime("not a date")
+    say "FAIL: no signal"
+    on signal invalid_arguments as problem
+      say "signal INVALID_ARGUMENTS" problem.message()
+  end
+  return 0

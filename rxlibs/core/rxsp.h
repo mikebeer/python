@@ -19,4 +19,6 @@ rxnp  *rxsp_polyval(const rxnp *c, const rxnp *x);
 int    rxsp_pearsonr(const rxnp *x, const rxnp *y, double *r, double *p);
 int    rxsp_ttest_ind(const rxnp *a, const rxnp *b, double *t, double *p);   /* equal variance */
 const char *rxsp_error(void);
+/* cubic spline (scipy CubicSpline): bc 0 = not-a-knot, 1 = natural; deriv 0..2; extrapolates with the end polynomials */
+rxnp *rxsp_cubic_spline(const rxnp *x, const rxnp *y, int natural, const rxnp *xnew, int deriv);
 #endif

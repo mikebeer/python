@@ -5,6 +5,7 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "crexxpa.h"
 #include "rxsp.h"
 
@@ -35,6 +36,10 @@ static int publish(rxpa_attribute_value dest, rxnp *a) { return rxl_publish(dest
 SCALAR1(f_erf, rxsp_erf(x)) SCALAR1(f_erfc, rxsp_erfc(x)) SCALAR1(f_gamma, rxsp_gamma(x))
 SCALAR1(f_lgamma, rxsp_lgamma(x)) SCALAR1(f_normpdf, rxsp_norm_pdf(x)) SCALAR1(f_normcdf, rxsp_norm_cdf(x))
 SCALAR1(f_normppf, rxsp_norm_ppf(x))
+SCALAR1(f_sqrt, sqrt(x)) SCALAR1(f_exp, exp(x)) SCALAR1(f_log, log(x)) SCALAR1(f_fabs, fabs(x))
+SCALAR1(f_sin, sin(x)) SCALAR1(f_cos, cos(x)) SCALAR1(f_floor, floor(x))
+PROCEDURE(f_pow) { ARGCHK(2); RETURNFLOAT(pow(GETFLOAT(ARG0), GETFLOAT(ARG1))); RESETSIGNAL }
+PROCEDURE(f_isfinite) { double x; ARGCHK(1); x = GETFLOAT(ARG0); RETURNINT((x == x && x - x == 0.0) ? 1 : 0); RESETSIGNAL }
 PROCEDURE(f_tcdf) { ARGCHK(2); RETURNFLOAT(rxsp_t_cdf(GETFLOAT(ARG0), GETFLOAT(ARG1))); RESETSIGNAL }
 PROCEDURE(f_betainc) { ARGCHK(3); RETURNFLOAT(rxsp_betainc(GETFLOAT(ARG0), GETFLOAT(ARG1), GETFLOAT(ARG2))); RESETSIGNAL }
 PROCEDURE(f_trapz) { rxnp *y, *x, *r; double v; ARGCHK(2); NEED(0, y); NEED(1, x);
@@ -47,6 +52,8 @@ PROCEDURE(f_simpson) { rxnp *y, *x, *r; double v; ARGCHK(2); NEED(0, y); NEED(1,
     r = rxsp_simpson(y, x); if (!r) RETURNSIGNAL(SIGNAL_INVALID_ARGUMENTS, rxsp_error())
     v = r->f[0]; rxnp_release(r); RETURNFLOAT(v); RESETSIGNAL }
 PROCEDURE(f_interp) { rxnp *x, *xp, *fp; ARGCHK(3); NEED(0, x); NEED(1, xp); NEED(2, fp); RETARR(rxsp_interp(x, xp, fp)) }
+PROCEDURE(f_cspline) { rxnp *x, *y, *xn; ARGCHK(5); NEED(0, x); NEED(1, y); NEED(2, xn);
+    RETARR(rxsp_cubic_spline(x, y, (int)GETINT(ARG3), xn, (int)GETINT(ARG4))) }
 PROCEDURE(f_polyfit) { rxnp *x, *y; ARGCHK(3); NEED(0, x); NEED(1, y); RETARR(rxsp_polyfit(x, y, (int)GETINT(ARG2))) }
 PROCEDURE(f_polyval) { rxnp *c, *x; ARGCHK(2); NEED(0, c); NEED(1, x); RETARR(rxsp_polyval(c, x)) }
 PROCEDURE(f_pearsonr) { rxnp *x, *y; double r, p; ARGCHK(4); NEED(0, x); NEED(1, y);
@@ -58,6 +65,10 @@ PROCEDURE(f_ttest) { rxnp *x, *y; double t, p; ARGCHK(4); NEED(0, x); NEED(1, y)
 
 #define P(f, name, ret, args) ADDPROC(f, "rxscipy." name, "b", ret, args);
 LOADFUNCS
+P(f_sqrt,"sp_sqrt",".float","x = .float") P(f_exp,"sp_exp",".float","x = .float") P(f_log,"sp_log",".float","x = .float")
+P(f_fabs,"sp_fabs",".float","x = .float") P(f_sin,"sp_sin",".float","x = .float") P(f_cos,"sp_cos",".float","x = .float")
+P(f_floor,"sp_floor",".float","x = .float") P(f_pow,"sp_pow",".float","x = .float, y = .float")
+P(f_isfinite,"sp_isfinite",".int","x = .float")
 P(f_erf,"sp_erf",".float","x = .float") P(f_erfc,"sp_erfc",".float","x = .float")
 P(f_gamma,"sp_gamma",".float","x = .float") P(f_lgamma,"sp_lgamma",".float","x = .float")
 P(f_normpdf,"sp_norm_pdf",".float","x = .float") P(f_normcdf,"sp_norm_cdf",".float","x = .float")
@@ -66,6 +77,7 @@ P(f_betainc,"sp_betainc",".float","a = .float, b = .float, x = .float")
 P(f_trapz,"sp_trapz",".float","y = .binary, x = .binary") P(f_trapz1,"sp_trapz_unit",".float","y = .binary")
 P(f_simpson,"sp_simpson",".float","y = .binary, x = .binary")
 P(f_interp,"sp_interp",".binary","x = .binary, xp = .binary, fp = .binary")
+P(f_cspline,"sp_cubic_spline",".binary","x = .binary, y = .binary, xnew = .binary, natural = .int, deriv = .int")
 P(f_polyfit,"sp_polyfit",".binary","x = .binary, y = .binary, deg = .int")
 P(f_polyval,"sp_polyval",".binary","c = .binary, x = .binary")
 P(f_pearsonr,"sp_pearsonr",".int","x = .binary, y = .binary, expose r = .float, expose p = .float")

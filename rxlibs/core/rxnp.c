@@ -17,6 +17,7 @@ static char rxnp_errbuf[160];
 static int fail(const char *m) { strncpy(rxnp_errbuf, m, sizeof rxnp_errbuf - 1); return 0; }
 static void *failp(const char *m) { fail(m); return NULL; }
 const char *rxnp_error(void) { return rxnp_errbuf; }
+void rxnp_seterror(const char *m) { fail(m); }
 
 /* ------------------------------------------------------------------ lifetime */
 static long prod_shape(int nd, const long *sh) { long s = 1; int k; for (k = 0; k < nd; k++) s *= sh[k]; return s; }

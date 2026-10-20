@@ -100,4 +100,39 @@ long  rxnp_rng_randint(rxnp_rng *g, long low, long high);        /* [low, high) 
 rxnp *rxnp_rand(rxnp_rng *g, const char *shape);
 rxnp *rxnp_randn(rxnp_rng *g, const char *shape);
 rxnp *rxnp_randint(rxnp_rng *g, long low, long high, const char *shape);
+
+/* random: numpy.random.default_rng() (SeedSequence + PCG64 + ziggurat), bit-exact with numpy; rxnp_pcg.c */
+typedef struct rxnp_gen rxnp_gen;
+rxnp_gen *rxnp_gen_new(unsigned long seed);                     /* refs = 1 */
+rxnp_gen *rxnp_gen_new_array(const rxnp *seed_words);           /* int64 array entropy */
+rxnp_gen *rxnp_gen_retain(rxnp_gen *g);
+void  rxnp_gen_release(rxnp_gen *g);
+double rxnp_gen_random(rxnp_gen *g);
+double rxnp_gen_normal(rxnp_gen *g);
+double rxnp_gen_exponential(rxnp_gen *g);
+long  rxnp_gen_integer1(rxnp_gen *g, long low, long high);       /* [low, high) */
+rxnp *rxnp_gen_random_arr(rxnp_gen *g, const char *shape);
+rxnp *rxnp_gen_normal_arr(rxnp_gen *g, double loc, double scale, const char *shape);
+rxnp *rxnp_gen_exponential_arr(rxnp_gen *g, double scale, const char *shape);
+rxnp *rxnp_gen_integers(rxnp_gen *g, long low, long high, const char *shape);
+int   rxnp_gen_shuffle(rxnp_gen *g, rxnp *a);                    /* in place, first axis */
+rxnp *rxnp_gen_permutation(rxnp_gen *g, long n);
+rxnp *rxnp_gen_choice(rxnp_gen *g, const rxnp *a, long size, int replace);
+
+/* indexing / joining / comparison / n-d products (rxnp_idx.c).  Masks are int64 arrays (0 = false). */
+void  rxnp_seterror(const char *msg);
+enum { RXNP_GT, RXNP_LT, RXNP_GE, RXNP_LE, RXNP_EQ, RXNP_NE };
+rxnp *rxnp_cmp(int op, const rxnp *a, const rxnp *b);            /* broadcasting; result int64 0/1 */
+rxnp *rxnp_take(const rxnp *a, const rxnp *idx, int axis);       /* axis < -1: flattened (np.take default) */
+rxnp *rxnp_where(const rxnp *c, const rxnp *a, const rxnp *b);
+rxnp *rxnp_compress(const rxnp *mask, const rxnp *a, int axis);  /* np.compress */
+rxnp *rxnp_boolean_get(const rxnp *a, const rxnp *mask);         /* a[mask] */
+int   rxnp_boolean_set(rxnp *a, const rxnp *mask, const rxnp *values);   /* a[mask] = values (size 1 or count) */
+rxnp *rxnp_unique(const rxnp *a, rxnp **counts);
+rxnp *rxnp_stack(const rxnp *a, const rxnp *b, int axis);
+rxnp *rxnp_vstack(const rxnp *a, const rxnp *b);
+rxnp *rxnp_hstack(const rxnp *a, const rxnp *b);
+rxnp *rxnp_matmul_nd(const rxnp *a, const rxnp *b);              /* np.matmul with batch broadcasting */
+rxnp *rxnp_dot_nd(const rxnp *a, const rxnp *b);                 /* np.dot for any ndim */
+rxnp *rxnp_tensordot(const rxnp *a, const rxnp *b, int naxes);   /* contract last naxes of a with first naxes of b */
 #endif
