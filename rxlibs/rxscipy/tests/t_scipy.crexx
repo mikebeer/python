@@ -1,0 +1,35 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+import rxscipy
+
+rr: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000000.0)), 1000000000.0))
+
+sc: procedure = .string
+  arg x = .float
+  return rr(rxnumpy..np_array("[" || x || "]"))
+
+main: procedure = .int
+  say "erf" sc(rxscipy..sp_erf(0.5)) sc(rxscipy..sp_erf(-2.0)) sc(rxscipy..sp_erfc(3.0)) sc(rxscipy..sp_erf(4.0))
+  say "gamma" sc(rxscipy..sp_gamma(5.0)) sc(rxscipy..sp_gamma(0.5)) sc(rxscipy..sp_lgamma(10.5))
+  say "norm" sc(rxscipy..sp_norm_pdf(0.3)) sc(rxscipy..sp_norm_cdf(1.96)) sc(rxscipy..sp_norm_ppf(0.975)) sc(rxscipy..sp_norm_ppf(0.01))
+  say "t" sc(rxscipy..sp_t_cdf(2.0, 5.0)) sc(rxscipy..sp_t_cdf(-1.0, 12.0))
+  say "betainc" sc(rxscipy..sp_betainc(2.0, 3.0, 0.4))
+  x = rxnumpy..np_linspace(0.0, 3.0, 7)
+  y = rxnumpy..np_square(x)
+  say "trapz" sc(rxscipy..sp_trapz(y, x)) sc(rxscipy..sp_trapz_unit(y))
+  say "simpson" sc(rxscipy..sp_simpson(y, x))
+  say "interp" rr(rxscipy..sp_interp(rxnumpy..np_array("[0.5, 1.25, 2.9, -1.0, 9.0]"), x, y))
+  c = rxscipy..sp_polyfit(rxnumpy..np_array("[0.0, 1.0, 2.0, 3.0, 4.0]"), rxnumpy..np_array("[1.0, 2.9, 5.2, 6.9, 9.1]"), 1)
+  say "polyfit" rr(c) rr(rxscipy..sp_polyval(c, rxnumpy..np_array("[5.0, 6.0]")))
+  a = rxnumpy..np_array("[1.0, 2.0, 3.0, 4.0, 5.0, 6.5]")
+  b = rxnumpy..np_array("[2.0, 1.5, 4.1, 3.9, 7.0, 6.0]")
+  r = 0.0
+  p = 0.0
+  call rxscipy..sp_pearsonr(a, b, r, p)
+  say "pearson" sc(r) sc(p)
+  call rxscipy..sp_ttest_ind(a, rxnumpy..np_adds(b, 1.5), r, p)
+  say "ttest" sc(r) sc(p)
+  return 0

@@ -1,0 +1,63 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+import rxpandas
+
+rr: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000000.0)), 1000000000.0))
+
+show: procedure = .int
+  arg label = .string, df = .binary
+  say label "rows" rxpandas..pd_nrows(df)
+  do c = 0 to rxpandas..pd_ncols(df) - 1
+    name = rxpandas..pd_colname(df, c)
+    if rxpandas..pd_isstr(df, name) = 1 then do
+      s = "["
+      do r = 0 to rxpandas..pd_nrows(df) - 1
+        if r > 0 then s = s || ", "
+        s = s || "'" || rxpandas..pd_gets(df, name, r) || "'"
+      end
+      say " " name s || "]"
+    end
+    else do
+      col = rxpandas..pd_col(df, name)
+      if rxnumpy..np_isint(col) = 1 then say " " name rxnumpy..np_tolist(col)
+      else say " " name rr(col)
+    end
+  end
+  return 0
+
+main: procedure = .int
+  df = rxpandas..pd_new()
+  call rxpandas..pd_add_str_col(df, "city", "a,b,a,c,b,a")
+  call rxpandas..pd_add_col(df, "sales", rxnumpy..np_array("[10.5, 20.0, 30.25, 5.0, 15.0, 7.5]"))
+  call rxpandas..pd_add_col(df, "qty", rxnumpy..np_array("[1, 2, 3, 4, 5, 6]"))
+  ignore = show("df", df)
+  ignore = show("filter", rxpandas..pd_filter(df, "sales", ">", "9"))
+  ignore = show("filterstr", rxpandas..pd_filter(df, "city", "==", "b"))
+  ignore = show("sort", rxpandas..pd_sort(df, "sales", 0))
+  ignore = show("sortcity", rxpandas..pd_sort(df, "city", 1))
+  ignore = show("sum", rxpandas..pd_groupby(df, "city", "sales", "sum"))
+  ignore = show("mean", rxpandas..pd_groupby(df, "city", "sales", "mean"))
+  ignore = show("count", rxpandas..pd_groupby(df, "city", "qty", "count"))
+  ignore = show("qtysum", rxpandas..pd_groupby(df, "city", "qty", "sum"))
+  ignore = show("std", rxpandas..pd_groupby(df, "city", "sales", "std"))
+  ignore = show("max", rxpandas..pd_groupby(df, "city", "sales", "max"))
+  rg = rxpandas..pd_new()
+  call rxpandas..pd_add_str_col(rg, "city", "a,b,d")
+  call rxpandas..pd_add_col(rg, "factor", rxnumpy..np_array("[1.5, 2.5, 9.0]"))
+  ignore = show("inner", rxpandas..pd_merge(df, rg, "city", "inner"))
+  ignore = show("left", rxpandas..pd_merge(df, rxpandas..pd_filter(rg, "city", "!=", "b"), "city", "left"))
+  ignore = show("describe", rxpandas..pd_describe(df))
+  ignore = show("head", rxpandas..pd_head(df, 2))
+  ignore = show("select", rxpandas..pd_select(df, "qty,city"))
+  call rxpandas..pd_to_csv(df, "rxpandas_t.csv")
+  ignore = show("csv", rxpandas..pd_read_csv("rxpandas_t.csv"))
+  do
+    x = rxpandas..pd_col(df, "nope")
+    say "FAIL: no signal"
+    on signal invalid_arguments as problem
+    say "signal" problem.name() problem.message()
+  end
+  return 0

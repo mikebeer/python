@@ -1,0 +1,29 @@
+options levelb floats_binary
+import rxnumpy
+import rxfnsb
+
+main: procedure = .int
+  call rxnumpy..np_rand_seed(1)
+  a = rxnumpy..np_rand("100,100")
+  b = rxnumpy..np_rand("100,100")
+  ignore = time('r')
+  do i = 1 to 20
+    c = rxnumpy..np_dot(a, b)
+  end
+  e = time('e')
+  say "matmul100 x20 sec:" e
+  v = rxnumpy..np_rand("1000000")
+  ignore = time('r')
+  do i = 1 to 20
+    tot = rxnumpy..np_sum(v)
+  end
+  e = time('e')
+  say "sum1e6 x20 sec:" e "sum" tot
+  x = rxnumpy..np_rand("1024")
+  ignore = time('r')
+  do i = 1 to 200
+    y = rxnumpy..np_fft(x)
+  end
+  e = time('e')
+  say "fft1024 x200 sec:" e
+  return 0

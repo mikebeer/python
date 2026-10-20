@@ -1,0 +1,14 @@
+/* rxscipy demo: special functions, distributions, integration, fitting */
+options levelb floats_binary
+import rxnumpy
+import rxscipy
+
+x = rxnumpy..np_linspace(0.0, 3.0, 7)
+y = rxnumpy..np_square(x)
+say "norm.cdf(1.96)   =" rxscipy..sp_norm_cdf(1.96)
+say "norm.ppf(0.975)  =" rxscipy..sp_norm_ppf(0.975)
+say "gamma(5)         =" rxscipy..sp_gamma(5.0)
+say "trapz(x^2,0..3)  =" rxscipy..sp_trapz(y, x)
+say "simpson          =" rxscipy..sp_simpson(y, x)
+c = rxscipy..sp_polyfit(rxnumpy..np_array("[0.0, 1.0, 2.0, 3.0]"), rxnumpy..np_array("[1.0, 3.1, 4.9, 7.2]"), 1)
+say "polyfit slope,icpt =" rxnumpy..np_tolist(c)

@@ -14,6 +14,13 @@ Features (both interpreters unless noted): the language incl. classes, generator
 
 Speed of the C version against CPython 3.13: fib(27) 0.06 s vs 0.05 s (fib(25): 0.02 s vs 0.03 s), 3M-iteration loop 0.53 s vs 0.95 s, list/dict work 0.23 s vs 0.27 s, native `re` and `json` about as fast as CPython's. The CREXX version is a teaching/scripting tool (fib(25) about 4.7 s). Set `CREXX_VM` to the patched virtual machine to cut its start-up from about 3 s to 0.4 s. Gaps are listed in each subdirectory README and in the manual (Chapter 12).
 
+## rxlibs: native numpy / scipy / pandas style plugins for CREXX
+
+[`rxlibs/`](rxlibs/README.md) holds three CREXX native plugins that Level B programs call directly, without the Python interpreter:
+`rxnumpy` (n-d arrays, linalg, FFT, exact legacy random streams), `rxscipy` (special functions, distributions, integration, interpolation, fits)
+and `rxpandas` (tables with CSV, filter, sort, groupby, merge, describe). The C89 numeric core is factored from `c/src/p7_*.c`;
+tests compare against CPython with numpy, scipy and pandas. Design and build: [rxlibs/docs/DESIGN.md](rxlibs/docs/DESIGN.md).
+
 ## Manual
 
 The user manual, [Python-CREXX-Guide.pdf](docs/Python-CREXX-Guide.pdf) (also as .docx), covers both interpreters: installing, the language, built-ins, standard library, NumPy, pandas, SciPy, errors, internals, measured performance, restrictions, the C/CREXX differences and porting to VM/370 (13 chapters and appendices, about 130 pages, Build 13).

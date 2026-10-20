@@ -1,0 +1,22 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+
+rr: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000000.0)), 1000000000.0))
+
+main: procedure = .int
+
+  say "fft8" rr(rxnumpy..np_fft(rxnumpy..np_array("[1.0, 2.0, 0.0, -1.0, 3.0, 0.5, 2.0, 1.0]")))
+  say "fft6" rr(rxnumpy..np_fft(rxnumpy..np_array("[1.0, 2.0, 0.0, -1.0, 3.0, 0.5]")))
+  say "ifft" rr(rxnumpy..np_ifft(rxnumpy..np_fft(rxnumpy..np_array("[1.0, 2.0, 0.5, -1.0, 3.0]"))))
+  call rxnumpy..np_rand_seed(42)
+  say "rand" rxnumpy..np_tolist(rxnumpy..np_rand("2,3"))
+  say "randn" rxnumpy..np_tolist(rxnumpy..np_randn("5"))
+  say "randint" rxnumpy..np_tolist(rxnumpy..np_randint(0, 10, "8")) rxnumpy..np_tolist(rxnumpy..np_randint(-5, 1000000, "3"))
+  say "scalar" rr(rxnumpy..np_array("[" || rxnumpy..np_random() || "," || rxnumpy..np_gauss() || "]"))
+  call rxnumpy..np_rand_seed(0)
+  say "rand0" rxnumpy..np_tolist(rxnumpy..np_rand("3"))
+
+  return 0

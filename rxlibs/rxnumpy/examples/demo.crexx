@@ -1,0 +1,13 @@
+/* rxnumpy demo: numerical arrays from CREXX Level B */
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+
+a = rxnumpy..np_array("[[1.0, 2.0], [3.0, 4.0]]")
+b = rxnumpy..np_eye(2)
+say "a        =" rxnumpy..np_tolist(a)
+say "a + 2*I  =" rxnumpy..np_tolist(rxnumpy..np_add(a, rxnumpy..np_muls(b, 2.0)))
+say "a @ a    =" rxnumpy..np_tolist(rxnumpy..np_dot(a, a))
+say "det(a)   =" rxnumpy..np_det(a)
+say "inv(a)   =" rxnumpy..np_tolist(rxnumpy..np_inv(a))
+say "sum/mean =" rxnumpy..np_sum(a) rxnumpy..np_mean(a)

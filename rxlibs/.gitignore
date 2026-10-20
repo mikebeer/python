@@ -1,0 +1,7 @@
+build/
+*.o
+*.rxplugin
+*.rxbin
+*.rxas
+*.lock
+*.so

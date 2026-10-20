@@ -1,0 +1,41 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+
+rr: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000000.0)), 1000000000.0))
+
+main: procedure = .int
+
+  a = rxnumpy..np_array("[[4.0, 1.0, 2.0], [1.0, 3.0, 0.5], [2.0, 0.5, 5.0]]")
+  b = rxnumpy..np_array("[1.0, 2.0, 3.0]")
+  say "solve" rr(rxnumpy..np_solve(a, b))
+  say "inv" rr(rxnumpy..np_inv(a))
+  say "det" rr(rxnumpy..np_array("[" || rxnumpy..np_det(a) || "]"))
+  say "chol" rr(rxnumpy..np_cholesky(a))
+  q = .binary
+  r = .binary
+  call rxnumpy..np_qr(a, q, r)
+  say "qr" rr(q) rr(r)
+  w = .binary
+  v = .binary
+  call rxnumpy..np_eigh(a, w, v)
+  say "eigh" rr(w) rr(v)
+  c = rxnumpy..np_array("[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]")
+  u = .binary
+  s = .binary
+  vt = .binary
+  call rxnumpy..np_svd(c, u, s, vt)
+  say "svd" rr(u) rr(s) rr(vt)
+  say "eigvals" rr(rxnumpy..np_eigvals(rxnumpy..np_array("[[0.0, 1.0], [-2.0, -3.0]]")))
+  say "eigvalsc" rr(rxnumpy..np_eigvals(rxnumpy..np_array("[[0.0, -1.0], [1.0, 0.0]]")))
+  say "norm" rr(rxnumpy..np_array("[" || rxnumpy..np_norm(a) || "," || rxnumpy..np_trace(a) || "]"))
+  do
+    z = rxnumpy..np_inv(rxnumpy..np_array("[[1.0, 2.0], [2.0, 4.0]]"))
+    say "FAIL: no signal"
+    on signal invalid_arguments as problem
+    say "signal" problem.name() problem.message()
+  end
+
+  return 0

@@ -1,0 +1,60 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+
+rr: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000000.0)), 1000000000.0))
+
+main: procedure = .int
+
+  a = rxnumpy..np_array("[[1, 2, 3], [4, 5, 6]]")
+  f = rxnumpy..np_array("[[0.5, 1.5, 2.5], [3.5, 4.5, 5.5]]")
+  say "list" rxnumpy..np_tolist(a)
+  say "shape" rxnumpy..np_shape(a) rxnumpy..np_ndim(a) rxnumpy..np_size(a) rxnumpy..np_isint(a)
+  say "add" rxnumpy..np_tolist(rxnumpy..np_add(a, a))
+  say "mulf" rr(rxnumpy..np_mul(a, f))
+  say "div" rr(rxnumpy..np_div(a, f))
+  say "bcast" rxnumpy..np_tolist(rxnumpy..np_add(a, rxnumpy..np_array("[10, 20, 30]")))
+  say "bcastcol" rxnumpy..np_tolist(rxnumpy..np_add(a, rxnumpy..np_array("[[100], [200]]")))
+  say "pow" rxnumpy..np_tolist(rxnumpy..np_pow(a, rxnumpy..np_array("2")))
+  say "floordiv" rxnumpy..np_tolist(rxnumpy..np_floordiv(rxnumpy..np_array("[-7, 7, 8]"), rxnumpy..np_array("2")))
+  say "mod" rxnumpy..np_tolist(rxnumpy..np_mod(rxnumpy..np_array("[-7, 7, 8]"), rxnumpy..np_array("3")))
+  say "sum" rxnumpy..np_sumi(a) rxnumpy..np_sum(f) rxnumpy..np_mean(f) rxnumpy..np_min(a) rxnumpy..np_max(f)
+  say "std" rr(rxnumpy..np_array("[" || rxnumpy..np_std(f) || "]")) rr(rxnumpy..np_array("[" || rxnumpy..np_var_ddof(f, 1) || "]"))
+  say "sum0" rxnumpy..np_tolist(rxnumpy..np_sum_axis(a, 0))
+  say "sum1" rxnumpy..np_tolist(rxnumpy..np_sum_axis(a, 1))
+  say "mean1" rr(rxnumpy..np_mean_axis(f, 1))
+  say "argmax" rxnumpy..np_argmax(a) rxnumpy..np_tolist(rxnumpy..np_argmax_axis(a, 1))
+  say "cumsum" rxnumpy..np_tolist(rxnumpy..np_cumsum(a)) rxnumpy..np_tolist(rxnumpy..np_cumsum_axis(a, 0))
+  say "median" rxnumpy..np_median(rxnumpy..np_array("[5, 1, 4, 2]"))
+  say "T" rxnumpy..np_tolist(rxnumpy..np_transpose(a))
+  say "reshape" rxnumpy..np_tolist(rxnumpy..np_reshape(a, "3,-1"))
+  say "flatten" rxnumpy..np_tolist(rxnumpy..np_flatten(a))
+  say "arange" rxnumpy..np_tolist(rxnumpy..np_arange(0, 10, 3)) rxnumpy..np_tolist(rxnumpy..np_arangef(0.0, 1.0, 0.25))
+  say "linspace" rxnumpy..np_tolist(rxnumpy..np_linspace(0.0, 1.0, 5))
+  say "zeros" rxnumpy..np_tolist(rxnumpy..np_zeros("2,2")) rxnumpy..np_tolist(rxnumpy..np_ones("3"))
+  say "slice" rxnumpy..np_tolist(rxnumpy..np_slice(a, 1, 0, 3, 2)) rxnumpy..np_tolist(rxnumpy..np_slice(a, 1, -1, -4, -1))
+  say "concat" rxnumpy..np_tolist(rxnumpy..np_concat(a, a, 0))
+  say "sort" rxnumpy..np_tolist(rxnumpy..np_sort(rxnumpy..np_array("[[3, 1, 2], [9, 7, 8]]"))) rxnumpy..np_tolist(rxnumpy..np_argsort(rxnumpy..np_array("[3.5, 1.5, 2.5]")))
+  say "dot" rxnumpy..np_tolist(rxnumpy..np_dot(a, rxnumpy..np_transpose(a))) rxnumpy..np_tolist(rxnumpy..np_dot(f, rxnumpy..np_array("[1.0, 2.0, 3.0]")))
+  say "unary" rr(rxnumpy..np_exp(rxnumpy..np_array("[0.0, 1.0, -1.0]"))) rr(rxnumpy..np_sqrt(rxnumpy..np_array("[4.0, 2.0]"))) rxnumpy..np_tolist(rxnumpy..np_abs(rxnumpy..np_array("[-3, 4]")))
+  say "outer" rxnumpy..np_tolist(rxnumpy..np_outer(rxnumpy..np_array("[1, 2]"), rxnumpy..np_array("[3, 4, 5]")))
+  g = rxnumpy..np_zeros("2,2")
+  call rxnumpy..np_set2(g, 1, 0, 7.5)
+  call rxnumpy..np_set(g, 1, 2.5)
+  say "setget" rxnumpy..np_tolist(g) rxnumpy..np_get2(g, 1, 0) rxnumpy..np_get(g, -1)
+  h = g
+  call rxnumpy..np_set(h, 0, 9.0)
+  say "shared" rxnumpy..np_get(g, 0)
+  k = rxnumpy..np_copy(g)
+  call rxnumpy..np_set(k, 0, 1.0)
+  say "copy" rxnumpy..np_get(g, 0) rxnumpy..np_get(k, 0)
+  do
+    x = rxnumpy..np_add(a, rxnumpy..np_array("[1, 2]"))
+    say "FAIL: no signal"
+    on signal invalid_arguments as problem
+    say "signal" problem.name()
+  end
+
+  return 0

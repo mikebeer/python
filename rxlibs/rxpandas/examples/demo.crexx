@@ -1,0 +1,15 @@
+/* rxpandas demo: build a table, filter, group, merge, print */
+options levelb floats_binary
+import rxnumpy
+import rxpandas
+
+df = rxpandas..pd_new()
+call rxpandas..pd_add_str_col(df, "city", "Zurich,Basel,Zurich,Bern")
+call rxpandas..pd_add_col(df, "sales", rxnumpy..np_array("[10.5, 20.0, 30.25, 5.0]"))
+say rxpandas..pd_to_string(df, 10)
+say "sales > 9:"
+say rxpandas..pd_to_string(rxpandas..pd_filter(df, "sales", ">", "9"), 10)
+say "sum by city:"
+say rxpandas..pd_to_string(rxpandas..pd_groupby(df, "city", "sales", "sum"), 10)
+say "describe:"
+say rxpandas..pd_to_string(rxpandas..pd_describe(df), 10)
