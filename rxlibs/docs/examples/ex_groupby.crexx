@@ -1,0 +1,25 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+import rxpandas
+
+main: procedure = .int
+  nl = "0A"x
+  csv = "region,product,units,price" || nl || "north,apple,10,1.5" || nl || "south,apple,4,1.6" || nl || "north,pear,7,2.0" || nl,
+     || "east,pear,12,1.9" || nl || "south,plum,3,3.1" || nl || "north,apple,5,1.4" || nl || "east,apple,8,1.5"
+  df = rxpandas..pd_parse_csv(csv)
+  say rxpandas..pd_to_string(df, 20)
+  /* revenue column = units * price */
+  call rxpandas..pd_add_col(df, "revenue", rxnumpy..np_mul(rxpandas..pd_col(df, "units"), rxpandas..pd_col(df, "price")))
+  say "revenue by region:"
+  say rxpandas..pd_to_string(rxpandas..pd_groupby(df, "region", "revenue", "sum"), 20)
+  say "mean units by region and product:"
+  say rxpandas..pd_to_string(rxpandas..pd_groupby_multi(df, "region,product", "units", "mean"), 20)
+  say "pivot (revenue):"
+  say rxpandas..pd_to_string(rxpandas..pd_pivot(df, "region", "product", "revenue", "sum"), 20)
+  say "value counts of product:"
+  say rxpandas..pd_to_string(rxpandas..pd_value_counts(df, "product"), 20)
+  names = rxpandas..pd_parse_csv("region,manager" || nl || "north,Ines" || nl || "south,Paul" || nl || "west,Kim")
+  say "merge (left):"
+  say rxpandas..pd_to_string(rxpandas..pd_select(rxpandas..pd_merge(rxpandas..pd_groupby(df, "region", "revenue", "sum"), names, "region", "left"), "region,revenue,manager"), 20)
+  return 0

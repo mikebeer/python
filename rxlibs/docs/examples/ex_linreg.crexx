@@ -1,0 +1,31 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+import rxscipy
+
+r6: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000.0)), 1000000.0))
+
+main: procedure = .int
+  /* data: y = 2.5 + 0.8 x + noise, noise from numpy's default_rng(1) */
+  rng = rxnumpy..np_default_rng(1)
+  x = rxnumpy..np_arangef(0.0, 10.0, 1.0)
+  noise = rxnumpy..np_rng_normal(rng, 0.0, 0.3, "10")
+  y = rxnumpy..np_add(rxnumpy..np_adds(rxnumpy..np_muls(x, 0.8), 2.5), noise)
+  /* 1. normal equations (X'X) beta = X'y with the design matrix [1, x] */
+  design = rxnumpy..np_transpose(rxnumpy..np_vstack(rxnumpy..np_ones("10"), x))
+  xt = rxnumpy..np_transpose(design)
+  beta = rxnumpy..np_solve(rxnumpy..np_dot(xt, design), rxnumpy..np_dot(xt, y))
+  say "normal equations [intercept, slope]:" r6(beta)
+  /* 2. polyfit, highest power first */
+  say "polyfit          [slope, intercept]:" r6(rxscipy..sp_polyfit(x, y, 1))
+  /* 3. linregress: slope, intercept, r, p, stderr, intercept_stderr */
+  say "linregress:" r6(rxscipy..sp_linregress(x, y))
+  /* residual standard deviation and R squared */
+  fit = rxnumpy..np_adds(rxnumpy..np_muls(x, rxnumpy..np_get(beta, 1)), rxnumpy..np_get(beta, 0))
+  res = rxnumpy..np_sub(y, fit)
+  ss_res = rxnumpy..np_sum(rxnumpy..np_square(res))
+  ss_tot = rxnumpy..np_sum(rxnumpy..np_square(rxnumpy..np_subs(y, rxnumpy..np_mean(y))))
+  say "R squared:" r6(rxnumpy..np_scalar(1.0 - ss_res / ss_tot))
+  return 0

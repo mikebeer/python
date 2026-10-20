@@ -1,0 +1,26 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+import rxpandas
+
+main: procedure = .int
+  do
+    z = rxnumpy..np_inv(rxnumpy..np_array("[[1.0, 2.0], [2.0, 4.0]]"))
+    say "not reached"
+    on signal invalid_arguments as problem
+    say "caught" problem.name() ":" problem.message()
+  end
+  do
+    z = rxnumpy..np_get(rxnumpy..np_array("[1.0, 2.0]"), 5)
+    say "not reached"
+    on signal out_of_range as problem
+    say "caught" problem.name() ":" problem.message()
+  end
+  do
+    df = rxpandas..pd_parse_csv("a,b" || "0A"x || "1,2")
+    z = rxpandas..pd_col(df, "nosuch")
+    say "not reached"
+    on signal invalid_arguments as problem
+    say "caught" problem.name() ":" problem.message()
+  end
+  return 0

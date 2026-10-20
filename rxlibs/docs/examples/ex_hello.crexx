@@ -1,0 +1,16 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+
+main: procedure = .int
+  a = rxnumpy..np_array("[[1.0, 2.0], [3.0, 4.0]]")
+  say "a @ a  =" rxnumpy..np_tolist(rxnumpy..np_dot(a, a))
+  say "det(a) =" rxnumpy..np_det(a)
+  /* handles share their data */
+  g = a
+  call rxnumpy..np_set(g, 0, 9.0)
+  say "after np_set on the copy g:" rxnumpy..np_tolist(a)
+  k = rxnumpy..np_copy(a)
+  call rxnumpy..np_set(k, 0, 1.0)
+  say "np_copy is independent:    " rxnumpy..np_tolist(a) rxnumpy..np_tolist(k)
+  return 0

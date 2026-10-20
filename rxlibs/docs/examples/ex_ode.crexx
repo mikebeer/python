@@ -1,0 +1,37 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+import rxscipy
+import rxspalg
+
+/* y0' = -0.5 y0,  y1' = y0 - y1 : a chain of two first order reactions */
+chain: class implements .sp_ode
+  *: factory
+    return
+  rhs: method = .binary
+  arg t = .float, y = .binary
+  y0 = rxnumpy..np_get(y, 0)
+  y1 = rxnumpy..np_get(y, 1)
+  return rxnumpy..np_array("[" || (0.0 - 0.5 * y0) || "," || (y0 - y1) || "]")
+
+r6: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000.0)), 1000000.0))
+
+main: procedure = .int
+  y0 = rxnumpy..np_array("[1.0, 0.0]")
+  want = rxnumpy..np_array("[0.0, 1.0, 2.0, 4.0]")
+  tout = rxnumpy..np_zeros("1")
+  nfev = 0
+  ys = rxspalg..sp_solve_ivp(.chain(), 0.0, 4.0, y0, want, 0.0000000001, 0.000000000001, tout, nfev)
+  say "t       " r6(tout)
+  say "y0      " r6(rxnumpy..np_slice(ys, 0, 0, 1, 1))
+  say "y1      " r6(rxnumpy..np_slice(ys, 0, 1, 2, 1))
+  /* exact: y0 = exp(-t/2), y1 = 2 (exp(-t/2) - exp(-t)) */
+  exact0 = rxnumpy..np_exp(rxnumpy..np_muls(want, -0.5))
+  exact1 = rxnumpy..np_muls(rxnumpy..np_sub(exact0, rxnumpy..np_exp(rxnumpy..np_neg(want))), 2.0)
+  say "exact y1" r6(exact1)
+  /* default time points: the step sequence chosen by the integrator (identical to scipy's RK45) */
+  ys = rxspalg..sp_solve_ivp(.chain(), 0.0, 4.0, y0, rxnumpy..np_zeros("0"), 0.001, 0.000001, tout, nfev)
+  say "steps:" rxnumpy..np_size(tout) "function evaluations:" nfev
+  return 0

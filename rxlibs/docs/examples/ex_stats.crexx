@@ -1,0 +1,33 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+import rxscipy
+
+r6: procedure = .string
+  arg x = .float
+  return rxnumpy..np_tolist(rxnumpy..np_scalar(rxnumpy..np_get(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(rxnumpy..np_scalar(x), 1000000.0)), 1000000.0), 0)))
+
+main: procedure = .int
+  a = rxnumpy..np_array("[5.1, 4.9, 6.2, 5.8, 6.0, 5.5, 5.3, 6.1]")
+  b = rxnumpy..np_array("[6.3, 6.8, 5.9, 7.1, 6.6, 6.9, 7.4, 6.2]")
+  t = 0.0
+  p = 0.0
+  df = 0.0
+  call rxscipy..sp_ttest_1samp(a, 5.0, t, p)
+  say "one sample t test vs 5.0:  t =" r6(t) " p =" r6(p)
+  call rxscipy..sp_ttest_ind(a, b, t, p)
+  say "two sample t test:         t =" r6(t) " p =" r6(p)
+  call rxscipy..sp_ttest_welch(a, b, t, p, df)
+  say "Welch t test:              t =" r6(t) " p =" r6(p) " df =" r6(df)
+  /* chi-square test of independence for a 2 x 3 table */
+  tab = rxnumpy..np_array("[[20, 15, 30], [10, 25, 20]]")
+  chi = 0.0
+  dof = 0
+  expected = rxnumpy..np_zeros("1")
+  call rxscipy..sp_chi2_contingency(tab, 1, chi, p, dof, expected)
+  say "chi2 =" r6(chi) " p =" r6(p) " dof =" dof
+  /* critical values and tail probabilities */
+  say "t quantile (df 7, 0.975):" r6(rxscipy..sp_ppf("t", 0.975, 7.0, 0.0, 0.0, 1.0))
+  say "P(chi2(4) > 9.49):       " r6(rxscipy..sp_sf("chi2", 9.49, 4.0, 0.0, 0.0, 1.0))
+  say "binomial(20, 0.3) P(X <= 8):" r6(rxscipy..sp_cdf("binom", 8.0, 20.0, 0.3, 0.0, 1.0))
+  return 0

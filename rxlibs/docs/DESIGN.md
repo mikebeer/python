@@ -5,7 +5,7 @@ Three native plugin libraries callable directly from CREXX Level B programs (no 
 | plugin | namespace | content |
 |---|---|---|
 | `rxnumpy`  | `rxnumpy..np_*` | dense float64/int64 n-d arrays, broadcasting, reductions, sort, dot/matmul (n-d), slicing, fancy/boolean indexing, linalg, FFT, legacy MT19937 and `default_rng` (SeedSequence + PCG64, ziggurat) |
-| `rxscipy`  | `rxscipy..sp_*` | special functions, normal/t distributions, trapz/simpson, interp, cubic spline, polyfit/polyval, pearsonr, ttest_ind, scalar math helpers |
+| `rxscipy`  | `rxscipy..sp_*` | special functions (gamma, erf, erfinv, betainc, gammainc), 12 distributions (pdf/pmf, cdf, sf, ppf, mean, var, rvs on the legacy MT19937 stream), describe/skew/kurtosis/zscore/percentile/correlate, t tests, chi2_contingency, pearsonr, spearmanr, linregress, trapz/simpson, interp, cubic spline, polyfit/polyval, scalar math helpers |
 | `rxspalg`  | `rxspalg..sp_*` | Level B module (source in `rxscipy/lib`) with callback algorithms: brentq, newton, quad, minimize (NM, BFGS), solve_ivp (RK45), curve_fit (LM) |
 | `rxpandas` | `rxpandas..pd_*` | column table: CSV, filter, sort (multi-key), groupby (multi-key), merge inner/left/right/outer, value_counts, pivot, index, ISO datetime, describe |
 
@@ -17,7 +17,7 @@ Three native plugin libraries callable directly from CREXX Level B programs (no 
       rxnp_fft.c       radix-2 + Bluestein FFT rxnp_rng.c        MT19937 legacy stream (np.random.seed/rand/randn/randint exact)
       rxnp_pcg.c       SeedSequence + PCG64 + Generator (tables rxnp_zig.inc from python/c/src/p7_rnd.c, 64-bit unsigned long required)
       rxnp_idx.c       comparison, take/where/compress/boolean get+set, unique, stack, n-d matmul/dot/tensordot
-      rxsp.[ch]        scipy-style numerics    rxdf.[ch]         table
+      rxsp.[ch] rxsp_dist.c  scipy-style numerics (special functions, distributions, statistics in rxsp_dist.c)    rxdf.[ch]         table
       rxlibs_handle.h  opaque handle glue shared by the plugins (needs crexxpa.h)
     rxnumpy/ rxscipy/ rxpandas/   plugin/<name>.c (rxpa wrapper), examples/, tests/ (+ bench/)
     scripts/         build.sh  run.sh  runtests.sh  gen_api.py
@@ -120,12 +120,13 @@ Generator: seeds are non-negative ints (up to 64 bit) or int64 arrays (`np_defau
 Masks are int64 0/1 arrays produced by `np_cmp`/`np_cmps` (`> < >= <= == !=`); `np_boolean_get/set`, `np_compress`, `np_take` (axis or flat), `np_where` with broadcasting.
 rxpandas index: default RangeIndex (labels are positions; filter/sort/head keep the original positions as labels) or a labelled index from `pd_set_index`
 (`pd_loc`, `pd_index_label`, `pd_reset_index`); datetimes are epoch seconds (float) in a numeric column (`pd_to_datetime`, `pd_dt_part` year/month/day/hour/minute/second/dow/doy; Monday = 0).
+`sp_rvs` reproduces `np.random.seed(s); dist.rvs(size=n)` bit for bit except binom with n*min(p,1-p) > 30 and poisson with mu >= 10 (inversion instead of BTPE/PTRS); rxscipy keeps its own legacy stream (`sp_seed`), separate from `np_rand_seed`.
 Not yet: complex dtype, int `axis` tuples, `Generator` distributions beyond normal/exponential/uniform, QUADPACK qagi/qags extrapolation, bounded/constrained optimisers,
 stiff ODE solvers, categorical and string ops in rxpandas, timezone / non-ISO datetime parsing, `sp_interp1d` kinds other than linear (`sp_interp`) and cubic (`sp_cubic_spline`).
 
 ## Roadmap
 
-1. Callback-free scipy: more distributions (chi2, gamma, beta, binom, poisson), `stats.describe`, `linregress`, `lstsq`, cubic spline, FFT helpers.
+1. Callback-free scipy: done - distributions, `describe`, `linregress`, tests, cubic spline (see README). Remaining: `lstsq`, FFT helpers, BTPE/PTRS for bit-exact large-parameter binom/poisson `rvs`.
 2. Bounded optimisers (L-BFGS-B), qagi, implicit ODE solvers, more Level B wrappers in `rxspalg`.
 3. rxpandas: named aggregations, string column ops, `to_json`, `apply` via a Level B callbacks module.
 4. Python-on-CREXX (`python/crexx`): optionally route `numpy`/`scipy`/`pandas` imports to these plugins (object wrapper over handles) so existing pure-Python pandas/scipy code in `pylib` runs on native kernels.

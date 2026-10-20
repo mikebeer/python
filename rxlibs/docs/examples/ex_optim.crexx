@@ -1,0 +1,55 @@
+options levelb floats_binary
+import rxfnsb
+import rxnumpy
+import rxscipy
+import rxspalg
+
+ross: class implements .sp_fn
+  *: factory
+    return
+  f: method = .float
+  arg x = .binary
+  a = rxnumpy..np_get(x, 0)
+  b = rxnumpy..np_get(x, 1)
+  return (1.0 - a) * (1.0 - a) + 100.0 * (b - a * a) * (b - a * a)
+
+/* model p0 * exp(-p1 x) + p2 */
+expm: class implements .sp_model
+  *: factory
+    return
+  f: method = .float
+  arg x = .float, p = .binary
+  return rxnumpy..np_get(p, 0) * rxscipy..sp_exp(0.0 - rxnumpy..np_get(p, 1) * x) + rxnumpy..np_get(p, 2)
+
+cosm: class implements .sp_f1
+  *: factory
+    return
+  f: method = .float
+  arg x = .float
+  return rxscipy..sp_cos(x) - x
+
+r6: procedure = .string
+  arg x = .binary
+  return rxnumpy..np_tolist(rxnumpy..np_divs(rxnumpy..np_round(rxnumpy..np_muls(x, 1000000.0)), 1000000.0))
+
+main: procedure = .int
+  /* root finding: cos(x) = x */
+  say "brentq:" rxspalg..sp_brentq(.cosm(), 0.0, 1.0, 0.000000000001, 0.000000000000001, 100)
+  /* minimisation of the Rosenbrock function from (-1.2, 1) */
+  x0 = rxnumpy..np_array("[-1.2, 1.0]")
+  fval = 0.0
+  nfev = 0
+  nit = 0
+  xm = rxspalg..sp_minimize_nm(.ross(), x0, 0.00000001, 0.00000001, 0, fval, nfev)
+  say "Nelder-Mead:" r6(xm) "f =" r6(rxnumpy..np_scalar(fval))
+  xb = rxspalg..sp_minimize_bfgs(.ross(), x0, 0.00000001, 0, fval, nit)
+  say "BFGS:       " r6(xb) "f =" r6(rxnumpy..np_scalar(fval))
+  /* curve fit of an exponential decay with offset */
+  xd = rxnumpy..np_array("[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]")
+  yd = rxnumpy..np_array("[5.2, 3.9, 3.0, 2.5, 2.1, 1.9, 1.6, 1.55, 1.4]")
+  pcov = rxnumpy..np_zeros("1")
+  cost = 0.0
+  p = rxspalg..sp_curve_fit(.expm(), xd, yd, rxnumpy..np_array("[4.0, 1.0, 1.0]"), 0, pcov, cost)
+  say "curve_fit p:" r6(p)
+  say "std errors: " r6(rxnumpy..np_sqrt(rxnumpy..np_array("[" || rxnumpy..np_get2(pcov, 0, 0) || "," || rxnumpy..np_get2(pcov, 1, 1) || "," || rxnumpy..np_get2(pcov, 2, 2) || "]")))
+  return 0
