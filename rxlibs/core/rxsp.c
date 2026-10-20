@@ -7,52 +7,11 @@
 static char sperr[160];
 const char *rxsp_error(void) { return sperr; }
 static int sfail(const char *m) { strncpy(sperr, m, sizeof sperr - 1); return 0; }
+int rxsp_fail(const char *m) { return sfail(m); }
 static double nanq(void) { volatile double z = 0.0; return z / z; }
 #define PI 3.14159265358979323846
 
-double rxsp_lgamma(double x)
-{
-    static const double c[9] = { 0.99999999999980993, 676.5203681218851, -1259.1392167224028,
-        771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012,
-        9.9843695780195716e-6, 1.5056327351493116e-7 };
-    double a, t; int i;
-    if (x < 0.5) return log(PI / fabs(sin(PI * x))) - rxsp_lgamma(1.0 - x);
-    x -= 1.0; a = c[0]; t = x + 7.5;
-    for (i = 1; i < 9; i++) a += c[i] / (x + (double)i);
-    return 0.91893853320467274178 + (x + 0.5) * log(t) - t + log(a);
-}
-double rxsp_gamma(double x)
-{
-    if (x == floor(x) && x > 0 && x < 171) { double r = 1.0; int i; for (i = 2; i < (int)x; i++) r *= i; return r; }
-    if (x < 0.5) return PI / (sin(PI * x) * rxsp_gamma(1.0 - x));
-    return exp(rxsp_lgamma(x));
-}
-/* erf/erfc: series for small |x|, continued fraction for large */
-double rxsp_erfc(double x)
-{
-    double ax = fabs(x), r;
-    if (ax < 2.5) r = 1.0 - rxsp_erf(ax);
-    else {
-        /* Lentz continued fraction for erfc */
-        double f = 0.0; int k;
-        for (k = 60; k >= 1; k--) f = (double)k / 2.0 / (ax + f);
-        r = exp(-ax * ax) / sqrt(PI) / (ax + f);
-    }
-    return x >= 0 ? r : 2.0 - r;
-}
-double rxsp_erf(double x)
-{
-    double ax = fabs(x), sum, term; int n;
-    if (ax >= 2.5) { double r = 1.0 - rxsp_erfc(ax); return x < 0 ? -r : r; }
-    sum = ax; term = ax;
-    for (n = 1; n < 200; n++) {
-        term *= -ax * ax / (double)n;
-        sum += term / (2.0 * n + 1.0);
-        if (fabs(term) < 1e-17 * fabs(sum)) break;
-    }
-    sum *= 2.0 / sqrt(PI);
-    return x < 0 ? -sum : sum;
-}
+/* lgamma, gamma, erf, erfc, gammainc, erfinv: see rxsp_dist.c */
 double rxsp_norm_pdf(double x) { return exp(-0.5 * x * x) / sqrt(2.0 * PI); }
 double rxsp_norm_cdf(double x) { return 0.5 * rxsp_erfc(-x / sqrt(2.0)); }
 double rxsp_norm_ppf(double p)
@@ -68,6 +27,7 @@ double rxsp_norm_ppf(double p)
     double x, q, r, e, u; int i;
     if (p <= 0.0) return p == 0.0 ? -HUGE_VAL : nanq();
     if (p >= 1.0) return p == 1.0 ? HUGE_VAL : nanq();
+    if (p > 0.5) return -rxsp_norm_ppf(1.0 - p);        /* 1-p is exact for p in (0.5,1): keeps the upper tail accurate */
     if (p < 0.02425) { q = sqrt(-2.0 * log(p)); x = (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0); }
     else if (p > 1.0 - 0.02425) { q = sqrt(-2.0 * log(1.0 - p)); x = -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0); }
     else { q = p - 0.5; r = q * q; x = (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q / (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1.0); }
@@ -82,7 +42,7 @@ static double betacf(double a, double b, double x)
     double qab = a + b, qap = a + 1.0, qam = a - 1.0, c = 1.0, d = 1.0 - qab * x / qap, h, aa, del; int m;
     if (fabs(d) < 1e-300) d = 1e-300;
     d = 1.0 / d; h = d;
-    for (m = 1; m <= 500; m++) {
+    for (m = 1; m <= 20000; m++) {
         int m2 = 2 * m;
         aa = m * (b - m) * x / ((qam + m2) * (a + m2));
         d = 1.0 + aa * d; if (fabs(d) < 1e-300) d = 1e-300;
@@ -188,7 +148,7 @@ int rxsp_pearsonr(const rxnp *x, const rxnp *y, double *r, double *p)
     if (*r > 1.0) *r = 1.0;
     if (*r < -1.0) *r = -1.0;
     if (fabs(*r) >= 1.0) *p = 0.0;
-    else { t = *r * sqrt((n - 2.0) / (1.0 - *r * *r)); *p = 2.0 * (1.0 - rxsp_t_cdf(fabs(t), n - 2.0)); }
+    else { t = *r * sqrt((n - 2.0) / (1.0 - *r * *r)); *p = 2.0 * rxsp_t_sf(fabs(t), n - 2.0); }
     return 1;
 }
 int rxsp_ttest_ind(const rxnp *a, const rxnp *b, double *t, double *p)
@@ -202,7 +162,7 @@ int rxsp_ttest_ind(const rxnp *a, const rxnp *b, double *t, double *p)
     df = n1 + n2 - 2.0;
     sp = (v1 + v2) / df;
     *t = (m1 - m2) / sqrt(sp * (1.0 / n1 + 1.0 / n2));
-    *p = 2.0 * (1.0 - rxsp_t_cdf(fabs(*t), df));
+    *p = 2.0 * rxsp_t_sf(fabs(*t), df);
     return 1;
 }
 

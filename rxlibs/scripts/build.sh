@@ -15,7 +15,7 @@ NPCORE="$C/rxnp.c $C/rxnp_la.c $C/rxnp_lapack.c $C/rxnp_fft.c $C/rxnp_rng.c $C/r
 for p in "$@"; do
   case $p in
     rxnumpy)  SRC="$HERE/rxnumpy/plugin/rxnumpy.c $NPCORE" ;;
-    rxscipy)  SRC="$HERE/rxscipy/plugin/rxscipy.c $C/rxsp.c $NPCORE" ;;
+    rxscipy)  SRC="$HERE/rxscipy/plugin/rxscipy.c $C/rxsp.c $C/rxsp_dist.c $NPCORE" ;;
     rxpandas) SRC="$HERE/rxpandas/plugin/rxpandas.c $C/rxdf.c $NPCORE" ;;
     *) echo "unknown plugin $p"; exit 1 ;;
   esac
